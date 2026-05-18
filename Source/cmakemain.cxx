@@ -7,6 +7,7 @@
 #include <cassert>
 #include <climits>
 #include <cstring>
+#include <fstream>
 #include <functional>
 #include <iostream>
 #include <sstream>
@@ -695,10 +696,13 @@ int do_reprobuild_launch(int ac, char const* const* av)
 
   std::string const buildDir = cmSystemTools::ToNormalizedPathOnDisk(av[2]);
   std::string action = "build";
+  std::vector<std::string> targets;
   for (int i = 3; i < ac; ++i) {
     std::string const arg = av[i];
     if (cmHasLiteralPrefix(arg, "--action=")) {
       action = arg.substr(9);
+    } else if (cmHasLiteralPrefix(arg, "--target=")) {
+      targets.push_back(arg.substr(9));
     }
   }
 
@@ -710,11 +714,103 @@ int do_reprobuild_launch(int ac, char const* const* av)
     return 1;
   }
 
-  std::cerr << "Reprobuild launcher reached for build tree: " << buildDir
-            << "\n";
-  std::cerr << "Reprobuild generator M1 does not support action '" << action
-            << "' yet; unsupported-action=" << action << "\n";
-  return 1;
+  if (action != "build") {
+    std::cerr << "Reprobuild generator does not support action '" << action
+              << "' yet; unsupported-action=" << action << "\n";
+    return 1;
+  }
+
+  auto metadataValue = [metadataFile](std::string const& key) -> std::string {
+    std::ifstream fin(metadataFile.c_str());
+    std::string line;
+    std::string const prefix = key + "=";
+    while (std::getline(fin, line)) {
+      if (line.rfind(prefix, 0) == 0) {
+        return line.substr(prefix.size());
+      }
+    }
+    return std::string();
+  };
+
+  std::string const wrapperPath = metadataValue("wrapper_path");
+  if (wrapperPath.empty()) {
+    std::cerr << "Reprobuild launcher metadata is missing wrapper_path in "
+              << metadataFile << "\n";
+    return 1;
+  }
+
+  std::string repro;
+  if (cm::optional<std::string> envRepro =
+        cmSystemTools::GetEnvVar("REPROBUILD_REPRO")) {
+    repro = *envRepro;
+  } else if (cmSystemTools::FileExists(
+               "/Users/zahary/metacraft/reprobuild/build/bin/repro")) {
+    repro = "/Users/zahary/metacraft/reprobuild/build/bin/repro";
+  } else {
+    repro = "repro";
+  }
+
+  std::string reprobuildSourceRoot;
+  if (cm::optional<std::string> envRoot =
+        cmSystemTools::GetEnvVar("REPROBUILD_SOURCE_ROOT")) {
+    reprobuildSourceRoot = *envRoot;
+  } else if (cmSystemTools::FileIsDirectory(
+               "/Users/zahary/metacraft/reprobuild/libs/"
+               "repro_project_dsl/src")) {
+    reprobuildSourceRoot = "/Users/zahary/metacraft/reprobuild";
+  }
+
+  std::vector<std::string> env = cmSystemTools::GetEnvironmentVariables();
+  auto setEnv = [&env](std::string const& key, std::string const& value) {
+    std::string const prefix = key + "=";
+    for (std::string& entry : env) {
+      if (entry.rfind(prefix, 0) == 0) {
+        entry = prefix + value;
+        return;
+      }
+    }
+    env.push_back(prefix + value);
+  };
+
+  std::string oldPath;
+  if (cm::optional<std::string> envPath = cmSystemTools::GetEnvVar("PATH")) {
+    oldPath = *envPath;
+  }
+#ifdef _WIN32
+  setEnv("PATH", cmStrCat(wrapperPath, ";", oldPath));
+#else
+  setEnv("PATH", cmStrCat(wrapperPath, ":", oldPath));
+#endif
+  if (!reprobuildSourceRoot.empty()) {
+    setEnv("REPROBUILD_SOURCE_ROOT", reprobuildSourceRoot);
+  }
+
+  std::vector<std::string> selectedTargets;
+  if (targets.empty()) {
+    selectedTargets.push_back("");
+  } else {
+    selectedTargets = targets;
+  }
+
+  for (std::string const& target : selectedTargets) {
+    std::vector<std::string> command = {
+      repro, "build", "--tool-provisioning=path",
+      cmStrCat("--work-root=", providerDir)
+    };
+    if (!target.empty()) {
+      command.insert(command.begin() + 2, cmStrCat(buildDir, "#", target));
+    }
+
+    int ret = 0;
+    bool ok = cmSystemTools::RunSingleCommand(
+      command, nullptr, nullptr, &ret, buildDir.c_str(),
+      cmSystemTools::OUTPUT_PASSTHROUGH, cmDuration::zero(),
+      cmProcessOutput::Auto, env);
+    if (!ok || ret != 0) {
+      return ret == 0 ? 1 : ret;
+    }
+  }
+  return 0;
 }
 
 bool parse_default_directory_permissions(std::string const& permissions,

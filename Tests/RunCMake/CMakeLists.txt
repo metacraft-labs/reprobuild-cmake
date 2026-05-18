@@ -226,6 +226,11 @@ endif()
 
 set(_ReprobuildGeneratorTestDir "${CMAKE_CURRENT_SOURCE_DIR}/ReprobuildGenerator")
 set(_ReprobuildGeneratorTestBin "${CMAKE_CURRENT_BINARY_DIR}/ReprobuildGenerator")
+get_filename_component(_ReprobuildGeneratorWorkspace "${CMAKE_SOURCE_DIR}/.." ABSOLUTE)
+set(_ReprobuildSourceRoot "${_ReprobuildGeneratorWorkspace}/reprobuild")
+set(_RunQuotaSourceRoot "${_ReprobuildGeneratorWorkspace}/runquota")
+set(_ReprobuildBin "${_ReprobuildSourceRoot}/build/bin/repro")
+set(_RunQuotaDaemonBin "${_RunQuotaSourceRoot}/build/bin/runquotad")
 add_test(NAME e2e_cmake_reprobuild_generator_configure_smoke
   COMMAND ${CMAKE_CMAKE_COMMAND}
     -DCMAKE_COMMAND=${CMAKE_CMAKE_COMMAND}
@@ -233,14 +238,51 @@ add_test(NAME e2e_cmake_reprobuild_generator_configure_smoke
     -DTEST_SOURCE_ROOT=${_ReprobuildGeneratorTestDir}
     -DTEST_BINARY_ROOT=${_ReprobuildGeneratorTestBin}/configure
     -DTEST_C_COMPILER=${CMAKE_C_COMPILER}
+    -DTEST_CXX_COMPILER=${CMAKE_CXX_COMPILER}
     -P ${_ReprobuildGeneratorTestDir}/e2e.cmake)
-add_test(NAME e2e_cmake_reprobuild_build_launcher_smoke
+add_test(NAME e2e_cmake_reprobuild_hello_c_build
   COMMAND ${CMAKE_CMAKE_COMMAND}
     -DCMAKE_COMMAND=${CMAKE_CMAKE_COMMAND}
-    -DTEST_MODE=build
-    -DTEST_SOURCE_ROOT=${_ReprobuildGeneratorTestDir}
-    -DTEST_BINARY_ROOT=${_ReprobuildGeneratorTestBin}/build
+    -DTEST_MODE=hello_c_build
+    -DTEST_BINARY_ROOT=${_ReprobuildGeneratorTestBin}/hello-c-build
     -DTEST_C_COMPILER=${CMAKE_C_COMPILER}
+    -DTEST_REPROBUILD_SOURCE_ROOT=${_ReprobuildSourceRoot}
+    -DTEST_REPROBUILD_REPO=${_ReprobuildSourceRoot}
+    -DTEST_REPROBUILD_REPRO=${_ReprobuildBin}
+    -DTEST_RUNQUOTAD=${_RunQuotaDaemonBin}
+    -P ${_ReprobuildGeneratorTestDir}/e2e.cmake)
+add_test(NAME e2e_cmake_reprobuild_hyphen_target_build
+  COMMAND ${CMAKE_CMAKE_COMMAND}
+    -DCMAKE_COMMAND=${CMAKE_CMAKE_COMMAND}
+    -DTEST_MODE=hyphen_target_build
+    -DTEST_BINARY_ROOT=${_ReprobuildGeneratorTestBin}/hyphen-target-build
+    -DTEST_C_COMPILER=${CMAKE_C_COMPILER}
+    -DTEST_REPROBUILD_SOURCE_ROOT=${_ReprobuildSourceRoot}
+    -DTEST_REPROBUILD_REPO=${_ReprobuildSourceRoot}
+    -DTEST_REPROBUILD_REPRO=${_ReprobuildBin}
+    -DTEST_RUNQUOTAD=${_RunQuotaDaemonBin}
+    -P ${_ReprobuildGeneratorTestDir}/e2e.cmake)
+add_test(NAME e2e_cmake_reprobuild_actions_use_runquota
+  COMMAND ${CMAKE_CMAKE_COMMAND}
+    -DCMAKE_COMMAND=${CMAKE_CMAKE_COMMAND}
+    -DTEST_MODE=actions_use_runquota
+    -DTEST_BINARY_ROOT=${_ReprobuildGeneratorTestBin}/actions-use-runquota
+    -DTEST_C_COMPILER=${CMAKE_C_COMPILER}
+    -DTEST_REPROBUILD_SOURCE_ROOT=${_ReprobuildSourceRoot}
+    -DTEST_REPROBUILD_REPO=${_ReprobuildSourceRoot}
+    -DTEST_REPROBUILD_REPRO=${_ReprobuildBin}
+    -DTEST_RUNQUOTAD=${_RunQuotaDaemonBin}
+    -P ${_ReprobuildGeneratorTestDir}/e2e.cmake)
+add_test(NAME e2e_cmake_reprobuild_rebuild_cache_hit
+  COMMAND ${CMAKE_CMAKE_COMMAND}
+    -DCMAKE_COMMAND=${CMAKE_CMAKE_COMMAND}
+    -DTEST_MODE=rebuild_cache_hit
+    -DTEST_BINARY_ROOT=${_ReprobuildGeneratorTestBin}/rebuild-cache-hit
+    -DTEST_C_COMPILER=${CMAKE_C_COMPILER}
+    -DTEST_REPROBUILD_SOURCE_ROOT=${_ReprobuildSourceRoot}
+    -DTEST_REPROBUILD_REPO=${_ReprobuildSourceRoot}
+    -DTEST_REPROBUILD_REPRO=${_ReprobuildBin}
+    -DTEST_RUNQUOTAD=${_RunQuotaDaemonBin}
     -P ${_ReprobuildGeneratorTestDir}/e2e.cmake)
 
 if(CMAKE_GENERATOR MATCHES "Ninja")

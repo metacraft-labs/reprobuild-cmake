@@ -52,6 +52,6 @@ public:
     BuildTryCompile isInTryCompile = BuildTryCompile::No) override;
 
 private:
-  bool ValidateM1Configuration();
+  bool ValidateConfiguration();
   void WriteProviderMetadata();
 };
