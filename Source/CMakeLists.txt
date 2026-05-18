@@ -335,6 +335,8 @@ add_library(
   cmGlobalGenerator.cxx
   cmGlobalGenerator.h
   cmGlobalGeneratorFactory.h
+  cmGlobalReprobuildGenerator.cxx
+  cmGlobalReprobuildGenerator.h
   cmGlobalUnixMakefileGenerator3.cxx
   cmGlobalUnixMakefileGenerator3.h
   cmGlobVerificationManager.cxx
@@ -816,6 +818,8 @@ add_library(
   cmNinjaTypes.h
   cmLocalNinjaGenerator.cxx
   cmLocalNinjaGenerator.h
+  cmLocalReprobuildGenerator.cxx
+  cmLocalReprobuildGenerator.h
   cmNinjaTargetGenerator.cxx
   cmNinjaTargetGenerator.h
   cmNinjaNormalTargetGenerator.cxx

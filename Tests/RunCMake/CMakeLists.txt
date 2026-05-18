@@ -223,6 +223,26 @@ endif()
 if(CMAKE_GENERATOR MATCHES "FASTBuild")
   add_RunCMake_test(FASTBuild)
 endif()
+
+set(_ReprobuildGeneratorTestDir "${CMAKE_CURRENT_SOURCE_DIR}/ReprobuildGenerator")
+set(_ReprobuildGeneratorTestBin "${CMAKE_CURRENT_BINARY_DIR}/ReprobuildGenerator")
+add_test(NAME e2e_cmake_reprobuild_generator_configure_smoke
+  COMMAND ${CMAKE_CMAKE_COMMAND}
+    -DCMAKE_COMMAND=${CMAKE_CMAKE_COMMAND}
+    -DTEST_MODE=configure
+    -DTEST_SOURCE_ROOT=${_ReprobuildGeneratorTestDir}
+    -DTEST_BINARY_ROOT=${_ReprobuildGeneratorTestBin}/configure
+    -DTEST_C_COMPILER=${CMAKE_C_COMPILER}
+    -P ${_ReprobuildGeneratorTestDir}/e2e.cmake)
+add_test(NAME e2e_cmake_reprobuild_build_launcher_smoke
+  COMMAND ${CMAKE_CMAKE_COMMAND}
+    -DCMAKE_COMMAND=${CMAKE_CMAKE_COMMAND}
+    -DTEST_MODE=build
+    -DTEST_SOURCE_ROOT=${_ReprobuildGeneratorTestDir}
+    -DTEST_BINARY_ROOT=${_ReprobuildGeneratorTestBin}/build
+    -DTEST_C_COMPILER=${CMAKE_C_COMPILER}
+    -P ${_ReprobuildGeneratorTestDir}/e2e.cmake)
+
 if(CMAKE_GENERATOR MATCHES "Ninja")
   set(Ninja_ARGS
     -DCMAKE_C_COMPILER_ID=${CMAKE_C_COMPILER_ID}

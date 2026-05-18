@@ -686,6 +686,37 @@ int do_build(int ac, char const* const* av)
 #endif
 }
 
+int do_reprobuild_launch(int ac, char const* const* av)
+{
+  if (ac < 3) {
+    std::cerr << "Usage: cmake --reprobuild-launch <build-dir> [options]\n";
+    return 1;
+  }
+
+  std::string const buildDir = cmSystemTools::ToNormalizedPathOnDisk(av[2]);
+  std::string action = "build";
+  for (int i = 3; i < ac; ++i) {
+    std::string const arg = av[i];
+    if (cmHasLiteralPrefix(arg, "--action=")) {
+      action = arg.substr(9);
+    }
+  }
+
+  std::string const providerDir = cmStrCat(buildDir, "/CMakeFiles/reprobuild");
+  std::string const metadataFile = cmStrCat(providerDir, "/provider.meta");
+  if (!cmSystemTools::FileExists(metadataFile)) {
+    std::cerr << "Reprobuild launcher metadata is missing: " << metadataFile
+              << "\n";
+    return 1;
+  }
+
+  std::cerr << "Reprobuild launcher reached for build tree: " << buildDir
+            << "\n";
+  std::cerr << "Reprobuild generator M1 does not support action '" << action
+            << "' yet; unsupported-action=" << action << "\n";
+  return 1;
+}
+
 bool parse_default_directory_permissions(std::string const& permissions,
                                          std::string& parsedPermissionsVar)
 {
@@ -1129,6 +1160,9 @@ int main(int ac, char const* const* av)
   if (ac > 1) {
     if (strcmp(av[1], "--build") == 0) {
       return do_build(ac, av);
+    }
+    if (strcmp(av[1], "--reprobuild-launch") == 0) {
+      return do_reprobuild_launch(ac, av);
     }
     if (strcmp(av[1], "--install") == 0) {
       return do_install(ac, av);
