@@ -39,24 +39,84 @@ they are not a replacement for the Ninja generator. A first-class
 `-G Reprobuild` generator therefore needs either an upstream CMake change or a
 fork while the design is still experimental.
 
-## Source Areas
+## M0 Ninja Generator Source Baseline
 
 The first implementation should treat the Ninja generator as the compatibility
 baseline and port behavior deliberately:
 
-- `Source/cmGlobalNinjaGenerator.*`
-- `Source/cmLocalNinjaGenerator.*`
-- `Source/cmNinjaTargetGenerator.*`
-- `Source/cmNinjaNormalTargetGenerator.*`
-- `Source/cmNinjaUtilityTargetGenerator.*`
-- `Source/cmNinjaTypes.h`
-- `Source/cmake.cxx`
-- `Source/cmGlobalGeneratorFactory.h`
+- Upstream baseline commit:
+  `24d023247a7f67bf74f624b5a37b34183c570bf4`
+- Baseline subject: `CMake Nightly Date Stamp`
+- Fork branch: `reprobuild`
 
-The core Ninja generator is about 10.6k lines before adjacent docs and tests.
+Line counts were collected with `wc -l` from this fork at the M0 baseline:
+
+| Source area | Lines |
+| --- | ---: |
+| Source/cmGlobalNinjaGenerator.cxx | 3382 |
+| Source/cmGlobalNinjaGenerator.h | 755 |
+| Source/cmLocalNinjaGenerator.cxx | 945 |
+| Source/cmLocalNinjaGenerator.h | 144 |
+| Source/cmNinjaTargetGenerator.cxx | 2810 |
+| Source/cmNinjaTargetGenerator.h | 288 |
+| Source/cmNinjaNormalTargetGenerator.cxx | 1849 |
+| Source/cmNinjaNormalTargetGenerator.h | 65 |
+| Source/cmNinjaUtilityTargetGenerator.cxx | 207 |
+| Source/cmNinjaUtilityTargetGenerator.h | 24 |
+| Source/cmNinjaTypes.h | 61 |
+| Source/cmNinjaLinkLineComputer.cxx | 22 |
+| Source/cmNinjaLinkLineComputer.h | 30 |
+| Source/cmNinjaLinkLineDeviceComputer.cxx | 20 |
+| Source/cmNinjaLinkLineDeviceComputer.h | 31 |
+| Source/cmake.cxx | 4554 |
+| Source/cmGlobalGeneratorFactory.h | 92 |
+
+Core Ninja generator subtotal: 10633 lines.
+
+Generator registration/build-command context subtotal: 4646 lines.
+
+M0 inspected source total: 15279 lines.
+
 The Reprobuild generator should not copy the text-emission layer blindly; it
 should preserve the CMake semantics while lowering into Reprobuild's normalized
 action graph.
+
+## M0 Ninja Fixture Seeds
+
+These upstream `RunCMake` fixtures are the initial compatibility seed list for
+later Reprobuild generator gates. They are selected from Ninja-specific tests
+and adjacent RunCMake suites that exercise Ninja dependency behavior:
+
+- `Tests/RunCMake/Ninja/Executable.cmake`: single executable target.
+- `Tests/RunCMake/Ninja/StaticLib.cmake`: static library target.
+- `Tests/RunCMake/Ninja/SharedLib.cmake`: shared library target.
+- `Tests/RunCMake/Ninja/SubDir.cmake`: per-directory targets.
+- `Tests/RunCMake/Ninja/VerboseBuild.cmake`: verbose build output.
+- `Tests/RunCMake/Ninja/NoWorkToDo.cmake`: no-op rebuild behavior.
+- `Tests/RunCMake/Ninja/RspFileC.cmake`: C response files.
+- `Tests/RunCMake/Ninja/RspFileCXX.cmake`: CXX response files.
+- `Tests/RunCMake/Ninja/CustomCommandDepfile.cmake`: custom depfiles.
+- `Tests/RunCMake/Ninja/CustomCommandDepfileAsByproduct.cmake`:
+  depfile byproduct.
+- `Tests/RunCMake/Ninja/CustomCommandDepfileAsOutput.cmake`:
+  depfile output.
+- `Tests/RunCMake/Ninja/CustomCommandJobPool.cmake`: custom pools.
+- `Tests/RunCMake/Ninja/JobPoolUsesTerminal.cmake`: terminal pool conflict.
+- `Tests/RunCMake/Ninja/ShowIncludes.cmake`: MSVC showIncludes parsing.
+- `Tests/RunCMake/NinjaMultiConfig/CompileCommands.cmake`:
+  compile commands.
+- `Tests/RunCMake/NinjaMultiConfig/Clean.cmake`: clean behavior.
+- `Tests/RunCMake/NinjaMultiConfig/CustomCommandDepfile.cmake`:
+  custom depfiles.
+- `Tests/RunCMake/BuildDepends/CompileDepends.cmake`:
+  compile dependency rebuilds.
+- `Tests/RunCMake/BuildDepends/CustomCommandDepfile.cmake`:
+  depfile rebuilds.
+- `Tests/RunCMake/CXXModules/NinjaDependInfoCompileDatabase.cmake`:
+  CXX modules.
+- `Tests/RunCMake/CXXModules/NinjaForceResponseFile.cmake`:
+  CXX response files.
+- `Tests/RunCMake/Configure/RerunCMakeNinja.cmake`: CMake regeneration.
 
 ## Translation Model
 
