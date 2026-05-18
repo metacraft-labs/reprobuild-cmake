@@ -714,7 +714,7 @@ int do_reprobuild_launch(int ac, char const* const* av)
     return 1;
   }
 
-  if (action != "build") {
+  if (action != "build" && action != "clean") {
     std::cerr << "Reprobuild generator does not support action '" << action
               << "' yet; unsupported-action=" << action << "\n";
     return 1;
@@ -737,6 +737,23 @@ int do_reprobuild_launch(int ac, char const* const* av)
     std::cerr << "Reprobuild launcher metadata is missing wrapper_path in "
               << metadataFile << "\n";
     return 1;
+  }
+
+  if (action == "clean") {
+    std::string const cleanManifest = metadataValue("clean_manifest");
+    if (cleanManifest.empty() || !cmSystemTools::FileExists(cleanManifest)) {
+      std::cerr << "Reprobuild clean manifest is missing: " << cleanManifest
+                << "\n";
+      return 1;
+    }
+    std::ifstream fin(cleanManifest.c_str());
+    std::string path;
+    while (std::getline(fin, path)) {
+      if (!path.empty() && cmSystemTools::FileExists(path)) {
+        cmSystemTools::RemoveFile(path);
+      }
+    }
+    return 0;
   }
 
   std::string repro;

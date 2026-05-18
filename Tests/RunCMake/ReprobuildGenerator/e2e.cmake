@@ -113,8 +113,9 @@ function(check_provider_metadata binary_dir source_dir)
   file(READ "${metadata_file}" metadata)
   foreach(expected IN ITEMS
       "generator=Reprobuild"
-      "provider_version=2"
+      "provider_version=3"
       "m2_action_state=generated"
+      "m3_action_state=generated"
       "source_dir=${source_dir}"
       "binary_dir=${binary_dir}"
       "default_target=all"
@@ -131,6 +132,7 @@ function(check_provider_metadata binary_dir source_dir)
   foreach(expected IN ITEMS
       "buildAction(\"compile-hello"
       "buildAction(\"link-hello"
+      "makeDepfilePolicy("
       "target(\"hello\""
       "aggregate(\"all\""
       "exportTarget(\"default\", allTarget)"
@@ -205,8 +207,9 @@ function(start_runquota root socket_var pid_var)
   set(socket "${socket_dir}/rq-${socket_hash}.sock")
   set(log "${root}/runquotad.log")
   file(REMOVE "${socket}")
+  string(REPLACE ";" " " extra_args "${ARGN}")
   execute_process(
-    COMMAND /bin/sh -c "\"${TEST_RUNQUOTAD}\" --socket \"${socket}\" > \"${log}\" 2>&1 & echo $!"
+    COMMAND /bin/sh -c "\"${TEST_RUNQUOTAD}\" --socket \"${socket}\" ${extra_args} > \"${log}\" 2>&1 & echo $!"
     OUTPUT_VARIABLE pid
     ERROR_VARIABLE daemon_error
     RESULT_VARIABLE daemon_result
@@ -281,6 +284,128 @@ function(assert_contains text expected label)
   if(found EQUAL -1)
     message(FATAL_ERROR "${label} missing '${expected}'.\n${text}")
   endif()
+endfunction()
+
+function(assert_not_contains text unexpected label)
+  string(FIND "${text}" "${unexpected}" found)
+  if(NOT found EQUAL -1)
+    message(FATAL_ERROR "${label} unexpectedly contained '${unexpected}'.\n${text}")
+  endif()
+endfunction()
+
+function(write_depfile_project source_dir project_name)
+  file(REMOVE_RECURSE "${source_dir}")
+  file(MAKE_DIRECTORY "${source_dir}/include")
+  file(WRITE "${source_dir}/CMakeLists.txt"
+    "cmake_minimum_required(VERSION 3.10)\n"
+    "project(${project_name} C)\n"
+    "add_executable(depapp main.c a.c b.c)\n"
+    "target_include_directories(depapp PRIVATE include)\n")
+  file(WRITE "${source_dir}/include/a.h" "#define A_VALUE 10\n")
+  file(WRITE "${source_dir}/a.c" "#include \"a.h\"\nint a_value(void) { return A_VALUE; }\n")
+  file(WRITE "${source_dir}/b.c" "int b_value(void) { return 20; }\n")
+  file(WRITE "${source_dir}/main.c"
+    "int a_value(void);\nint b_value(void);\nint main(void) { return a_value() + b_value() == 30 ? 0 : 1; }\n")
+endfunction()
+
+function(write_response_project source_dir project_name)
+  file(REMOVE_RECURSE "${source_dir}")
+  file(MAKE_DIRECTORY "${source_dir}")
+  set(defs "IDENTITY_FLAG=1")
+  foreach(i RANGE 1 360)
+    list(APPEND defs "LONG_RESPONSE_DEFINE_${i}=value_${i}_${i}_${i}_${i}")
+  endforeach()
+  file(WRITE "${source_dir}/CMakeLists.txt"
+    "cmake_minimum_required(VERSION 3.10)\n"
+    "project(${project_name} C)\n"
+    "add_executable(rspapp main.c)\n"
+    "target_compile_definitions(rspapp PRIVATE ${defs})\n")
+  file(WRITE "${source_dir}/main.c"
+    "#ifndef IDENTITY_FLAG\n#error missing response identity flag\n#endif\n"
+    "int main(void) { return IDENTITY_FLAG; }\n")
+endfunction()
+
+function(write_pool_project source_dir project_name)
+  file(REMOVE_RECURSE "${source_dir}")
+  file(MAKE_DIRECTORY "${source_dir}")
+  file(WRITE "${source_dir}/launcher.sh"
+    "#!/bin/sh\n"
+    "log=\"$1\"\n"
+    "shift\n"
+    "printf 'start %s %s\\n' \"$3\" \"$(date +%s)\" >> \"$log\"\n"
+    "sleep 1\n"
+    "printf 'end %s %s\\n' \"$3\" \"$(date +%s)\" >> \"$log\"\n"
+    "exec \"$@\"\n")
+  execute_process(COMMAND /bin/sh -c "chmod +x \"$1\"" sh "${source_dir}/launcher.sh")
+  file(WRITE "${source_dir}/CMakeLists.txt"
+    "cmake_minimum_required(VERSION 3.10)\n"
+    "project(${project_name} C)\n"
+    "set_property(GLOBAL PROPERTY JOB_POOLS slow_compile=1)\n"
+    "set_property(GLOBAL PROPERTY RULE_LAUNCH_COMPILE \"${source_dir}/launcher.sh;${source_dir}/pool.log\")\n"
+    "add_executable(poolapp main.c a.c b.c)\n"
+    "set_property(TARGET poolapp PROPERTY JOB_POOL_COMPILE slow_compile)\n")
+  file(WRITE "${source_dir}/main.c" "int a(void); int b(void); int main(void) { return a() + b() == 3 ? 0 : 1; }\n")
+  file(WRITE "${source_dir}/a.c" "int a(void) { return 1; }\n")
+  file(WRITE "${source_dir}/b.c" "int b(void) { return 2; }\n")
+endfunction()
+
+function(write_pch_pool_project source_dir project_name)
+  if(NOT DEFINED TEST_CXX_COMPILER OR "${TEST_CXX_COMPILER}" STREQUAL "")
+    message(FATAL_ERROR "TEST_CXX_COMPILER is required for PCH pool build gate")
+  endif()
+
+  file(REMOVE_RECURSE "${source_dir}")
+  file(MAKE_DIRECTORY "${source_dir}")
+  file(WRITE "${source_dir}/CMakeLists.txt"
+    "cmake_minimum_required(VERSION 3.16)\n"
+    "project(${project_name} CXX)\n"
+    "set_property(GLOBAL PROPERTY JOB_POOLS pch_pool=1 compile_pool=2)\n"
+    "add_executable(pchapp main.cxx)\n"
+    "target_precompile_headers(pchapp PRIVATE \"${source_dir}/pch.hxx\")\n"
+    "set_property(TARGET pchapp PROPERTY JOB_POOL_PRECOMPILE_HEADER pch_pool)\n"
+    "set_property(TARGET pchapp PROPERTY JOB_POOL_COMPILE compile_pool)\n")
+  file(WRITE "${source_dir}/pch.hxx"
+    "#pragma once\n"
+    "#define PCH_MAGIC 7\n"
+    "#include <string>\n"
+    "inline std::string pch_value() { return \"pch-ok\"; }\n")
+  file(WRITE "${source_dir}/main.cxx"
+    "#ifndef PCH_MAGIC\n"
+    "#  error precompiled header was not force-included\n"
+    "#endif\n"
+    "int main() { std::string value = pch_value(); return value == \"pch-ok\" ? 0 : 1; }\n")
+endfunction()
+
+function(write_uses_terminal_project source_dir project_name)
+  file(REMOVE_RECURSE "${source_dir}")
+  file(MAKE_DIRECTORY "${source_dir}")
+  file(WRITE "${source_dir}/terminal.sh"
+    "#!/bin/sh\n"
+    "log=\"$1\"\n"
+    "label=\"$2\"\n"
+    "printf 'start %s %s\\n' \"$label\" \"$(date +%s)\" >> \"$log\"\n"
+    "sleep 1\n"
+    "printf 'end %s %s\\n' \"$label\" \"$(date +%s)\" >> \"$log\"\n")
+  execute_process(COMMAND /bin/sh -c "chmod +x \"$1\"" sh "${source_dir}/terminal.sh")
+  file(WRITE "${source_dir}/CMakeLists.txt"
+    "cmake_minimum_required(VERSION 3.10)\n"
+    "project(${project_name} C)\n"
+    "add_executable(anchor main.c)\n"
+    "add_custom_target(terminal_a ALL COMMAND \"${source_dir}/terminal.sh\" \"${source_dir}/terminal.log\" a USES_TERMINAL)\n"
+    "add_custom_target(terminal_b ALL COMMAND \"${source_dir}/terminal.sh\" \"${source_dir}/terminal.log\" b USES_TERMINAL)\n")
+  file(WRITE "${source_dir}/main.c" "int main(void) { return 0; }\n")
+endfunction()
+
+function(write_clean_project source_dir project_name)
+  file(REMOVE_RECURSE "${source_dir}")
+  file(MAKE_DIRECTORY "${source_dir}")
+  file(WRITE "${source_dir}/CMakeLists.txt"
+    "cmake_minimum_required(VERSION 3.10)\n"
+    "project(${project_name} C)\n"
+    "add_executable(cleanapp main.c)\n"
+    "target_link_options(cleanapp PRIVATE \"$<$<PLATFORM_ID:Darwin>:-Wl,-map,cleanapp.map>\" \"$<$<PLATFORM_ID:Linux>:-Wl,-Map,cleanapp.map>\")\n"
+    "set_property(TARGET cleanapp PROPERTY ADDITIONAL_CLEAN_FILES \"cleanapp.map;extra.clean\")\n")
+  file(WRITE "${source_dir}/main.c" "int main(void) { return 0; }\n")
 endfunction()
 
 file(REMOVE_RECURSE "${TEST_BINARY_ROOT}")
@@ -402,6 +527,148 @@ elseif(TEST_MODE STREQUAL "rebuild_cache_hit")
       "Cache-hit restored executable did not run correctly.\n"
       "stdout:\n${run_stdout}\n"
       "stderr:\n${run_stderr}")
+  endif()
+elseif(TEST_MODE STREQUAL "depfile_header_rebuild")
+  set(dep_source_dir "${TEST_BINARY_ROOT}/dep-src")
+  set(dep_binary_dir "${TEST_BINARY_ROOT}/dep-build")
+  write_depfile_project("${dep_source_dir}" ReprobuildDepfile)
+  run_configure("${dep_source_dir}" "${dep_binary_dir}" TRUE "")
+  start_runquota("${TEST_BINARY_ROOT}" runquota_socket runquota_pid)
+  run_build("${dep_binary_dir}" "depapp" "${runquota_socket}" first_output)
+  report_path_from_output("${first_output}" first_report_path)
+  file(READ "${first_report_path}" first_report)
+  assert_contains("${first_report}" "${dep_source_dir}/include/a.h" "depfile evidence report")
+  file(WRITE "${dep_source_dir}/include/a.h" "#define A_VALUE 11\n")
+  run_build("${dep_binary_dir}" "depapp" "${runquota_socket}" second_output)
+  stop_runquota("${runquota_pid}")
+  assert_contains("${second_output}" "a.c.o status=asSucceeded launched=true" "header rebuild output")
+  assert_not_contains("${second_output}" "b.c.o status=asSucceeded launched=true" "header rebuild output")
+  assert_contains("${second_output}" "b.c.o status=asCacheHit launched=false" "header rebuild output")
+elseif(TEST_MODE STREQUAL "response_file_identity")
+  set(rsp_source_dir "${TEST_BINARY_ROOT}/rsp-src")
+  set(rsp_binary_dir "${TEST_BINARY_ROOT}/rsp-build")
+  write_response_project("${rsp_source_dir}" ReprobuildResponse)
+  run_configure("${rsp_source_dir}" "${rsp_binary_dir}" TRUE "")
+  file(GLOB rsp_files "${rsp_binary_dir}/CMakeFiles/reprobuild/rsp/*.rsp")
+  list(LENGTH rsp_files rsp_count)
+  if(rsp_count LESS 1)
+    message(FATAL_ERROR "Expected generated response file in ${rsp_binary_dir}/CMakeFiles/reprobuild/rsp")
+  endif()
+  start_runquota("${TEST_BINARY_ROOT}" runquota_socket runquota_pid)
+  run_build("${rsp_binary_dir}" "rspapp" "${runquota_socket}" first_output)
+  list(GET rsp_files 0 rsp_file)
+  file(READ "${rsp_file}" rsp_content)
+  string(REPLACE "IDENTITY_FLAG=1" "IDENTITY_FLAG=2" rsp_content2 "${rsp_content}")
+  if("${rsp_content2}" STREQUAL "${rsp_content}")
+    stop_runquota("${runquota_pid}")
+    message(FATAL_ERROR "Response file did not contain IDENTITY_FLAG=1:\n${rsp_content}")
+  endif()
+  file(WRITE "${rsp_file}" "${rsp_content2}")
+  run_build("${rsp_binary_dir}" "rspapp" "${runquota_socket}" second_output)
+  stop_runquota("${runquota_pid}")
+  assert_contains("${second_output}" "main.c.o status=asSucceeded launched=true" "response rebuild output")
+  execute_process(COMMAND "${rsp_binary_dir}/rspapp" RESULT_VARIABLE rsp_result)
+  if(NOT rsp_result EQUAL 2)
+    message(FATAL_ERROR "Response-file identity edit did not affect executable exit code: ${rsp_result}")
+  endif()
+elseif(TEST_MODE STREQUAL "pool_limit")
+  set(pool_source_dir "${TEST_BINARY_ROOT}/pool-src")
+  set(pool_binary_dir "${TEST_BINARY_ROOT}/pool-build")
+  write_pool_project("${pool_source_dir}" ReprobuildPool)
+  run_configure("${pool_source_dir}" "${pool_binary_dir}" TRUE "")
+  start_runquota("${TEST_BINARY_ROOT}" runquota_socket runquota_pid "--pool slow_compile=1")
+  run_build("${pool_binary_dir}" "poolapp" "${runquota_socket}" pool_output)
+  stop_runquota("${runquota_pid}")
+  file(READ "${pool_source_dir}/pool.log" pool_log)
+  string(REGEX MATCH "start[^\n]*\nstart" overlapping_starts "${pool_log}")
+  if(overlapping_starts)
+    message(FATAL_ERROR "Pool-limited compiles overlapped before an end event.\n${pool_log}")
+  endif()
+  report_path_from_output("${pool_output}" pool_report_path)
+  file(READ "${pool_report_path}" pool_report)
+  assert_contains("${pool_report}" "pool=slow_compile" "pool scheduler trace")
+elseif(TEST_MODE STREQUAL "pch_pool_build")
+  set(pch_source_dir "${TEST_BINARY_ROOT}/pch-src")
+  set(pch_binary_dir "${TEST_BINARY_ROOT}/pch-build")
+  write_pch_pool_project("${pch_source_dir}" ReprobuildPchPool)
+  run_configure("${pch_source_dir}" "${pch_binary_dir}" TRUE "")
+  file(READ "${pch_binary_dir}/reprobuild.nim" pch_provider)
+  assert_contains("${pch_provider}" "buildPool(\"pch_pool\", 1'u32)" "PCH provider")
+  assert_contains("${pch_provider}" "pool = \"pch_pool\"" "PCH provider")
+  start_runquota("${TEST_BINARY_ROOT}" runquota_socket runquota_pid "--pool pch_pool=1 --pool compile_pool=2")
+  run_build("${pch_binary_dir}" "pchapp" "${runquota_socket}" pch_output)
+  stop_runquota("${runquota_pid}")
+  execute_process(
+    COMMAND "${pch_binary_dir}/pchapp"
+    OUTPUT_VARIABLE run_stdout
+    ERROR_VARIABLE run_stderr
+    RESULT_VARIABLE run_result
+    ENCODING UTF8)
+  if(NOT run_result EQUAL 0)
+    message(FATAL_ERROR
+      "PCH executable did not run correctly.\n"
+      "stdout:\n${run_stdout}\n"
+      "stderr:\n${run_stderr}")
+  endif()
+  report_path_from_output("${pch_output}" pch_report_path)
+  file(READ "${pch_report_path}" pch_report)
+  assert_contains("${pch_report}" "cmake_pch" "PCH build report")
+  assert_contains("${pch_report}" "pool=pch_pool" "PCH scheduler trace")
+elseif(TEST_MODE STREQUAL "uses_terminal_pool")
+  set(term_source_dir "${TEST_BINARY_ROOT}/terminal-src")
+  set(term_binary_dir "${TEST_BINARY_ROOT}/terminal-build")
+  write_uses_terminal_project("${term_source_dir}" ReprobuildUsesTerminal)
+  run_configure("${term_source_dir}" "${term_binary_dir}" TRUE "")
+  file(READ "${term_binary_dir}/reprobuild.nim" term_provider)
+  assert_contains("${term_provider}" "buildPool(\"console\", 1'u32)" "USES_TERMINAL provider")
+  assert_contains("${term_provider}" "pool = \"console\"" "USES_TERMINAL provider")
+  start_runquota("${TEST_BINARY_ROOT}" runquota_socket runquota_pid "--pool console=1")
+  run_build("${term_binary_dir}" "" "${runquota_socket}" term_output)
+  stop_runquota("${runquota_pid}")
+  file(READ "${term_source_dir}/terminal.log" term_log)
+  string(REGEX MATCH "start[^\n]*\nstart" overlapping_starts "${term_log}")
+  if(overlapping_starts)
+    message(FATAL_ERROR "USES_TERMINAL custom targets overlapped before an end event.\n${term_log}")
+  endif()
+  report_path_from_output("${term_output}" term_report_path)
+  file(READ "${term_report_path}" term_report)
+  assert_contains("${term_report}" "\"id\": \"terminal_a\"" "USES_TERMINAL build report")
+  assert_contains("${term_report}" "\"id\": \"terminal_b\"" "USES_TERMINAL build report")
+  assert_contains("${term_report}" "pool=console" "USES_TERMINAL scheduler trace")
+elseif(TEST_MODE STREQUAL "clean_outputs")
+  set(clean_source_dir "${TEST_BINARY_ROOT}/clean-src")
+  set(clean_binary_dir "${TEST_BINARY_ROOT}/clean-build")
+  write_clean_project("${clean_source_dir}" ReprobuildClean)
+  run_configure("${clean_source_dir}" "${clean_binary_dir}" TRUE "")
+  start_runquota("${TEST_BINARY_ROOT}" runquota_socket runquota_pid)
+  run_build("${clean_binary_dir}" "cleanapp" "${runquota_socket}" clean_output)
+  stop_runquota("${runquota_pid}")
+  file(WRITE "${clean_binary_dir}/extra.clean" "extra\n")
+  foreach(path IN ITEMS "${clean_binary_dir}/cleanapp" "${clean_binary_dir}/cleanapp.map" "${clean_binary_dir}/extra.clean")
+    if(NOT EXISTS "${path}")
+      message(FATAL_ERROR "Expected build/clean fixture output missing before clean: ${path}")
+    endif()
+  endforeach()
+  set(store_dir "${clean_binary_dir}/CMakeFiles/reprobuild/worktrees")
+  if(NOT EXISTS "${store_dir}")
+    message(FATAL_ERROR "Expected Reprobuild work root missing before clean: ${store_dir}")
+  endif()
+  execute_process(
+    COMMAND "${CMAKE_COMMAND}" --build "${clean_binary_dir}" --target clean
+    OUTPUT_VARIABLE clean_stdout
+    ERROR_VARIABLE clean_stderr
+    RESULT_VARIABLE clean_result
+    ENCODING UTF8)
+  if(NOT clean_result EQUAL 0)
+    message(FATAL_ERROR "Clean failed.\nstdout:\n${clean_stdout}\nstderr:\n${clean_stderr}")
+  endif()
+  foreach(path IN ITEMS "${clean_binary_dir}/cleanapp" "${clean_binary_dir}/cleanapp.map" "${clean_binary_dir}/extra.clean")
+    if(EXISTS "${path}")
+      message(FATAL_ERROR "Clean did not remove ${path}")
+    endif()
+  endforeach()
+  if(NOT EXISTS "${store_dir}")
+    message(FATAL_ERROR "Clean removed Reprobuild store/work root: ${store_dir}")
   endif()
 else()
   message(FATAL_ERROR "Unknown TEST_MODE: ${TEST_MODE}")
