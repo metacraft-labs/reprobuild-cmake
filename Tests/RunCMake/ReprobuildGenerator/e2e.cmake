@@ -408,6 +408,60 @@ function(write_clean_project source_dir project_name)
   file(WRITE "${source_dir}/main.c" "int main(void) { return 0; }\n")
 endfunction()
 
+function(write_library_matrix_project source_dir project_name)
+  file(REMOVE_RECURSE "${source_dir}")
+  file(MAKE_DIRECTORY "${source_dir}")
+  set(event_log "${source_dir}/build-events.log")
+  file(WRITE "${source_dir}/event.sh"
+    "#!/bin/sh\n"
+    "printf '%s\\n' \"$2\" >> \"$1\"\n")
+  execute_process(COMMAND /bin/sh -c "chmod +x \"$1\"" sh "${source_dir}/event.sh")
+  file(WRITE "${source_dir}/CMakeLists.txt"
+    "cmake_minimum_required(VERSION 3.16)\n"
+    "project(${project_name} C)\n"
+    "set(CMAKE_MACOSX_RPATH ON)\n"
+    "add_library(objlib OBJECT obj.c)\n"
+    "add_library(stlib STATIC static.c \$<TARGET_OBJECTS:objlib>)\n"
+    "add_library(shlib SHARED shared.c)\n"
+    "set_target_properties(shlib PROPERTIES VERSION 1.2.3 SOVERSION 1)\n"
+    "add_library(modlib MODULE module.c)\n"
+    "add_executable(libapp main.c)\n"
+    "target_link_libraries(libapp PRIVATE stlib shlib)\n"
+    "add_custom_command(TARGET libapp PRE_BUILD COMMAND \"${source_dir}/event.sh\" \"${event_log}\" pre-build)\n"
+    "add_custom_command(TARGET libapp PRE_LINK COMMAND \"${source_dir}/event.sh\" \"${event_log}\" pre-link)\n"
+    "add_custom_command(TARGET libapp POST_BUILD COMMAND \"${source_dir}/event.sh\" \"${event_log}\" post-build)\n")
+  file(WRITE "${source_dir}/obj.c" "int obj_value(void) { return 5; }\n")
+  file(WRITE "${source_dir}/static.c" "int obj_value(void);\nint static_value(void) { return obj_value() + 7; }\n")
+  file(WRITE "${source_dir}/shared.c" "int shared_value(void) { return 11; }\n")
+  file(WRITE "${source_dir}/module.c" "int module_value(void) { return 13; }\n")
+  file(WRITE "${source_dir}/main.c"
+    "int static_value(void);\nint shared_value(void);\n"
+    "int main(void) { return static_value() == 12 && shared_value() == 11 ? 0 : 1; }\n")
+endfunction()
+
+function(versioned_shared_paths binary_dir base out_var)
+  if(CMAKE_HOST_SYSTEM_NAME STREQUAL "Darwin")
+    set(paths
+      "${binary_dir}/lib${base}.1.2.3.dylib"
+      "${binary_dir}/lib${base}.1.dylib"
+      "${binary_dir}/lib${base}.dylib")
+  elseif(CMAKE_HOST_SYSTEM_NAME STREQUAL "Linux")
+    set(paths
+      "${binary_dir}/lib${base}.so.1.2.3"
+      "${binary_dir}/lib${base}.so.1"
+      "${binary_dir}/lib${base}.so")
+  else()
+    set(paths "${binary_dir}/${CMAKE_SHARED_LIBRARY_PREFIX}${base}${CMAKE_SHARED_LIBRARY_SUFFIX}")
+  endif()
+  set(${out_var} "${paths}" PARENT_SCOPE)
+endfunction()
+
+function(assert_file_exists path label)
+  if(NOT EXISTS "${path}")
+    message(FATAL_ERROR "${label} missing expected file: ${path}")
+  endif()
+endfunction()
+
 file(REMOVE_RECURSE "${TEST_BINARY_ROOT}")
 file(MAKE_DIRECTORY "${TEST_BINARY_ROOT}")
 
@@ -670,6 +724,89 @@ elseif(TEST_MODE STREQUAL "clean_outputs")
   if(NOT EXISTS "${store_dir}")
     message(FATAL_ERROR "Clean removed Reprobuild store/work root: ${store_dir}")
   endif()
+elseif(TEST_MODE STREQUAL "library_target_matrix")
+  set(lib_source_dir "${TEST_BINARY_ROOT}/lib-src")
+  set(lib_binary_dir "${TEST_BINARY_ROOT}/lib-build")
+  write_library_matrix_project("${lib_source_dir}" ReprobuildLibraries)
+  run_configure("${lib_source_dir}" "${lib_binary_dir}" TRUE "")
+  file(READ "${lib_binary_dir}/reprobuild.nim" provider)
+  foreach(expected IN ITEMS
+      "target(\"objlib\""
+      "target(\"stlib\""
+      "target(\"shlib\""
+      "target(\"modlib\""
+      "target(\"libapp\""
+      "buildAction(\"link-stlib\""
+      "buildAction(\"link-shlib\""
+      "buildAction(\"link-modlib\""
+      "buildAction(\"pre-build-libapp"
+      "buildAction(\"pre-link-libapp"
+      "buildAction(\"post-build-libapp")
+    assert_contains("${provider}" "${expected}" "library matrix provider")
+  endforeach()
+  start_runquota("${TEST_BINARY_ROOT}" runquota_socket runquota_pid)
+  run_build("${lib_binary_dir}" "" "${runquota_socket}" matrix_output)
+  stop_runquota("${runquota_pid}")
+  assert_file_exists("${lib_binary_dir}/libstlib.a" "library matrix")
+  versioned_shared_paths("${lib_binary_dir}" "shlib" shlib_paths)
+  foreach(path IN LISTS shlib_paths)
+    assert_file_exists("${path}" "library matrix")
+  endforeach()
+  if(CMAKE_HOST_SYSTEM_NAME STREQUAL "Darwin")
+    assert_file_exists("${lib_binary_dir}/libmodlib.so" "library matrix")
+  elseif(CMAKE_HOST_SYSTEM_NAME STREQUAL "Linux")
+    assert_file_exists("${lib_binary_dir}/libmodlib.so" "library matrix")
+  endif()
+  execute_process(COMMAND "${lib_binary_dir}/libapp" RESULT_VARIABLE app_result)
+  if(NOT app_result EQUAL 0)
+    message(FATAL_ERROR "Library matrix executable failed with ${app_result}")
+  endif()
+  file(READ "${lib_source_dir}/build-events.log" event_log)
+  string(REGEX MATCH "pre-build\npre-link\npost-build\n" ordered_events "${event_log}")
+  if(NOT ordered_events)
+    message(FATAL_ERROR "Target build events did not run in order.\n${event_log}")
+  endif()
+elseif(TEST_MODE STREQUAL "link_byproducts")
+  set(by_source_dir "${TEST_BINARY_ROOT}/by-src")
+  set(by_binary_dir "${TEST_BINARY_ROOT}/by-build")
+  write_library_matrix_project("${by_source_dir}" ReprobuildByproducts)
+  run_configure("${by_source_dir}" "${by_binary_dir}" TRUE "")
+  start_runquota("${TEST_BINARY_ROOT}" runquota_socket runquota_pid)
+  run_build("${by_binary_dir}" "shlib" "${runquota_socket}" by_output)
+  stop_runquota("${runquota_pid}")
+  file(READ "${by_binary_dir}/CMakeFiles/reprobuild/provider.meta" metadata)
+  assert_contains("${metadata}" "m4_action_state=generated" "M4 metadata")
+  assert_contains("${metadata}" "m4_symlink_outputs=generated" "M4 metadata")
+  assert_contains("${metadata}" "m4_import_library_outputs=not_applicable_on_host" "M4 metadata")
+  assert_contains("${metadata}" "m4_debug_symbol_outputs=not_applicable_on_host" "M4 metadata")
+  file(READ "${by_binary_dir}/reprobuild.nim" provider)
+  versioned_shared_paths("${by_binary_dir}" "shlib" shlib_paths)
+  foreach(path IN LISTS shlib_paths)
+    assert_file_exists("${path}" "link byproducts")
+    file(RELATIVE_PATH rel "${by_binary_dir}" "${path}")
+    assert_contains("${provider}" "${rel}" "link byproducts provider")
+  endforeach()
+  report_path_from_output("${by_output}" by_report_path)
+  file(READ "${by_report_path}" by_report)
+  assert_contains("${by_report}" "\"id\": \"link-shlib\"" "link byproducts report")
+  assert_contains("${by_report}" "\"id\": \"symlink-shlib\"" "link byproducts report")
+elseif(TEST_MODE STREQUAL "library_incremental_relink")
+  set(inc_source_dir "${TEST_BINARY_ROOT}/inc-src")
+  set(inc_binary_dir "${TEST_BINARY_ROOT}/inc-build")
+  write_library_matrix_project("${inc_source_dir}" ReprobuildIncremental)
+  run_configure("${inc_source_dir}" "${inc_binary_dir}" TRUE "")
+  start_runquota("${TEST_BINARY_ROOT}" runquota_socket runquota_pid)
+  run_build("${inc_binary_dir}" "libapp" "${runquota_socket}" first_output)
+  file(WRITE "${inc_source_dir}/shared.c" "int shared_value(void) { return 12; }\n")
+  run_build("${inc_binary_dir}" "libapp" "${runquota_socket}" second_output)
+  stop_runquota("${runquota_pid}")
+  assert_contains("${second_output}" "shared.c.o status=asSucceeded launched=true" "incremental relink output")
+  assert_contains("${second_output}" "action: link-shlib status=asSucceeded launched=true" "incremental relink output")
+  assert_contains("${second_output}" "action: link-libapp status=asSucceeded launched=true" "incremental relink output")
+  assert_not_contains("${second_output}" "static.c.o status=asSucceeded launched=true" "incremental relink output")
+  report_path_from_output("${second_output}" inc_report_path)
+  file(READ "${inc_report_path}" inc_report)
+  assert_contains("${inc_report}" "\"id\": \"link-libapp\"" "incremental relink report")
 else()
   message(FATAL_ERROR "Unknown TEST_MODE: ${TEST_MODE}")
 endif()

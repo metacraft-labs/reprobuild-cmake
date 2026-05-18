@@ -14,4 +14,7 @@ class cmLocalReprobuildGenerator : public cmLocalUnixMakefileGenerator3
 public:
   cmLocalReprobuildGenerator(cmGlobalGenerator* gg, cmMakefile* mf);
   ~cmLocalReprobuildGenerator() override;
+
+  std::string GetLinkDependencyFile(cmGeneratorTarget* target,
+                                    std::string const& config) const override;
 };
