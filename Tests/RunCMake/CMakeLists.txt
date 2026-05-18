@@ -306,6 +306,17 @@ add_test(NAME e2e_cmake_reprobuild_response_file_identity
     -DTEST_REPROBUILD_REPRO=${_ReprobuildBin}
     -DTEST_RUNQUOTAD=${_RunQuotaDaemonBin}
     -P ${_ReprobuildGeneratorTestDir}/e2e.cmake)
+add_test(NAME e2e_cmake_reprobuild_custom_target_working_directory
+  COMMAND ${CMAKE_CMAKE_COMMAND}
+    -DCMAKE_COMMAND=${CMAKE_CMAKE_COMMAND}
+    -DTEST_MODE=custom_target_working_directory
+    -DTEST_BINARY_ROOT=${_ReprobuildGeneratorTestBin}/custom-target-working-directory
+    -DTEST_C_COMPILER=${CMAKE_C_COMPILER}
+    -DTEST_REPROBUILD_SOURCE_ROOT=${_ReprobuildSourceRoot}
+    -DTEST_REPROBUILD_REPO=${_ReprobuildSourceRoot}
+    -DTEST_REPROBUILD_REPRO=${_ReprobuildBin}
+    -DTEST_RUNQUOTAD=${_RunQuotaDaemonBin}
+    -P ${_ReprobuildGeneratorTestDir}/e2e.cmake)
 add_test(NAME e2e_cmake_reprobuild_pool_limit
   COMMAND ${CMAKE_CMAKE_COMMAND}
     -DCMAKE_COMMAND=${CMAKE_CMAKE_COMMAND}
@@ -378,6 +389,50 @@ add_test(NAME e2e_cmake_reprobuild_library_incremental_relink
     -DCMAKE_COMMAND=${CMAKE_CMAKE_COMMAND}
     -DTEST_MODE=library_incremental_relink
     -DTEST_BINARY_ROOT=${_ReprobuildGeneratorTestBin}/library-incremental-relink
+    -DTEST_C_COMPILER=${CMAKE_C_COMPILER}
+    -DTEST_REPROBUILD_SOURCE_ROOT=${_ReprobuildSourceRoot}
+    -DTEST_REPROBUILD_REPO=${_ReprobuildSourceRoot}
+    -DTEST_REPROBUILD_REPRO=${_ReprobuildBin}
+    -DTEST_RUNQUOTAD=${_RunQuotaDaemonBin}
+    -P ${_ReprobuildGeneratorTestDir}/e2e.cmake)
+add_test(NAME e2e_cmake_reprobuild_generated_source_custom_command
+  COMMAND ${CMAKE_CMAKE_COMMAND}
+    -DCMAKE_COMMAND=${CMAKE_CMAKE_COMMAND}
+    -DTEST_MODE=generated_source_custom_command
+    -DTEST_BINARY_ROOT=${_ReprobuildGeneratorTestBin}/generated-source-custom-command
+    -DTEST_C_COMPILER=${CMAKE_C_COMPILER}
+    -DTEST_REPROBUILD_SOURCE_ROOT=${_ReprobuildSourceRoot}
+    -DTEST_REPROBUILD_REPO=${_ReprobuildSourceRoot}
+    -DTEST_REPROBUILD_REPRO=${_ReprobuildBin}
+    -DTEST_RUNQUOTAD=${_RunQuotaDaemonBin}
+    -P ${_ReprobuildGeneratorTestDir}/e2e.cmake)
+add_test(NAME e2e_cmake_reprobuild_custom_depfile_hidden_input
+  COMMAND ${CMAKE_CMAKE_COMMAND}
+    -DCMAKE_COMMAND=${CMAKE_CMAKE_COMMAND}
+    -DTEST_MODE=custom_depfile_hidden_input
+    -DTEST_BINARY_ROOT=${_ReprobuildGeneratorTestBin}/custom-depfile-hidden-input
+    -DTEST_C_COMPILER=${CMAKE_C_COMPILER}
+    -DTEST_REPROBUILD_SOURCE_ROOT=${_ReprobuildSourceRoot}
+    -DTEST_REPROBUILD_REPO=${_ReprobuildSourceRoot}
+    -DTEST_REPROBUILD_REPRO=${_ReprobuildBin}
+    -DTEST_RUNQUOTAD=${_RunQuotaDaemonBin}
+    -P ${_ReprobuildGeneratorTestDir}/e2e.cmake)
+add_test(NAME e2e_cmake_reprobuild_builtin_install_and_test_targets
+  COMMAND ${CMAKE_CMAKE_COMMAND}
+    -DCMAKE_COMMAND=${CMAKE_CMAKE_COMMAND}
+    -DTEST_MODE=builtin_install_and_test_targets
+    -DTEST_BINARY_ROOT=${_ReprobuildGeneratorTestBin}/builtin-install-and-test-targets
+    -DTEST_C_COMPILER=${CMAKE_C_COMPILER}
+    -DTEST_REPROBUILD_SOURCE_ROOT=${_ReprobuildSourceRoot}
+    -DTEST_REPROBUILD_REPO=${_ReprobuildSourceRoot}
+    -DTEST_REPROBUILD_REPRO=${_ReprobuildBin}
+    -DTEST_RUNQUOTAD=${_RunQuotaDaemonBin}
+    -P ${_ReprobuildGeneratorTestDir}/e2e.cmake)
+add_test(NAME e2e_cmake_reprobuild_regeneration_refresh
+  COMMAND ${CMAKE_CMAKE_COMMAND}
+    -DCMAKE_COMMAND=${CMAKE_CMAKE_COMMAND}
+    -DTEST_MODE=regeneration_refresh
+    -DTEST_BINARY_ROOT=${_ReprobuildGeneratorTestBin}/regeneration-refresh
     -DTEST_C_COMPILER=${CMAKE_C_COMPILER}
     -DTEST_REPROBUILD_SOURCE_ROOT=${_ReprobuildSourceRoot}
     -DTEST_REPROBUILD_REPO=${_ReprobuildSourceRoot}

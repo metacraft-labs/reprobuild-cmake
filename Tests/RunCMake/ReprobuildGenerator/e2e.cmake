@@ -396,6 +396,26 @@ function(write_uses_terminal_project source_dir project_name)
   file(WRITE "${source_dir}/main.c" "int main(void) { return 0; }\n")
 endfunction()
 
+function(write_custom_target_working_directory_project source_dir project_name)
+  file(REMOVE_RECURSE "${source_dir}")
+  file(MAKE_DIRECTORY "${source_dir}")
+  file(WRITE "${source_dir}/record_wd.cmake"
+    "execute_process(COMMAND /bin/pwd OUTPUT_VARIABLE pwd OUTPUT_STRIP_TRAILING_WHITESPACE)\n"
+    "file(WRITE wd.txt \"\${pwd}\\n\")\n")
+  file(WRITE "${source_dir}/CMakeLists.txt"
+    "cmake_minimum_required(VERSION 3.20)\n"
+    "project(${project_name} C)\n"
+    "add_executable(anchor main.c)\n"
+    "set(command_wd \"\${CMAKE_CURRENT_BINARY_DIR}/command-wd\")\n"
+    "file(MAKE_DIRECTORY \"\${command_wd}\")\n"
+    "add_custom_target(write_wd\n"
+    "  COMMAND \"\${CMAKE_COMMAND}\" -P \"${source_dir}/record_wd.cmake\"\n"
+    "  BYPRODUCTS \"\${command_wd}/wd.txt\"\n"
+    "  WORKING_DIRECTORY \"\${command_wd}\"\n"
+    "  VERBATIM)\n")
+  file(WRITE "${source_dir}/main.c" "int main(void) { return 0; }\n")
+endfunction()
+
 function(write_clean_project source_dir project_name)
   file(REMOVE_RECURSE "${source_dir}")
   file(MAKE_DIRECTORY "${source_dir}")
@@ -437,6 +457,119 @@ function(write_library_matrix_project source_dir project_name)
   file(WRITE "${source_dir}/main.c"
     "int static_value(void);\nint shared_value(void);\n"
     "int main(void) { return static_value() == 12 && shared_value() == 11 ? 0 : 1; }\n")
+endfunction()
+
+function(write_generated_source_project source_dir project_name)
+  file(REMOVE_RECURSE "${source_dir}")
+  file(MAKE_DIRECTORY "${source_dir}")
+  file(WRITE "${source_dir}/generate.cmake"
+    "file(READ \"\${INPUT}\" value)\n"
+    "string(STRIP \"\${value}\" value)\n"
+    "file(WRITE \"\${OUT}\" \"int generated_value(void) { return \${value}; }\\n\")\n"
+    "file(WRITE \"\${STAMP}\" \"generated \${value}\\n\")\n")
+  file(WRITE "${source_dir}/CMakeLists.txt"
+    "cmake_minimum_required(VERSION 3.20)\n"
+    "project(${project_name} C)\n"
+    "set_property(GLOBAL PROPERTY JOB_POOLS codegen=1)\n"
+    "set(generated \"\${CMAKE_CURRENT_BINARY_DIR}/generated.c\")\n"
+    "add_custom_command(OUTPUT \"\${generated}\"\n"
+    "  BYPRODUCTS \"\${CMAKE_CURRENT_BINARY_DIR}/generated.stamp\"\n"
+    "  COMMAND \"\${CMAKE_COMMAND}\" -DINPUT=${source_dir}/number.txt -DOUT=\${generated} -DSTAMP=\${CMAKE_CURRENT_BINARY_DIR}/generated.stamp -P \"${source_dir}/generate.cmake\"\n"
+    "  DEPENDS \"${source_dir}/number.txt\"\n"
+    "  WORKING_DIRECTORY \"\${CMAKE_CURRENT_BINARY_DIR}\"\n"
+    "  COMMENT \"Generating C source for Reprobuild\"\n"
+    "  JOB_POOL codegen\n"
+    "  VERBATIM)\n"
+    "add_executable(genapp main.c \"\${generated}\")\n")
+  file(WRITE "${source_dir}/number.txt" "42\n")
+  file(WRITE "${source_dir}/main.c"
+    "int generated_value(void);\n"
+    "int main(void) { return generated_value() == 42 ? 0 : 1; }\n")
+endfunction()
+
+function(write_custom_depfile_project source_dir project_name)
+  file(REMOVE_RECURSE "${source_dir}")
+  file(MAKE_DIRECTORY "${source_dir}")
+  file(WRITE "${source_dir}/make_generated.cmake"
+    "file(READ \"\${VISIBLE}\" visible)\n"
+    "file(READ \"\${HIDDEN}\" hidden)\n"
+    "string(STRIP \"\${visible}\" visible)\n"
+    "string(STRIP \"\${hidden}\" hidden)\n"
+    "file(WRITE \"\${OUT}\" \"int generated_value(void) { return \${visible} + \${hidden}; }\\n\")\n"
+    "file(WRITE \"\${DEP}\" \"\${OUT}: \${VISIBLE} \${HIDDEN}\\n\")\n")
+  file(WRITE "${source_dir}/CMakeLists.txt"
+    "cmake_minimum_required(VERSION 3.20)\n"
+    "project(${project_name} C)\n"
+    "set(generated \"\${CMAKE_CURRENT_BINARY_DIR}/generated.c\")\n"
+    "set(depfile \"\${CMAKE_CURRENT_BINARY_DIR}/generated.d\")\n"
+    "add_custom_command(OUTPUT \"\${generated}\"\n"
+    "  COMMAND \"\${CMAKE_COMMAND}\" -DOUT=\${generated} -DDEP=\${depfile} -DVISIBLE=${source_dir}/visible.txt -DHIDDEN=${source_dir}/hidden.txt -P \"${source_dir}/make_generated.cmake\"\n"
+    "  DEPENDS \"${source_dir}/visible.txt\"\n"
+    "  DEPFILE \"\${depfile}\"\n"
+    "  WORKING_DIRECTORY \"\${CMAKE_CURRENT_BINARY_DIR}\"\n"
+    "  COMMENT \"Generating C source with hidden depfile input\"\n"
+    "  VERBATIM)\n"
+    "add_executable(depgen main.c \"\${generated}\")\n")
+  file(WRITE "${source_dir}/visible.txt" "30\n")
+  file(WRITE "${source_dir}/hidden.txt" "12\n")
+  file(WRITE "${source_dir}/main.c"
+    "int generated_value(void);\n"
+    "int main(void) { return generated_value() == 42 ? 0 : 1; }\n")
+endfunction()
+
+function(write_builtin_project source_dir project_name install_prefix)
+  file(REMOVE_RECURSE "${source_dir}" "${install_prefix}")
+  file(MAKE_DIRECTORY "${source_dir}")
+  file(WRITE "${source_dir}/CMakeLists.txt"
+    "cmake_minimum_required(VERSION 3.20)\n"
+    "project(${project_name} C)\n"
+    "include(CTest)\n"
+    "set(CPACK_GENERATOR TGZ)\n"
+    "set(CPACK_SOURCE_GENERATOR TGZ)\n"
+    "set(CPACK_PACKAGE_FILE_NAME reprobuild-builtins-pkg)\n"
+    "set(CPACK_SOURCE_PACKAGE_FILE_NAME reprobuild-builtins-src)\n"
+    "set(CPACK_SOURCE_IGNORE_FILES \"/builtin-build/;/.git/\")\n"
+    "add_executable(instapp main.c)\n"
+    "add_test(NAME instapp_runs COMMAND instapp)\n"
+    "install(TARGETS instapp RUNTIME DESTINATION bin)\n"
+    "include(CPack)\n")
+  file(WRITE "${source_dir}/main.c" "int main(void) { return 0; }\n")
+endfunction()
+
+function(write_regeneration_project source_dir project_name value)
+  file(MAKE_DIRECTORY "${source_dir}")
+  file(WRITE "${source_dir}/CMakeLists.txt"
+    "cmake_minimum_required(VERSION 3.20)\n"
+    "project(${project_name} C)\n"
+    "add_executable(regenapp main.c)\n"
+    "target_compile_definitions(regenapp PRIVATE REGEN_VALUE=${value})\n")
+  file(WRITE "${source_dir}/main.c"
+    "/* regeneration source value ${value} */\n"
+    "#ifndef REGEN_VALUE\n"
+    "#  error REGEN_VALUE missing\n"
+    "#endif\n"
+    "int main(void) { return REGEN_VALUE; }\n")
+endfunction()
+
+function(write_glob_regeneration_project source_dir project_name with_extra)
+  file(MAKE_DIRECTORY "${source_dir}")
+  file(WRITE "${source_dir}/CMakeLists.txt"
+    "cmake_minimum_required(VERSION 3.20)\n"
+    "project(${project_name} C)\n"
+    "file(GLOB glob_sources CONFIGURE_DEPENDS \"\${CMAKE_CURRENT_SOURCE_DIR}/*.c\")\n"
+    "add_executable(globapp \${glob_sources})\n")
+  if(with_extra)
+    file(WRITE "${source_dir}/main.c"
+      "int base_value(void); int extra_value(void);\n"
+      "int main(void) { return base_value() + extra_value() == 9 ? 0 : 1; }\n")
+    file(WRITE "${source_dir}/extra.c" "int extra_value(void) { return 4; }\n")
+  else()
+    file(REMOVE "${source_dir}/extra.c")
+    file(WRITE "${source_dir}/main.c"
+      "int base_value(void);\n"
+      "int main(void) { return base_value() == 5 ? 0 : 1; }\n")
+  endif()
+  file(WRITE "${source_dir}/base.c" "int base_value(void) { return 5; }\n")
 endfunction()
 
 function(versioned_shared_paths binary_dir base out_var)
@@ -513,7 +646,7 @@ elseif(TEST_MODE STREQUAL "hyphen_target_build")
   run_configure("${hyphen_source_dir}" "${hyphen_binary_dir}" TRUE "")
   check_hyphen_provider_metadata("${hyphen_binary_dir}" "${hyphen_source_dir}")
 
-  start_runquota("${TEST_BINARY_ROOT}" runquota_socket runquota_pid)
+  start_runquota("${TEST_BINARY_ROOT}" runquota_socket runquota_pid "--pool console=1")
   run_build("${hyphen_binary_dir}" "my-tool" "${runquota_socket}" hyphen_output)
   execute_process(
     COMMAND "${hyphen_binary_dir}/my-tool"
@@ -624,6 +757,26 @@ elseif(TEST_MODE STREQUAL "response_file_identity")
   execute_process(COMMAND "${rsp_binary_dir}/rspapp" RESULT_VARIABLE rsp_result)
   if(NOT rsp_result EQUAL 2)
     message(FATAL_ERROR "Response-file identity edit did not affect executable exit code: ${rsp_result}")
+  endif()
+elseif(TEST_MODE STREQUAL "custom_target_working_directory")
+  set(wd_source_dir "${TEST_BINARY_ROOT}/working-directory-src")
+  set(wd_binary_dir "${TEST_BINARY_ROOT}/working-directory-build")
+  write_custom_target_working_directory_project("${wd_source_dir}" ReprobuildWorkingDirectory)
+  run_configure("${wd_source_dir}" "${wd_binary_dir}" TRUE "")
+  start_runquota("${TEST_BINARY_ROOT}" runquota_socket runquota_pid)
+  run_build("${wd_binary_dir}" "write_wd" "${runquota_socket}" wd_output)
+  stop_runquota("${runquota_pid}")
+  set(expected_wd "${wd_binary_dir}/command-wd")
+  set(actual_file "${expected_wd}/wd.txt")
+  assert_file_exists("${actual_file}" "custom target working directory")
+  file(READ "${actual_file}" actual_wd)
+  string(STRIP "${actual_wd}" actual_wd)
+  if(NOT "${actual_wd}" STREQUAL "${expected_wd}")
+    message(FATAL_ERROR
+      "Custom target WORKING_DIRECTORY was not honored.\n"
+      "expected: ${expected_wd}\n"
+      "actual: ${actual_wd}\n"
+      "output:\n${wd_output}")
   endif()
 elseif(TEST_MODE STREQUAL "pool_limit")
   set(pool_source_dir "${TEST_BINARY_ROOT}/pool-src")
@@ -807,6 +960,140 @@ elseif(TEST_MODE STREQUAL "library_incremental_relink")
   report_path_from_output("${second_output}" inc_report_path)
   file(READ "${inc_report_path}" inc_report)
   assert_contains("${inc_report}" "\"id\": \"link-libapp\"" "incremental relink report")
+elseif(TEST_MODE STREQUAL "generated_source_custom_command")
+  set(gen_source_dir "${TEST_BINARY_ROOT}/generated-src")
+  set(gen_binary_dir "${TEST_BINARY_ROOT}/generated-build")
+  write_generated_source_project("${gen_source_dir}" ReprobuildGeneratedSource)
+  run_configure("${gen_source_dir}" "${gen_binary_dir}" TRUE "")
+  file(READ "${gen_binary_dir}/reprobuild.nim" gen_provider)
+  foreach(expected IN ITEMS
+      "custom-command-genapp"
+      "generated.c"
+      "generated.stamp"
+      "pool = \"codegen\"")
+    assert_contains("${gen_provider}" "${expected}" "generated source provider")
+  endforeach()
+  start_runquota("${TEST_BINARY_ROOT}" runquota_socket runquota_pid "--pool codegen=1")
+  run_build("${gen_binary_dir}" "genapp" "${runquota_socket}" gen_output)
+  stop_runquota("${runquota_pid}")
+  foreach(path IN ITEMS "${gen_binary_dir}/generated.c" "${gen_binary_dir}/generated.stamp" "${gen_binary_dir}/genapp")
+    assert_file_exists("${path}" "generated source custom command")
+  endforeach()
+  execute_process(COMMAND "${gen_binary_dir}/genapp" RESULT_VARIABLE gen_result)
+  if(NOT gen_result EQUAL 0)
+    message(FATAL_ERROR "Generated-source executable failed with ${gen_result}")
+  endif()
+  report_path_from_output("${gen_output}" gen_report_path)
+  file(READ "${gen_report_path}" gen_report)
+  assert_contains("${gen_report}" "\"id\": \"custom-command-genapp" "generated source report")
+  assert_contains("${gen_report}" "\"id\": \"compile-genapp" "generated source report")
+elseif(TEST_MODE STREQUAL "custom_depfile_hidden_input")
+  set(depcc_source_dir "${TEST_BINARY_ROOT}/custom-dep-src")
+  set(depcc_binary_dir "${TEST_BINARY_ROOT}/custom-dep-build")
+  write_custom_depfile_project("${depcc_source_dir}" ReprobuildCustomDepfile)
+  run_configure("${depcc_source_dir}" "${depcc_binary_dir}" TRUE "")
+  start_runquota("${TEST_BINARY_ROOT}" runquota_socket runquota_pid)
+  run_build("${depcc_binary_dir}" "depgen" "${runquota_socket}" first_output)
+  report_path_from_output("${first_output}" first_report_path)
+  file(READ "${first_report_path}" first_report)
+  assert_contains("${first_report}" "${depcc_source_dir}/hidden.txt" "custom depfile evidence")
+  file(WRITE "${depcc_source_dir}/hidden.txt" "13\n")
+  run_build("${depcc_binary_dir}" "depgen" "${runquota_socket}" second_output)
+  stop_runquota("${runquota_pid}")
+  assert_contains("${second_output}" "custom-command-depgen" "custom depfile rebuild output")
+  assert_contains("${second_output}" "generated.c.o status=asSucceeded launched=true" "custom depfile rebuild output")
+  assert_contains("${second_output}" "main.c.o status=asCacheHit launched=false" "custom depfile rebuild output")
+  report_path_from_output("${second_output}" second_report_path)
+  file(READ "${second_report_path}" second_report)
+  assert_contains("${second_report}" "\"id\": \"custom-command-depgen" "custom depfile report")
+elseif(TEST_MODE STREQUAL "builtin_install_and_test_targets")
+  set(builtin_source_dir "${TEST_BINARY_ROOT}/builtin-src")
+  set(builtin_binary_dir "${TEST_BINARY_ROOT}/builtin-build")
+  set(builtin_install_dir "${TEST_BINARY_ROOT}/install-root")
+  write_builtin_project("${builtin_source_dir}" ReprobuildBuiltins "${builtin_install_dir}")
+  run_configure("${builtin_source_dir}" "${builtin_binary_dir}" TRUE ""
+    "-DCMAKE_INSTALL_PREFIX=${builtin_install_dir}")
+  file(READ "${builtin_binary_dir}/CMakeFiles/reprobuild/provider.meta" builtin_metadata)
+  foreach(expected IN ITEMS "install" "install/local" "install/strip" "preinstall" "test" "package" "package_source" "rebuild_cache" "help")
+    assert_contains("${builtin_metadata}" "${expected}" "builtin metadata")
+  endforeach()
+  file(GLOB help_wrappers "${builtin_binary_dir}/CMakeFiles/reprobuild/bin/*help*")
+  list(LENGTH help_wrappers help_wrapper_count)
+  if(NOT help_wrapper_count EQUAL 1)
+    message(FATAL_ERROR "Expected exactly one generated help wrapper, found ${help_wrapper_count}: ${help_wrappers}")
+  endif()
+  list(GET help_wrappers 0 help_wrapper)
+  file(READ "${help_wrapper}" help_wrapper_content)
+  assert_contains("${help_wrapper_content}" "preinstall" "help wrapper")
+  assert_contains("${help_wrapper_content}" "package_source" "help wrapper")
+  start_runquota("${TEST_BINARY_ROOT}" runquota_socket runquota_pid "--pool console=1")
+  run_build("${builtin_binary_dir}" "help" "${runquota_socket}" help_output)
+  assert_contains("${help_output}" "selectedTarget: help" "help target output")
+  run_build("${builtin_binary_dir}" "preinstall" "${runquota_socket}" preinstall_output)
+  assert_file_exists("${builtin_binary_dir}/instapp" "preinstall target")
+  run_build("${builtin_binary_dir}" "rebuild_cache" "${runquota_socket}" rebuild_cache_output)
+  run_build("${builtin_binary_dir}" "install" "${runquota_socket}" install_output)
+  assert_file_exists("${builtin_install_dir}/bin/instapp" "install target")
+  file(REMOVE "${builtin_install_dir}/bin/instapp")
+  run_build("${builtin_binary_dir}" "install/local" "${runquota_socket}" install_local_output)
+  assert_file_exists("${builtin_install_dir}/bin/instapp" "install/local target")
+  file(REMOVE "${builtin_install_dir}/bin/instapp")
+  run_build("${builtin_binary_dir}" "install/strip" "${runquota_socket}" install_strip_output)
+  assert_file_exists("${builtin_install_dir}/bin/instapp" "install/strip target")
+  run_build("${builtin_binary_dir}" "test" "${runquota_socket}" test_output)
+  run_build("${builtin_binary_dir}" "package" "${runquota_socket}" package_output)
+  run_build("${builtin_binary_dir}" "package_source" "${runquota_socket}" package_source_output)
+  stop_runquota("${runquota_pid}")
+  assert_contains("${preinstall_output}" "selectedTarget: preinstall" "preinstall target output")
+  assert_contains("${rebuild_cache_output}" "selectedTarget: rebuild_cache" "rebuild_cache target output")
+  assert_contains("${install_output}" "selectedTarget: install" "install target output")
+  assert_contains("${install_local_output}" "selectedTarget: install/local" "install/local target output")
+  assert_contains("${install_strip_output}" "selectedTarget: install/strip" "install/strip target output")
+  assert_contains("${test_output}" "selectedTarget: test" "test target output")
+  assert_contains("${package_output}" "selectedTarget: package" "package target output")
+  assert_contains("${package_source_output}" "selectedTarget: package_source" "package_source target output")
+  assert_file_exists("${builtin_binary_dir}/reprobuild-builtins-pkg.tar.gz" "package target")
+  assert_file_exists("${builtin_binary_dir}/reprobuild-builtins-src.tar.gz" "package_source target")
+elseif(TEST_MODE STREQUAL "regeneration_refresh")
+  set(regen_source_dir "${TEST_BINARY_ROOT}/regen-src")
+  set(regen_binary_dir "${TEST_BINARY_ROOT}/regen-build")
+  file(REMOVE_RECURSE "${regen_source_dir}")
+  write_regeneration_project("${regen_source_dir}" ReprobuildRegen 1)
+  run_configure("${regen_source_dir}" "${regen_binary_dir}" TRUE "")
+  start_runquota("${TEST_BINARY_ROOT}" runquota_socket runquota_pid)
+  run_build("${regen_binary_dir}" "regenapp" "${runquota_socket}" regen_first)
+  execute_process(COMMAND "${regen_binary_dir}/regenapp" RESULT_VARIABLE regen_first_result)
+  if(NOT regen_first_result EQUAL 1)
+    stop_runquota("${runquota_pid}")
+    message(FATAL_ERROR "Expected first regenapp exit 1, got ${regen_first_result}")
+  endif()
+  execute_process(COMMAND "${CMAKE_COMMAND}" -E sleep 1.1)
+  write_regeneration_project("${regen_source_dir}" ReprobuildRegen 2)
+  run_build("${regen_binary_dir}" "regenapp" "${runquota_socket}" regen_second)
+  execute_process(COMMAND "${regen_binary_dir}/regenapp" RESULT_VARIABLE regen_second_result)
+  if(NOT regen_second_result EQUAL 2)
+    stop_runquota("${runquota_pid}")
+    message(FATAL_ERROR "Expected regenerated regenapp exit 2, got ${regen_second_result}")
+  endif()
+
+  set(glob_source_dir "${TEST_BINARY_ROOT}/glob-src")
+  set(glob_binary_dir "${TEST_BINARY_ROOT}/glob-build")
+  file(REMOVE_RECURSE "${glob_source_dir}")
+  write_glob_regeneration_project("${glob_source_dir}" ReprobuildGlob FALSE)
+  run_configure("${glob_source_dir}" "${glob_binary_dir}" TRUE "")
+  run_build("${glob_binary_dir}" "globapp" "${runquota_socket}" glob_first)
+  execute_process(COMMAND "${CMAKE_COMMAND}" -E sleep 1.1)
+  write_glob_regeneration_project("${glob_source_dir}" ReprobuildGlob TRUE)
+  run_build("${glob_binary_dir}" "globapp" "${runquota_socket}" glob_second)
+  stop_runquota("${runquota_pid}")
+  execute_process(COMMAND "${glob_binary_dir}/globapp" RESULT_VARIABLE glob_result)
+  if(NOT glob_result EQUAL 0)
+    message(FATAL_ERROR "Glob-regenerated executable failed with ${glob_result}")
+  endif()
+  file(READ "${glob_binary_dir}/reprobuild.nim" glob_provider)
+  assert_contains("${glob_provider}" "extra.c" "glob regeneration provider")
+  assert_contains("${regen_second}" "main.c.o status=asSucceeded launched=true" "regeneration build output")
+  assert_contains("${glob_second}" "extra.c.o status=asSucceeded launched=true" "glob regeneration build output")
 else()
   message(FATAL_ERROR "Unknown TEST_MODE: ${TEST_MODE}")
 endif()

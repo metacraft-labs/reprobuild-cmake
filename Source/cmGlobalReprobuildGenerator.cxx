@@ -29,6 +29,7 @@
 #include "cmLocalReprobuildGenerator.h"
 #include "cmList.h"
 #include "cmMakefile.h"
+#include "cmPolicies.h"
 #include "cmSourceFile.h"
 #include "cmStateTypes.h"
 #include "cmStringAlgorithms.h"
@@ -427,6 +428,57 @@ std::vector<std::string> ReprobuildEvaluateCleanFiles(cmLocalGenerator* lg,
   return std::vector<std::string>(files.begin(), files.end());
 }
 
+std::string ReprobuildOutputPath(std::string const& binaryDir,
+                                 std::string const& baseDir,
+                                 std::string const& path)
+{
+  return ReprobuildRelativeTo(binaryDir,
+                              cmSystemTools::CollapseFullPath(path, baseDir));
+}
+
+std::string ReprobuildCustomDepfilePath(std::string const& binaryDir,
+                                        cmLocalGenerator* lg,
+                                        cmCustomCommandGenerator const& ccg)
+{
+  std::string depfile = ccg.GetDepfile();
+  if (depfile.empty()) {
+    return std::string();
+  }
+  std::string const base =
+    ccg.GetWorkingDirectory().empty() ? lg->GetCurrentBinaryDirectory()
+                                      : ccg.GetWorkingDirectory();
+  return ReprobuildOutputPath(binaryDir, base, depfile);
+}
+
+std::vector<std::string> ReprobuildCustomCommandLines(
+  cmCustomCommandGenerator const& ccg, bool echoComment,
+  std::string const& defaultWorkingDirectory)
+{
+  std::vector<std::string> commandLines;
+  if (echoComment) {
+    if (cm::optional<std::string> comment = ccg.GetComment()) {
+      commandLines.push_back(cmStrCat("echo ",
+                                      ReprobuildShellSingleQuote(*comment)));
+    }
+  }
+  for (unsigned int i = 0; i < ccg.GetNumberOfCommands(); ++i) {
+    std::string workingDirectory = ccg.GetWorkingDirectory();
+    if (workingDirectory.empty()) {
+      workingDirectory = defaultWorkingDirectory;
+    }
+    std::string commandLine;
+    if (!workingDirectory.empty()) {
+      commandLine += "cd ";
+      commandLine += ReprobuildShellSingleQuote(workingDirectory);
+      commandLine += " && ";
+    }
+    commandLine += ReprobuildShellSingleQuote(ccg.GetCommand(i));
+    ccg.AppendArguments(i, commandLine);
+    commandLines.push_back(commandLine);
+  }
+  return commandLines;
+}
+
 struct ReprobuildAction
 {
   std::string Id;
@@ -449,6 +501,7 @@ struct ReprobuildTarget
 {
   std::string Name;
   std::string Var;
+  std::vector<ReprobuildAction> CustomActions;
   std::vector<ReprobuildAction> CompileActions;
   std::vector<ReprobuildAction> PreBuildActions;
   std::vector<ReprobuildAction> PreLinkActions;
@@ -457,6 +510,7 @@ struct ReprobuildTarget
   ReprobuildAction LinkAction;
   ReprobuildAction UtilityAction;
   std::vector<std::string> ObjectOutputs;
+  std::vector<std::string> TargetDeps;
   bool IsUtility = false;
   bool HasLinkAction = false;
   bool IncludeInAll = true;
@@ -627,30 +681,45 @@ void cmGlobalReprobuildGenerator::WriteProviderMetadata()
         std::vector<std::string> commandLines;
         bool usesTerminal = false;
         std::string jobPool;
+        std::vector<std::string> utilityInputs;
+        std::vector<std::string> utilityOutputs;
+        std::string utilityDepfile;
         auto appendCustomCommand = [&](cmCustomCommand const& cc) {
           cmCustomCommandGenerator ccg(cc, config, lg.get());
+          if (utilityDepfile.empty()) {
+            utilityDepfile = ReprobuildCustomDepfilePath(binaryDir, lg.get(),
+                                                         ccg);
+          }
+          for (std::string const& output : ccg.GetOutputs()) {
+            utilityOutputs.push_back(ReprobuildOutputPath(
+              binaryDir, lg->GetCurrentBinaryDirectory(), output));
+            ReprobuildAppendCleanFile(cleanFiles,
+                                      lg->GetCurrentBinaryDirectory(),
+                                      output);
+          }
           for (std::string const& byproduct : ccg.GetByproducts()) {
+            utilityOutputs.push_back(ReprobuildOutputPath(
+              binaryDir, lg->GetCurrentBinaryDirectory(), byproduct));
             ReprobuildAppendCleanFile(cleanFiles,
                                       lg->GetCurrentBinaryDirectory(),
                                       byproduct);
+          }
+          for (std::string const& dep : ccg.GetDepends()) {
+            std::string realDep;
+            if (lg->GetRealDependency(dep, config, realDep,
+                                      cc.GetCMP0212Status())) {
+              utilityInputs.push_back(ReprobuildOutputPath(
+                binaryDir, lg->GetCurrentBinaryDirectory(), realDep));
+            }
           }
           if (cc.GetUsesTerminal()) {
             usesTerminal = true;
           } else if (jobPool.empty() && !cc.GetJobPool().empty()) {
             jobPool = cc.GetJobPool();
           }
-          for (unsigned int i = 0; i < ccg.GetNumberOfCommands(); ++i) {
-            std::string commandLine;
-            std::string const workingDirectory = ccg.GetWorkingDirectory();
-            if (!workingDirectory.empty()) {
-              commandLine += "cd ";
-              commandLine += ReprobuildShellSingleQuote(workingDirectory);
-              commandLine += " && ";
-            }
-            commandLine += ReprobuildShellSingleQuote(ccg.GetCommand(i));
-            ccg.AppendArguments(i, commandLine);
-            commandLines.push_back(commandLine);
-          }
+          cm::append(commandLines,
+                     ReprobuildCustomCommandLines(
+                       ccg, true, lg->GetCurrentBinaryDirectory()));
         };
         for (cmCustomCommand const& cc : utilityCommands) {
           appendCustomCommand(cc);
@@ -671,6 +740,9 @@ void cmGlobalReprobuildGenerator::WriteProviderMetadata()
         target.Var = ReprobuildNimIdent("target", nextTargetVar++, target.Name);
         target.IsUtility = true;
         target.IncludeInAll = !gt->GetPropertyAsBool("EXCLUDE_FROM_ALL");
+        for (auto const& utility : gt->GetUtilities()) {
+          target.TargetDeps.push_back(utility.Value.first);
+        }
         target.UtilityAction.Id =
           ReprobuildSafeId(cmStrCat("custom-", gt->GetName()));
         target.UtilityAction.Var = ReprobuildNimIdent(
@@ -679,8 +751,9 @@ void cmGlobalReprobuildGenerator::WriteProviderMetadata()
           ReprobuildSafeId(cmStrCat("reprobuild-cmake-",
                                     target.UtilityAction.Var));
         target.UtilityAction.Pool = usesTerminal ? "console" : jobPool;
-        target.UtilityAction.Inputs = {};
-        target.UtilityAction.Outputs = {};
+        target.UtilityAction.Inputs = utilityInputs;
+        target.UtilityAction.Outputs = utilityOutputs;
+        target.UtilityAction.Depfile = utilityDepfile;
         target.UtilityAction.Cacheable = false;
         std::string const wrapperPath =
           cmStrCat(wrapperDir, "/", target.UtilityAction.ToolId);
@@ -730,6 +803,81 @@ void cmGlobalReprobuildGenerator::WriteProviderMetadata()
       target.Name = gt->GetName();
       target.Var = ReprobuildNimIdent("target", nextTargetVar++, target.Name);
       target.IncludeInAll = !gt->GetPropertyAsBool("EXCLUDE_FROM_ALL");
+      for (auto const& utility : gt->GetUtilities()) {
+        target.TargetDeps.push_back(utility.Value.first);
+      }
+
+      std::vector<cmSourceFile const*> customCommandSources;
+      gt->GetCustomCommands(customCommandSources, config);
+      std::set<cmCustomCommand const*> emittedCustomCommands;
+      unsigned int customIndex = 0;
+      for (cmSourceFile const* customSource : customCommandSources) {
+        cmCustomCommand const* cc = customSource->GetCustomCommand();
+        if (cc == nullptr || !emittedCustomCommands.insert(cc).second) {
+          continue;
+        }
+        cmCustomCommandGenerator ccg(*cc, config, lg.get());
+        std::vector<std::string> commandLines =
+          ReprobuildCustomCommandLines(
+            ccg, true, lg->GetCurrentBinaryDirectory());
+        if (commandLines.empty()) {
+          continue;
+        }
+
+        ReprobuildAction custom;
+        std::string const primaryOutput =
+          ccg.GetOutputs().empty()
+          ? cmStrCat("custom-", gt->GetName(), "-", customIndex)
+          : ReprobuildOutputPath(binaryDir, lg->GetCurrentBinaryDirectory(),
+                                 ccg.GetOutputs().front());
+        custom.Id =
+          ReprobuildSafeId(cmStrCat("custom-command-", gt->GetName(), "-",
+                                    primaryOutput));
+        custom.Var = ReprobuildNimIdent("action", nextActionVar++,
+                                        custom.Id);
+        custom.ToolId =
+          ReprobuildSafeId(cmStrCat("reprobuild-cmake-", custom.Var));
+        custom.Pool = cc->GetUsesTerminal() ? "console" : cc->GetJobPool();
+        custom.Cacheable = true;
+        for (std::string const& output : ccg.GetOutputs()) {
+          custom.Outputs.push_back(ReprobuildOutputPath(
+            binaryDir, lg->GetCurrentBinaryDirectory(), output));
+          ReprobuildAppendCleanFile(cleanFiles,
+                                    lg->GetCurrentBinaryDirectory(), output);
+        }
+        for (std::string const& byproduct : ccg.GetByproducts()) {
+          custom.Outputs.push_back(ReprobuildOutputPath(
+            binaryDir, lg->GetCurrentBinaryDirectory(), byproduct));
+          ReprobuildAppendCleanFile(cleanFiles,
+                                    lg->GetCurrentBinaryDirectory(),
+                                    byproduct);
+        }
+        for (std::string const& dep : ccg.GetDepends()) {
+          std::string realDep;
+          if (lg->GetRealDependency(dep, config, realDep,
+                                    cc->GetCMP0212Status())) {
+            custom.Inputs.push_back(ReprobuildOutputPath(
+              binaryDir, lg->GetCurrentBinaryDirectory(), realDep));
+          }
+        }
+        custom.Depfile = ReprobuildCustomDepfilePath(binaryDir, lg.get(), ccg);
+        if (!custom.Depfile.empty()) {
+          ReprobuildAppendCleanFile(cleanFiles, binaryDir, custom.Depfile);
+        }
+
+        std::string const wrapperPath =
+          cmStrCat(wrapperDir, "/", custom.ToolId);
+        if (!ReprobuildWriteCommandScript(wrapperPath, "", commandLines)) {
+          this->GetCMakeInstance()->IssueMessage(
+            MessageType::FATAL_ERROR,
+            cmStrCat("Could not write Reprobuild custom command wrapper: ",
+                     wrapperPath));
+          return;
+        }
+        usedTools.insert(custom.ToolId);
+        target.CustomActions.push_back(std::move(custom));
+        ++customIndex;
+      }
 
       std::vector<cmSourceFile const*> sources;
       gt->GetObjectSources(sources, config);
@@ -1329,6 +1477,222 @@ void cmGlobalReprobuildGenerator::WriteProviderMetadata()
     }
   }
 
+  auto terminalActionIds = [](ReprobuildTarget const& target) {
+    std::vector<std::string> ids;
+    if (target.IsUtility) {
+      ids.push_back(target.UtilityAction.Id);
+      return ids;
+    }
+    if (!target.PostBuildActions.empty()) {
+      ids.push_back(target.PostBuildActions.back().Id);
+    } else if (!target.SymlinkActions.empty()) {
+      ids.push_back(target.SymlinkActions.back().Id);
+    } else if (target.HasLinkAction) {
+      ids.push_back(target.LinkAction.Id);
+    } else {
+      for (ReprobuildAction const& action : target.CompileActions) {
+        ids.push_back(action.Id);
+      }
+      if (ids.empty()) {
+        for (ReprobuildAction const& action : target.CustomActions) {
+          ids.push_back(action.Id);
+        }
+      }
+    }
+    return ids;
+  };
+  auto appendInitialDeps = [](ReprobuildTarget& target,
+                              std::vector<std::string> const& deps) {
+    if (deps.empty()) {
+      return;
+    }
+    if (target.IsUtility) {
+      for (std::string const& dep : deps) {
+        ReprobuildAppendUnique(target.UtilityAction.Deps, dep);
+      }
+      return;
+    }
+    std::vector<ReprobuildAction*> initialActions;
+    if (!target.CustomActions.empty()) {
+      for (ReprobuildAction& action : target.CustomActions) {
+        initialActions.push_back(&action);
+      }
+    } else if (!target.PreBuildActions.empty()) {
+      for (ReprobuildAction& action : target.PreBuildActions) {
+        initialActions.push_back(&action);
+      }
+    } else if (!target.CompileActions.empty()) {
+      for (ReprobuildAction& action : target.CompileActions) {
+        initialActions.push_back(&action);
+      }
+    } else if (target.HasLinkAction) {
+      initialActions.push_back(&target.LinkAction);
+    }
+    for (ReprobuildAction* action : initialActions) {
+      for (std::string const& dep : deps) {
+        ReprobuildAppendUnique(action->Deps, dep);
+      }
+    }
+  };
+
+  std::map<std::string, std::vector<std::string>> targetTerminals;
+  for (ReprobuildTarget const& target : buildTargets) {
+    targetTerminals[target.Name] = terminalActionIds(target);
+  }
+  for (ReprobuildTarget& target : buildTargets) {
+    std::vector<std::string> deps;
+    for (std::string const& depName : target.TargetDeps) {
+      auto const it = targetTerminals.find(depName);
+      if (it != targetTerminals.end()) {
+        cm::append(deps, it->second);
+      }
+    }
+    appendInitialDeps(target, deps);
+  }
+
+  std::vector<std::string> allTargetDeps;
+  for (ReprobuildTarget const& target : buildTargets) {
+    if (target.IncludeInAll) {
+      cm::append(allTargetDeps, terminalActionIds(target));
+    }
+  }
+
+  auto addBuiltinTarget =
+    [&](std::string const& name, std::vector<std::string> const& commands,
+        std::vector<std::string> const& deps, bool usesTerminal) {
+      ReprobuildTarget target;
+      target.Name = name;
+      target.Var = ReprobuildNimIdent("target", nextTargetVar++, name);
+      target.IsUtility = true;
+      target.IncludeInAll = false;
+      target.UtilityAction.Id = ReprobuildSafeId(cmStrCat("builtin-", name));
+      target.UtilityAction.Var = ReprobuildNimIdent(
+        "action", nextActionVar++, target.UtilityAction.Id);
+      target.UtilityAction.ToolId =
+        ReprobuildSafeId(cmStrCat("reprobuild-cmake-",
+                                  target.UtilityAction.Var));
+      target.UtilityAction.Pool = usesTerminal ? "console" : "";
+      target.UtilityAction.Deps = deps;
+      target.UtilityAction.Cacheable = false;
+      std::string const wrapperPath =
+        cmStrCat(wrapperDir, "/", target.UtilityAction.ToolId);
+      if (!ReprobuildWriteCommandScript(wrapperPath, binaryDir, commands)) {
+        this->GetCMakeInstance()->IssueMessage(
+          MessageType::FATAL_ERROR,
+          cmStrCat("Could not write Reprobuild builtin target wrapper: ",
+                   wrapperPath));
+        return false;
+      }
+      usedTools.insert(target.UtilityAction.ToolId);
+      buildTargets.push_back(std::move(target));
+      return true;
+    };
+
+  std::string const cmakeCmd =
+    ReprobuildShellSingleQuote(cmSystemTools::GetCMakeCommand());
+  std::string const ctestCmd =
+    ReprobuildShellSingleQuote(cmSystemTools::GetCTestCommand());
+  std::string const cpackCmd =
+    ReprobuildShellSingleQuote(cmSystemTools::GetCPackCommand());
+  cmMakefile* rootMf = this->LocalGenerators.front()->GetMakefile();
+  std::vector<std::string> helpTargets = { "all", "default", "clean" };
+  auto addHelpTargetName = [&helpTargets](std::string const& name) {
+    helpTargets.push_back(name);
+  };
+  bool const skipInstallRules = rootMf->IsOn("CMAKE_SKIP_INSTALL_RULES");
+  if (!skipInstallRules && cmSystemTools::FileExists(
+                             cmStrCat(binaryDir, "/cmake_install.cmake"))) {
+    if (!addBuiltinTarget("install",
+                          { cmStrCat(cmakeCmd, " -P cmake_install.cmake") },
+                          allTargetDeps, true) ||
+        !addBuiltinTarget("install/local",
+                          { cmStrCat(cmakeCmd,
+                                     " -DCMAKE_INSTALL_LOCAL_ONLY=1 -P "
+                                     "cmake_install.cmake") },
+                          {}, true) ||
+        !addBuiltinTarget("install/strip",
+                          { cmStrCat(cmakeCmd,
+                                     " -DCMAKE_INSTALL_DO_STRIP=1 -P "
+                                     "cmake_install.cmake") },
+                          allTargetDeps, true) ||
+        !addBuiltinTarget("preinstall",
+                          { cmStrCat(cmakeCmd,
+                                     " -E echo 'Built target preinstall'") },
+                          allTargetDeps, false)) {
+      return;
+    }
+    addHelpTargetName("install");
+    addHelpTargetName("install/local");
+    addHelpTargetName("install/strip");
+    addHelpTargetName("preinstall");
+  }
+  if (rootMf->IsOn("CMAKE_TESTING_ENABLED")) {
+    std::vector<std::string> testDeps = allTargetDeps;
+    if (cmValue noall =
+          rootMf->GetDefinition("CMAKE_SKIP_TEST_ALL_DEPENDENCY")) {
+      if (noall.IsOn()) {
+        testDeps.clear();
+      }
+    }
+    cmList ctestArgs(rootMf->GetDefinition("CMAKE_CTEST_ARGUMENTS"));
+    std::vector<std::string> testCommand = { ctestCmd };
+    for (std::string const& arg : ctestArgs) {
+      testCommand.push_back(ReprobuildShellSingleQuote(arg));
+    }
+    if (!addBuiltinTarget("test", { cmJoin(testCommand, " ") }, testDeps,
+                          true)) {
+      return;
+    }
+    addHelpTargetName("test");
+  }
+  if (cmSystemTools::FileExists(cmStrCat(binaryDir, "/CPackConfig.cmake"))) {
+    std::vector<std::string> packageDeps;
+    if (cmValue noPackageAll =
+          rootMf->GetDefinition("CMAKE_SKIP_PACKAGE_ALL_DEPENDENCY")) {
+      if (noPackageAll.IsOff()) {
+        packageDeps = allTargetDeps;
+      }
+    } else {
+      packageDeps = allTargetDeps;
+    }
+    if (!addBuiltinTarget(
+          "package",
+          { cmStrCat(cpackCmd, " --config ./CPackConfig.cmake") },
+          packageDeps, false)) {
+      return;
+    }
+    addHelpTargetName("package");
+  }
+  if (cmSystemTools::FileExists(cmStrCat(binaryDir,
+                                         "/CPackSourceConfig.cmake"))) {
+    if (!addBuiltinTarget(
+          "package_source",
+          { cmStrCat(cpackCmd, " --config ./CPackSourceConfig.cmake") },
+          {}, false)) {
+      return;
+    }
+    addHelpTargetName("package_source");
+  }
+  addHelpTargetName("help");
+  addHelpTargetName("rebuild_cache");
+  if (!addBuiltinTarget("help",
+                        { cmStrCat("echo ",
+                                   ReprobuildShellSingleQuote(cmStrCat(
+                                     "The Reprobuild generator provides: ",
+                                     cmJoin(helpTargets, " ")))) },
+                        {}, false) ||
+      !addBuiltinTarget("rebuild_cache",
+                        { cmStrCat(cmakeCmd,
+                                   " --regenerate-during-build -S ",
+                                   ReprobuildShellSingleQuote(
+                                     this->GetCMakeInstance()
+                                       ->GetHomeDirectory()),
+                                   " -B ",
+                                   ReprobuildShellSingleQuote(binaryDir)) },
+                        {}, true)) {
+    return;
+  }
+
   if (buildTargets.empty()) {
     this->GetCMakeInstance()->IssueMessage(
       MessageType::FATAL_ERROR,
@@ -1487,6 +1851,10 @@ void cmGlobalReprobuildGenerator::WriteProviderMetadata()
                << target.UtilityAction.Var << ")\n";
     } else {
       std::vector<std::string> actionVars;
+      for (ReprobuildAction const& action : target.CustomActions) {
+        writeAction(action);
+        actionVars.push_back(action.Var);
+      }
       for (ReprobuildAction const& action : target.PreBuildActions) {
         writeAction(action);
         actionVars.push_back(action.Var);
@@ -1512,6 +1880,7 @@ void cmGlobalReprobuildGenerator::WriteProviderMetadata()
         actionVars.push_back(action.Var);
       }
       if (target.HasLinkAction && target.PreBuildActions.empty() &&
+          target.CustomActions.empty() &&
           target.PreLinkActions.empty() && target.SymlinkActions.empty() &&
           target.PostBuildActions.empty()) {
         provider << "    let " << target.Var
