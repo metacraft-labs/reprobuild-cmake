@@ -21,8 +21,10 @@
 #include "cmCustomCommand.h"
 #include "cmCustomCommandGenerator.h"
 #include "cmDocumentationEntry.h"
+#include "cmFileSetMetadata.h"
 #include "cmGlobalGeneratorFactory.h"
 #include "cmGeneratorExpression.h"
+#include "cmGeneratorFileSet.h"
 #include "cmGeneratorTarget.h"
 #include "cmLinkLineComputer.h"
 #include "cmLocalGenerator.h"
@@ -238,7 +240,13 @@ std::string ReprobuildCompilerVar(std::string const& lang)
 
 std::string ReprobuildToolId(std::string const& lang)
 {
-  return lang == "CXX" ? "reprobuild-cmake-cxx" : "reprobuild-cmake-cc";
+  if (lang == "CXX") {
+    return "reprobuild-cmake-cxx";
+  }
+  if (lang == "Fortran") {
+    return "reprobuild-cmake-fortran";
+  }
+  return "reprobuild-cmake-cc";
 }
 
 std::string ReprobuildArchiveToolId()
@@ -357,6 +365,9 @@ bool ReprobuildWriteSymlinkWrapper(std::string const& path,
 bool ReprobuildCompilerUsesMakeDepfile(cmMakefile const* mf,
                                        std::string const& lang)
 {
+  if (lang == "Fortran") {
+    return true;
+  }
   std::string const id =
     mf->GetSafeDefinition(cmStrCat("CMAKE_", lang, "_COMPILER_ID"));
   return id == "GNU" || id == "Clang" || id == "AppleClang";
@@ -479,6 +490,120 @@ std::vector<std::string> ReprobuildCustomCommandLines(
   return commandLines;
 }
 
+bool ReprobuildWriteDyndepActionMap(
+  std::string const& path,
+  std::vector<std::pair<std::string, std::string>> const& entries)
+{
+  cmSystemTools::MakeDirectory(cmSystemTools::GetFilenamePath(path));
+  cmsys::ofstream out(path.c_str());
+  if (!out) {
+    return false;
+  }
+  for (auto const& entry : entries) {
+    out << entry.first << "\t" << entry.second << "\n";
+  }
+  return true;
+}
+
+bool ReprobuildWriteTargetDependInfo(
+  std::string const& path, cmGeneratorTarget* gt, cmLocalGenerator* lg,
+  std::string const& lang, std::string const& config,
+  std::map<std::string, cmSourceFile const*> const& cxxModuleSources)
+{
+  cmSystemTools::MakeDirectory(cmSystemTools::GetFilenamePath(path));
+  cmsys::ofstream out(path.c_str());
+  if (!out) {
+    return false;
+  }
+  cmMakefile const* mf = lg->GetMakefile();
+  std::string moduleDir;
+  if (lang == "Fortran") {
+    moduleDir = gt->GetFortranModuleDirectory(mf->GetHomeOutputDirectory());
+  } else {
+    moduleDir = gt->ObjectDirectory;
+  }
+  if (moduleDir.empty()) {
+    moduleDir = mf->GetCurrentBinaryDirectory();
+  }
+  out << "{\n"
+      << "  \"language\": " << ReprobuildJsonEscape(lang) << ",\n"
+      << "  \"compiler-id\": "
+      << ReprobuildJsonEscape(
+           mf->GetSafeDefinition(cmStrCat("CMAKE_", lang, "_COMPILER_ID")))
+      << ",\n"
+      << "  \"compiler-simulate-id\": "
+      << ReprobuildJsonEscape(
+           mf->GetSafeDefinition(cmStrCat("CMAKE_", lang, "_SIMULATE_ID")))
+      << ",\n"
+      << "  \"compiler-frontend-variant\": "
+      << ReprobuildJsonEscape(mf->GetSafeDefinition(
+           cmStrCat("CMAKE_", lang, "_COMPILER_FRONTEND_VARIANT")))
+      << ",\n"
+      << "  \"module-dir\": " << ReprobuildJsonEscape(moduleDir) << ",\n";
+  if (lang == "Fortran") {
+    out << "  \"submodule-sep\": "
+        << ReprobuildJsonEscape(
+             mf->GetSafeDefinition("CMAKE_Fortran_SUBMODULE_SEP"))
+        << ",\n"
+        << "  \"submodule-ext\": "
+        << ReprobuildJsonEscape(
+             mf->GetSafeDefinition("CMAKE_Fortran_SUBMODULE_EXT"))
+        << ",\n";
+  }
+  out << "  \"dir-cur-bld\": "
+      << ReprobuildJsonEscape(mf->GetCurrentBinaryDirectory()) << ",\n"
+      << "  \"dir-cur-src\": "
+      << ReprobuildJsonEscape(mf->GetCurrentSourceDirectory()) << ",\n"
+      << "  \"dir-top-bld\": " << ReprobuildJsonEscape(mf->GetHomeOutputDirectory())
+      << ",\n"
+      << "  \"dir-top-src\": " << ReprobuildJsonEscape(mf->GetHomeDirectory())
+      << ",\n"
+      << "  \"include-dirs\": [";
+  std::vector<std::string> includes;
+  lg->GetIncludeDirectories(includes, gt, lang, config);
+  char const* sep = "";
+  for (std::string const& include : includes) {
+    out << sep << ReprobuildJsonEscape(include);
+    sep = ", ";
+  }
+  out << "],\n"
+      << "  \"linked-target-dirs\": [],\n"
+      << "  \"forward-modules-from-target-dirs\": [],\n";
+  if (lang == "CXX") {
+    out << "  \"bmi-installation\": null,\n"
+        << "  \"exports\": [],\n"
+        << "  \"sources\": {},\n"
+        << "  \"cxx-modules\": {";
+    sep = "";
+    for (auto const& item : cxxModuleSources) {
+      cmSourceFile const* source = item.second;
+      cmGeneratorFileSet const* fs = gt->GetFileSetForSource(config, source);
+      out << sep << "\n    " << ReprobuildJsonEscape(item.first) << ": {\n"
+          << "      \"bmi-only\": false,\n"
+          << "      \"compile-features\": [\"cxx_std_20\"],\n"
+          << "      \"compile-options\": [],\n"
+          << "      \"definitions\": [],\n"
+          << "      \"destination\": null,\n"
+          << "      \"include-directories\": [],\n"
+          << "      \"name\": "
+          << ReprobuildJsonEscape(fs ? fs->GetName() : "modules") << ",\n"
+          << "      \"relative-directory\": \"\",\n"
+          << "      \"source\": " << ReprobuildJsonEscape(source->GetFullPath())
+          << ",\n"
+          << "      \"type\": \"CXX_MODULES\",\n"
+          << "      \"visibility\": \"PRIVATE\"\n"
+          << "    }";
+      sep = ",";
+    }
+    out << "\n  }\n";
+  } else {
+    out << "  \"cxx-modules\": {},\n"
+        << "  \"sources\": {}\n";
+  }
+  out << "}\n";
+  return true;
+}
+
 struct ReprobuildAction
 {
   std::string Id;
@@ -489,6 +614,7 @@ struct ReprobuildAction
   std::vector<std::string> Outputs;
   std::vector<std::string> Deps;
   std::string Depfile;
+  std::string DynamicDepsFile;
   std::string Pool;
   std::string ResponseFile;
   std::string CompileDirectory;
@@ -554,11 +680,12 @@ void cmGlobalReprobuildGenerator::EnableLanguage(
   std::vector<std::string> const& languages, cmMakefile* mf, bool optional)
 {
   for (std::string const& lang : languages) {
-    if (lang != "NONE" && lang != "C" && lang != "CXX") {
+    if (lang != "NONE" && lang != "C" && lang != "CXX" &&
+        lang != "Fortran") {
       mf->IssueMessage(
         MessageType::FATAL_ERROR,
-        cmStrCat("The Reprobuild generator M2 slice supports only the C and "
-                 "CXX languages; language '",
+        cmStrCat("The Reprobuild generator M6 slice supports only the C, "
+                 "CXX, and Fortran languages; language '",
                  lang, "' is not supported."));
       cmSystemTools::SetFatalErrorOccurred();
       return;
@@ -902,21 +1029,27 @@ void cmGlobalReprobuildGenerator::WriteProviderMetadata()
           ReprobuildSafeId(cmStrCat("compile-", gt->GetName(), "-", objRel));
       }
 
+      std::map<std::string, std::vector<std::string>> dyndepDdis;
+      std::map<std::string, std::vector<std::pair<std::string, std::string>>>
+        dyndepActionMaps;
+      std::map<std::string, std::vector<std::string>> dyndepScanActions;
+      std::map<std::string, std::map<std::string, cmSourceFile const*>>
+        dyndepCxxModuleSources;
       std::vector<std::string> linkObjects;
       for (cmSourceFile const* source : sources) {
         std::string const lang = source->GetLanguage();
-        if (lang != "C" && lang != "CXX") {
+        if (lang != "C" && lang != "CXX" && lang != "Fortran") {
           this->GetCMakeInstance()->IssueMessage(
             MessageType::FATAL_ERROR,
-            cmStrCat("The Reprobuild generator M2 slice supports only C and "
-                     "CXX object sources; source '",
+            cmStrCat("The Reprobuild generator M6 slice supports only C, "
+                     "CXX, and Fortran object sources; source '",
                      source->GetFullPath(), "' uses language '", lang, "'."));
           return;
         }
         usedLanguages.insert(lang);
 
         cmMakefile const* mf = lg->GetMakefile();
-        if (ReprobuildCompilerIsMsvc(mf, lang)) {
+        if (lang != "Fortran" && ReprobuildCompilerIsMsvc(mf, lang)) {
           this->GetCMakeInstance()->IssueMessage(
             MessageType::FATAL_ERROR,
             "The Reprobuild generator M3 slice does not support MSVC "
@@ -924,7 +1057,7 @@ void cmGlobalReprobuildGenerator::WriteProviderMetadata()
             "recognized dependency evidence.");
           return;
         }
-        if (!ReprobuildCompilerUsesMakeDepfile(mf, lang)) {
+        if (lang != "Fortran" && !ReprobuildCompilerUsesMakeDepfile(mf, lang)) {
           this->GetCMakeInstance()->IssueMessage(
             MessageType::FATAL_ERROR,
             cmStrCat("The Reprobuild generator M3 slice supports depfiles "
@@ -944,6 +1077,8 @@ void cmGlobalReprobuildGenerator::WriteProviderMetadata()
         }
         ReprobuildAppendCleanFile(cleanFiles, binaryDir, objRel);
         ReprobuildAppendCleanFile(cleanFiles, binaryDir, depRel);
+        cmSystemTools::MakeDirectory(
+          cmSystemTools::GetFilenamePath(cmStrCat(binaryDir, "/", objRel)));
 
         std::vector<std::string> args;
         std::string flags;
@@ -985,15 +1120,139 @@ void cmGlobalReprobuildGenerator::WriteProviderMetadata()
           ReprobuildAppendOptionList(args, pchOptions);
         }
 
-        args.push_back("-MD");
-        args.push_back("-MT");
-        args.push_back(objRel);
-        args.push_back("-MF");
-        args.push_back(depRel);
-        args.push_back("-o");
-        args.push_back(objRel);
-        args.push_back("-c");
-        args.push_back(source->GetFullPath());
+        if (lang == "Fortran") {
+          std::string const ppRel = cmStrCat(objRel, ".ddi.i");
+          std::string const ddiRel = cmStrCat(objRel, ".ddi");
+          std::string const scanDepRel = cmStrCat(ppRel, ".d");
+
+          ReprobuildAction scan;
+          scan.Id = ReprobuildSafeId(cmStrCat("scan-", gt->GetName(), "-",
+                                              objRel));
+          scan.Var = ReprobuildNimIdent("action", nextActionVar++, scan.Id);
+          scan.ToolId = ReprobuildSafeId(cmStrCat("reprobuild-cmake-",
+                                                  scan.Var));
+          std::vector<std::string> scanLines;
+          scanLines.push_back(cmStrCat(
+            ReprobuildShellSingleQuote(
+              mf->GetSafeDefinition(ReprobuildCompilerVar(lang))),
+            " -cpp -E ", cmJoin(args, " "), " ",
+            ReprobuildShellSingleQuote(source->GetFullPath()), " -o ",
+            ReprobuildShellSingleQuote(ppRel)));
+          std::string const tdiRel =
+            cmStrCat("CMakeFiles/reprobuild/dyndep/", target.Var, "-",
+                     lang, "DependInfo.json");
+          scanLines.push_back(cmStrCat(
+            ReprobuildShellSingleQuote(cmSystemTools::GetCMakeCommand()),
+            " -E cmake_ninja_depends --tdi=",
+            ReprobuildShellSingleQuote(tdiRel), " --lang=Fortran --src=",
+            ReprobuildShellSingleQuote(ppRel), " --out=",
+            ReprobuildShellSingleQuote(ppRel), " --dep=",
+            ReprobuildShellSingleQuote(scanDepRel), " --obj=",
+            ReprobuildShellSingleQuote(objRel), " --ddi=",
+            ReprobuildShellSingleQuote(ddiRel), " --src-orig=",
+            ReprobuildShellSingleQuote(source->GetFullPath())));
+          std::string const scanWrapper =
+            cmStrCat(wrapperDir, "/", scan.ToolId);
+          if (!ReprobuildWriteCommandScript(scanWrapper, binaryDir,
+                                            scanLines)) {
+            this->GetCMakeInstance()->IssueMessage(
+              MessageType::FATAL_ERROR,
+              cmStrCat("Could not write Reprobuild Fortran scanner wrapper: ",
+                       scanWrapper));
+            return;
+          }
+          usedTools.insert(scan.ToolId);
+          scan.Inputs = { source->GetFullPath(), tdiRel };
+          scan.Outputs = { ppRel, ddiRel };
+          scan.Depfile = scanDepRel;
+          dyndepDdis[lang].push_back(ddiRel);
+          dyndepScanActions[lang].push_back(scan.Id);
+          dyndepActionMaps[lang].push_back({ objRel, ReprobuildSafeId(
+                                                       cmStrCat("compile-",
+                                                                gt->GetName(),
+                                                                "-", objRel)) });
+          target.CustomActions.push_back(std::move(scan));
+
+          args.push_back("-o");
+          args.push_back(objRel);
+          args.push_back("-c");
+          args.push_back(ppRel);
+        } else {
+          bool const needCxxDyndep =
+            lang == "CXX" && gt->NeedDyndepForSource(lang, config, source);
+          if (needCxxDyndep) {
+            std::string const ddiRel = cmStrCat(objRel, ".ddi");
+            std::string const scanDepRel = cmStrCat(ddiRel, ".d");
+            ReprobuildAction scan;
+            scan.Id = ReprobuildSafeId(cmStrCat("scan-", gt->GetName(), "-",
+                                                objRel));
+            scan.Var = ReprobuildNimIdent("action", nextActionVar++,
+                                          scan.Id);
+            scan.ToolId = ReprobuildSafeId(cmStrCat("reprobuild-cmake-",
+                                                    scan.Var));
+            std::string const scanner =
+              mf->GetSafeDefinition("CMAKE_CXX_COMPILER_CLANG_SCAN_DEPS");
+            if (scanner.empty()) {
+              this->GetCMakeInstance()->IssueMessage(
+                MessageType::FATAL_ERROR,
+                "The Reprobuild generator M6 CXX module path requires "
+                "CMAKE_CXX_COMPILER_CLANG_SCAN_DEPS.");
+              return;
+            }
+            std::vector<std::string> scanLines;
+            scanLines.push_back(cmStrCat(
+              ReprobuildShellSingleQuote(scanner), " -format=p1689 -- ",
+              ReprobuildShellSingleQuote(
+                mf->GetSafeDefinition(ReprobuildCompilerVar(lang))),
+              " ", cmJoin(args, " "), " -x c++ ",
+              ReprobuildShellSingleQuote(source->GetFullPath()), " -c -o ",
+              ReprobuildShellSingleQuote(objRel), " -MT ",
+              ReprobuildShellSingleQuote(ddiRel), " -MD -MF ",
+              ReprobuildShellSingleQuote(scanDepRel), " > ",
+              ReprobuildShellSingleQuote(ddiRel)));
+            std::string const scanWrapper =
+              cmStrCat(wrapperDir, "/", scan.ToolId);
+            if (!ReprobuildWriteCommandScript(scanWrapper, binaryDir,
+                                              scanLines)) {
+              this->GetCMakeInstance()->IssueMessage(
+                MessageType::FATAL_ERROR,
+                cmStrCat("Could not write Reprobuild CXX scanner wrapper: ",
+                         scanWrapper));
+              return;
+            }
+            usedTools.insert(scan.ToolId);
+            scan.Inputs = { source->GetFullPath() };
+            scan.Outputs = { ddiRel };
+            scan.Depfile = scanDepRel;
+            dyndepDdis[lang].push_back(ddiRel);
+            dyndepScanActions[lang].push_back(scan.Id);
+            dyndepActionMaps[lang].push_back({ objRel, ReprobuildSafeId(
+                                                         cmStrCat("compile-",
+                                                                  gt->GetName(),
+                                                                  "-", objRel)) });
+            if (cmGeneratorFileSet const* fs =
+                  gt->GetFileSetForSource(config, source)) {
+              if (fs->GetType() == cm::FileSetMetadata::CXX_MODULES) {
+                dyndepCxxModuleSources[lang][objRel] = source;
+              }
+            }
+            target.CustomActions.push_back(std::move(scan));
+            std::string modmapFlag =
+              mf->GetSafeDefinition("CMAKE_CXX_MODULE_MAP_FLAG");
+            cmSystemTools::ReplaceString(modmapFlag, "<MODULE_MAP_FILE>",
+                                         cmStrCat(objRel, ".modmap"));
+            ReprobuildAppendParsed(args, modmapFlag);
+          }
+          args.push_back("-MD");
+          args.push_back("-MT");
+          args.push_back(objRel);
+          args.push_back("-MF");
+          args.push_back(depRel);
+          args.push_back("-o");
+          args.push_back(objRel);
+          args.push_back("-c");
+          args.push_back(source->GetFullPath());
+        }
 
         ReprobuildAction action;
         action.Id = ReprobuildSafeId(cmStrCat("compile-", gt->GetName(), "-",
@@ -1028,9 +1287,24 @@ void cmGlobalReprobuildGenerator::WriteProviderMetadata()
         }
         usedTools.insert(action.ToolId);
         action.Args = args;
-        action.Inputs = { source->GetFullPath() };
+        if (lang == "Fortran") {
+          action.Inputs = { cmStrCat(objRel, ".ddi.i") };
+        } else {
+          action.Inputs = { source->GetFullPath() };
+        }
         action.Outputs = { objRel };
-        action.Depfile = depRel;
+        if (lang != "Fortran") {
+          action.Depfile = depRel;
+        }
+        if (lang == "Fortran" ||
+            (lang == "CXX" && gt->NeedDyndepForSource(lang, config, source))) {
+          action.DynamicDepsFile =
+            cmStrCat("CMakeFiles/reprobuild/dyndep/", target.Var, "-", lang,
+                     ".rbdyn");
+          if (lang == "CXX") {
+            action.Inputs.push_back(cmStrCat(objRel, ".modmap"));
+          }
+        }
         if (sourceUsesPch) {
           for (std::string const& arch : pchArchs) {
             std::string const pchHeader = gt->GetPchHeader(config, lang, arch);
@@ -1078,6 +1352,107 @@ void cmGlobalReprobuildGenerator::WriteProviderMetadata()
           ReprobuildAppendCleanFile(cleanFiles, binaryDir, action.ResponseFile);
         }
         target.CompileActions.push_back(std::move(action));
+      }
+
+      for (auto const& item : dyndepDdis) {
+        std::string const& lang = item.first;
+        std::vector<std::string> const& ddis = item.second;
+        if (ddis.empty()) {
+          continue;
+        }
+        std::string const stem =
+          cmStrCat("CMakeFiles/reprobuild/dyndep/", target.Var, "-", lang);
+        std::string const tdiRel = cmStrCat(stem, "DependInfo.json");
+        std::string const mapRel = cmStrCat(stem, ".map");
+        std::string const ddRel = cmStrCat(stem, ".dd");
+        std::string const fragmentRel = cmStrCat(stem, ".rbdyn");
+        if (!ReprobuildWriteTargetDependInfo(
+              cmStrCat(binaryDir, "/", tdiRel), gt, lg.get(), lang, config,
+              dyndepCxxModuleSources[lang]) ||
+            !ReprobuildWriteDyndepActionMap(
+              cmStrCat(binaryDir, "/", mapRel), dyndepActionMaps[lang])) {
+          this->GetCMakeInstance()->IssueMessage(
+            MessageType::FATAL_ERROR,
+            cmStrCat("Could not write Reprobuild ", lang,
+                     " dyndep metadata for target ", gt->GetName()));
+          return;
+        }
+
+        ReprobuildAction dyndep;
+        dyndep.Id = ReprobuildSafeId(cmStrCat("dyndep-", gt->GetName(), "-",
+                                              lang));
+        dyndep.Var =
+          ReprobuildNimIdent("action", nextActionVar++, dyndep.Id);
+        dyndep.ToolId =
+          ReprobuildSafeId(cmStrCat("reprobuild-cmake-", dyndep.Var));
+        dyndep.Deps = dyndepScanActions[lang];
+        dyndep.Inputs = ddis;
+        dyndep.Inputs.push_back(tdiRel);
+        dyndep.Inputs.push_back(mapRel);
+        dyndep.Outputs = { ddRel, fragmentRel,
+                           cmStrCat(cmSystemTools::GetFilenamePath(ddRel),
+                                    "/", lang, "Modules.json") };
+        if (lang == "CXX") {
+          for (auto const& mapEntry : dyndepActionMaps[lang]) {
+            dyndep.Outputs.push_back(cmStrCat(mapEntry.first, ".modmap"));
+          }
+        }
+        dyndep.Cacheable = false;
+
+        std::vector<std::string> dyndepLines;
+        std::string command = cmStrCat(
+          ReprobuildShellSingleQuote(cmSystemTools::GetCMakeCommand()),
+          " -E cmake_ninja_dyndep --tdi=", ReprobuildShellSingleQuote(tdiRel),
+          " --lang=", lang);
+        if (lang == "CXX") {
+          std::string modmapFormat =
+            lg->GetMakefile()->GetSafeDefinition("CMAKE_CXX_MODULE_MAP_FORMAT");
+          if (modmapFormat.empty()) {
+            this->GetCMakeInstance()->IssueMessage(
+              MessageType::FATAL_ERROR,
+              "The Reprobuild generator M6 CXX module path requires "
+              "CMAKE_CXX_MODULE_MAP_FORMAT.");
+            return;
+          }
+          command += cmStrCat(" --modmapfmt=", modmapFormat);
+        }
+        command += cmStrCat(" --dd=", ReprobuildShellSingleQuote(ddRel));
+        for (std::string const& ddi : ddis) {
+          command += " ";
+          command += ReprobuildShellSingleQuote(ddi);
+        }
+        dyndepLines.push_back(command);
+        std::string fragmentCommand =
+          "candidate='/Users/zahary/metacraft/reprobuild/build/bin/"
+          "repro-cmake-dyndep-fragment'; "
+          "if [ -x \"$candidate\" ]; then conv=\"$candidate\"; else "
+          "conv='repro-cmake-dyndep-fragment'; fi; "
+          "\"$conv\" --out ";
+        fragmentCommand += ReprobuildShellSingleQuote(fragmentRel);
+        fragmentCommand += " --map ";
+        fragmentCommand += ReprobuildShellSingleQuote(mapRel);
+        for (std::string const& ddi : ddis) {
+          fragmentCommand += " ";
+          fragmentCommand += ReprobuildShellSingleQuote(ddi);
+        }
+        dyndepLines.push_back(fragmentCommand);
+        std::string const dyndepWrapper =
+          cmStrCat(wrapperDir, "/", dyndep.ToolId);
+        if (!ReprobuildWriteCommandScript(dyndepWrapper, binaryDir,
+                                          dyndepLines)) {
+          this->GetCMakeInstance()->IssueMessage(
+            MessageType::FATAL_ERROR,
+            cmStrCat("Could not write Reprobuild dyndep wrapper: ",
+                     dyndepWrapper));
+          return;
+        }
+        usedTools.insert(dyndep.ToolId);
+        for (ReprobuildAction& compile : target.CompileActions) {
+          if (compile.DynamicDepsFile == fragmentRel) {
+            ReprobuildAppendUnique(compile.Deps, dyndep.Id);
+          }
+        }
+        target.CustomActions.push_back(std::move(dyndep));
       }
 
       auto objectOutputFor = [&](cmGeneratorTarget* objectTarget,
@@ -1838,6 +2213,10 @@ void cmGlobalReprobuildGenerator::WriteProviderMetadata()
                << ReprobuildEscape(action.Depfile) << ")";
     } else {
       provider << ", dependencyPolicy = declaredOnlyDependencyPolicy()";
+    }
+    if (!action.DynamicDepsFile.empty()) {
+      provider << ", dynamicDepsFile = "
+               << ReprobuildEscape(action.DynamicDepsFile);
     }
     provider << ", cacheable = " << (action.Cacheable ? "true" : "false");
     provider << ", commandStatsId = " << ReprobuildEscape(action.Id)

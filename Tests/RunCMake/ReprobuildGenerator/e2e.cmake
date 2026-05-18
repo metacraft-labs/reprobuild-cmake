@@ -271,6 +271,38 @@ function(run_build binary_dir target socket out_var)
   set(${out_var} "${output}" PARENT_SCOPE)
 endfunction()
 
+function(run_build_expect_failure binary_dir target socket out_var)
+  foreach(var IN ITEMS TEST_REPROBUILD_REPRO TEST_REPROBUILD_SOURCE_ROOT)
+    if(NOT DEFINED ${var} OR "${${var}}" STREQUAL "")
+      message(FATAL_ERROR "${var} is required for M6 failure gates")
+    endif()
+  endforeach()
+  require_tool("${TEST_REPROBUILD_REPRO}" "repro")
+  set(command
+    "${CMAKE_COMMAND}" -E env
+      "RUNQUOTA_SOCKET=${socket}"
+      "REPROBUILD_REPRO=${TEST_REPROBUILD_REPRO}"
+      "REPROBUILD_SOURCE_ROOT=${TEST_REPROBUILD_SOURCE_ROOT}"
+      "${CMAKE_COMMAND}" --build "${binary_dir}")
+  if(NOT "${target}" STREQUAL "")
+    list(APPEND command --target "${target}")
+  endif()
+  execute_process(
+    COMMAND ${command}
+    OUTPUT_VARIABLE stdout
+    ERROR_VARIABLE stderr
+    RESULT_VARIABLE result
+    ENCODING UTF8)
+  set(output "${stdout}\n${stderr}")
+  if(result EQUAL 0)
+    message(FATAL_ERROR
+      "Reprobuild build succeeded unexpectedly.\n"
+      "Command: ${command}\n"
+      "Output:\n${output}")
+  endif()
+  set(${out_var} "${output}" PARENT_SCOPE)
+endfunction()
+
 function(report_path_from_output output out_var)
   string(REGEX MATCH "buildReport: ([^\n\r]+)" match "${output}")
   if(NOT CMAKE_MATCH_1)
@@ -592,6 +624,95 @@ endfunction()
 function(assert_file_exists path label)
   if(NOT EXISTS "${path}")
     message(FATAL_ERROR "${label} missing expected file: ${path}")
+  endif()
+endfunction()
+
+function(assert_file_not_exists path label)
+  if(EXISTS "${path}")
+    message(FATAL_ERROR "${label} unexpectedly produced file: ${path}")
+  endif()
+endfunction()
+
+function(write_cxx_modules_project source_dir project_name)
+  if(NOT DEFINED TEST_CXX_COMPILER OR "${TEST_CXX_COMPILER}" STREQUAL "")
+    message(FATAL_ERROR "TEST_CXX_COMPILER is required for C++20 module gates")
+  endif()
+
+  file(REMOVE_RECURSE "${source_dir}")
+  file(MAKE_DIRECTORY "${source_dir}")
+  file(WRITE "${source_dir}/CMakeLists.txt"
+    "cmake_minimum_required(VERSION 4.1)\n"
+    "project(${project_name} CXX)\n"
+    "set(CMAKE_CXX_STANDARD 20)\n"
+    "set(CMAKE_CXX_SCAN_FOR_MODULES ON)\n"
+    "add_executable(app main.cpp)\n"
+    "target_sources(app PRIVATE FILE_SET CXX_MODULES FILES m.cppm)\n")
+  file(WRITE "${source_dir}/m.cppm"
+    "export module m;\n"
+    "export int answer() { return 42; }\n")
+  file(WRITE "${source_dir}/main.cpp"
+    "import m;\n"
+    "int main() { return answer() == 42 ? 0 : 1; }\n")
+endfunction()
+
+function(write_fortran_modules_project source_dir project_name)
+  file(REMOVE_RECURSE "${source_dir}")
+  file(MAKE_DIRECTORY "${source_dir}")
+  file(WRITE "${source_dir}/CMakeLists.txt"
+    "cmake_minimum_required(VERSION 3.20)\n"
+    "project(${project_name} Fortran)\n"
+    "add_executable(fapp main.f90 mathmod.f90)\n")
+  file(WRITE "${source_dir}/mathmod.f90"
+    "module mathmod\n"
+    "contains\n"
+    "  integer function answer()\n"
+    "    answer = 42\n"
+    "  end function answer\n"
+    "end module mathmod\n")
+  file(WRITE "${source_dir}/main.f90"
+    "program main\n"
+    "  use mathmod\n"
+    "  if (answer() /= 42) stop 1\n"
+    "end program main\n")
+endfunction()
+
+function(resolve_fortran_compiler out_var)
+  if(DEFINED TEST_FORTRAN_COMPILER AND
+      NOT "${TEST_FORTRAN_COMPILER}" STREQUAL "" AND
+      NOT "${TEST_FORTRAN_COMPILER}" MATCHES "NOTFOUND$")
+    set(${out_var} "${TEST_FORTRAN_COMPILER}" PARENT_SCOPE)
+    return()
+  endif()
+  find_program(found_fortran NAMES gfortran flang ifx ifort)
+  if(found_fortran)
+    set(${out_var} "${found_fortran}" PARENT_SCOPE)
+  else()
+    set(${out_var} "" PARENT_SCOPE)
+  endif()
+endfunction()
+
+function(find_module_scan_wrapper binary_dir needle out_var)
+  file(GLOB wrappers "${binary_dir}/CMakeFiles/reprobuild/bin/*scan*")
+  foreach(wrapper IN LISTS wrappers)
+    file(READ "${wrapper}" content)
+    string(FIND "${content}" "${needle}" found)
+    if(NOT found EQUAL -1)
+      set(${out_var} "${wrapper}" PARENT_SCOPE)
+      return()
+    endif()
+  endforeach()
+  message(FATAL_ERROR "Could not find scan wrapper containing '${needle}' in ${binary_dir}")
+endfunction()
+
+function(assert_report_order report first second label)
+  string(FIND "${report}" "${first}" first_pos)
+  string(FIND "${report}" "${second}" second_pos)
+  if(first_pos EQUAL -1 OR second_pos EQUAL -1 OR NOT first_pos LESS second_pos)
+    message(FATAL_ERROR
+      "${label} did not contain expected ordering.\n"
+      "first: ${first}\n"
+      "second: ${second}\n"
+      "report:\n${report}")
   endif()
 endfunction()
 
@@ -1094,6 +1215,121 @@ elseif(TEST_MODE STREQUAL "regeneration_refresh")
   assert_contains("${glob_provider}" "extra.c" "glob regeneration provider")
   assert_contains("${regen_second}" "main.c.o status=asSucceeded launched=true" "regeneration build output")
   assert_contains("${glob_second}" "extra.c.o status=asSucceeded launched=true" "glob regeneration build output")
+elseif(TEST_MODE STREQUAL "fortran_dyndep_modules")
+  resolve_fortran_compiler(fortran_compiler)
+  if("${fortran_compiler}" STREQUAL "")
+    file(WRITE "${TEST_BINARY_ROOT}/support-profile.txt"
+      "e2e_cmake_reprobuild_fortran_dyndep_modules=skipped\n"
+      "reason=no Fortran compiler found on host PATH or TEST_FORTRAN_COMPILER\n")
+    message(STATUS "support-profile: Fortran compiler unavailable; M6 Fortran dyndep gate skipped truthfully")
+    return()
+  endif()
+
+  set(ftn_source_dir "${TEST_BINARY_ROOT}/fortran-src")
+  set(ftn_binary_dir "${TEST_BINARY_ROOT}/fortran-build")
+  write_fortran_modules_project("${ftn_source_dir}" ReprobuildFortranModules)
+  run_configure("${ftn_source_dir}" "${ftn_binary_dir}" TRUE ""
+    "-DCMAKE_Fortran_COMPILER=${fortran_compiler}")
+  file(READ "${ftn_binary_dir}/reprobuild.nim" ftn_provider)
+  foreach(expected IN ITEMS
+      "scan-fapp"
+      "dyndep-fapp-Fortran"
+      "cmake_ninja_depends"
+      "cmake_ninja_dyndep"
+      "dynamicDepsFile")
+    assert_contains("${ftn_provider}" "${expected}" "Fortran dyndep provider")
+  endforeach()
+
+  start_runquota("${TEST_BINARY_ROOT}" runquota_socket runquota_pid)
+  run_build("${ftn_binary_dir}" "fapp" "${runquota_socket}" ftn_output)
+  stop_runquota("${runquota_pid}")
+  execute_process(COMMAND "${ftn_binary_dir}/fapp" RESULT_VARIABLE ftn_result)
+  if(NOT ftn_result EQUAL 0)
+    message(FATAL_ERROR "Fortran module executable failed with ${ftn_result}")
+  endif()
+
+  file(GLOB ftn_fragments "${ftn_binary_dir}/CMakeFiles/reprobuild/dyndep/*-Fortran.rbdyn")
+  list(LENGTH ftn_fragments ftn_fragment_count)
+  if(NOT ftn_fragment_count EQUAL 1)
+    message(FATAL_ERROR "Expected one Fortran dynamic graph fragment, found ${ftn_fragment_count}: ${ftn_fragments}")
+  endif()
+  list(GET ftn_fragments 0 ftn_fragment)
+  file(READ "${ftn_fragment}" ftn_fragment_content)
+  assert_contains("${ftn_fragment_content}" "repro-dynamic-graph-v1" "Fortran dynamic graph fragment")
+  assert_contains("${ftn_fragment_content}" "dep\t" "Fortran dynamic graph fragment")
+  report_path_from_output("${ftn_output}" ftn_report_path)
+  file(READ "${ftn_report_path}" ftn_report)
+  assert_contains("${ftn_report}" "dynamic-deps" "Fortran scheduler report")
+  assert_contains("${ftn_report}" "waiting=1" "Fortran scheduler report")
+elseif(TEST_MODE STREQUAL "cxx20_modules_dyndep")
+  set(cxxmod_source_dir "${TEST_BINARY_ROOT}/cxx20-mod-src")
+  set(cxxmod_binary_dir "${TEST_BINARY_ROOT}/cxx20-mod-build")
+  write_cxx_modules_project("${cxxmod_source_dir}" ReprobuildCxx20Modules)
+  run_configure("${cxxmod_source_dir}" "${cxxmod_binary_dir}" TRUE ""
+    "-DCMAKE_CXX_COMPILER=${TEST_CXX_COMPILER}")
+  file(READ "${cxxmod_binary_dir}/reprobuild.nim" cxxmod_provider)
+  foreach(expected IN ITEMS
+      "scan-app"
+      "dyndep-app-CXX"
+      "dynamicDepsFile")
+    assert_contains("${cxxmod_provider}" "${expected}" "C++20 module provider")
+  endforeach()
+  find_module_scan_wrapper("${cxxmod_binary_dir}" "m.cppm" cxxmod_scan_wrapper)
+  file(READ "${cxxmod_scan_wrapper}" cxxmod_scan_wrapper_content)
+  assert_contains("${cxxmod_scan_wrapper_content}" "clang-scan-deps" "C++20 module scan wrapper")
+  file(GLOB cxxmod_dyndep_wrappers "${cxxmod_binary_dir}/CMakeFiles/reprobuild/bin/*dyndep*")
+  list(LENGTH cxxmod_dyndep_wrappers cxxmod_dyndep_wrapper_count)
+  if(NOT cxxmod_dyndep_wrapper_count EQUAL 1)
+    message(FATAL_ERROR "Expected one C++20 dyndep wrapper, found ${cxxmod_dyndep_wrapper_count}: ${cxxmod_dyndep_wrappers}")
+  endif()
+  list(GET cxxmod_dyndep_wrappers 0 cxxmod_dyndep_wrapper)
+  file(READ "${cxxmod_dyndep_wrapper}" cxxmod_dyndep_wrapper_content)
+  assert_contains("${cxxmod_dyndep_wrapper_content}" "cmake_ninja_dyndep" "C++20 dyndep wrapper")
+
+  start_runquota("${TEST_BINARY_ROOT}" runquota_socket runquota_pid)
+  run_build("${cxxmod_binary_dir}" "app" "${runquota_socket}" cxxmod_output)
+  stop_runquota("${runquota_pid}")
+  execute_process(COMMAND "${cxxmod_binary_dir}/app" RESULT_VARIABLE cxxmod_result)
+  if(NOT cxxmod_result EQUAL 0)
+    message(FATAL_ERROR "C++20 module executable failed with ${cxxmod_result}")
+  endif()
+
+  assert_file_exists("${cxxmod_binary_dir}/CMakeFiles/app.dir/m.pcm" "C++20 BMI")
+  assert_file_exists("${cxxmod_binary_dir}/CMakeFiles/app.dir/m.cppm.o" "C++20 module object")
+  assert_file_exists("${cxxmod_binary_dir}/CMakeFiles/app.dir/main.cpp.o" "C++20 importer object")
+  assert_file_exists("${cxxmod_binary_dir}/CMakeFiles/reprobuild/dyndep/target0_app-CXX.rbdyn" "C++20 dynamic graph")
+  file(READ "${cxxmod_binary_dir}/CMakeFiles/reprobuild/dyndep/target0_app-CXX.rbdyn" cxxmod_fragment)
+  assert_contains("${cxxmod_fragment}"
+    "dep\tcompile-app-CMakeFiles_app.dir_main.cpp.o\tcompile-app-CMakeFiles_app.dir_m.cppm.o"
+    "C++20 dynamic graph")
+
+  report_path_from_output("${cxxmod_output}" cxxmod_report_path)
+  file(READ "${cxxmod_report_path}" cxxmod_report)
+  assert_contains("${cxxmod_report}" "dynamic-deps" "C++20 scheduler report")
+  assert_contains("${cxxmod_report}" "waiting=1" "C++20 scheduler report")
+  assert_report_order("${cxxmod_report}"
+    "\"actionId\": \"compile-app-CMakeFiles_app.dir_m.cppm.o\",\n      \"event\": \"asSucceeded\""
+    "\"actionId\": \"compile-app-CMakeFiles_app.dir_main.cpp.o\",\n      \"event\": \"launched\""
+    "C++20 provider/importer scheduler report")
+elseif(TEST_MODE STREQUAL "dyndep_corruption_fails_closed")
+  set(corrupt_source_dir "${TEST_BINARY_ROOT}/dyndep-corrupt-src")
+  set(corrupt_binary_dir "${TEST_BINARY_ROOT}/dyndep-corrupt-build")
+  write_cxx_modules_project("${corrupt_source_dir}" ReprobuildDyndepCorrupt)
+  run_configure("${corrupt_source_dir}" "${corrupt_binary_dir}" TRUE ""
+    "-DCMAKE_CXX_COMPILER=${TEST_CXX_COMPILER}")
+  find_module_scan_wrapper("${corrupt_binary_dir}" "m.cppm" module_scan_wrapper)
+  file(APPEND "${module_scan_wrapper}"
+    "printf '%s\\n' '{bad-json' > 'CMakeFiles/app.dir/m.cppm.o.ddi'\n")
+
+  start_runquota("${TEST_BINARY_ROOT}" runquota_socket runquota_pid)
+  run_build_expect_failure("${corrupt_binary_dir}" "app" "${runquota_socket}" corrupt_output)
+  stop_runquota("${runquota_pid}")
+  assert_contains("${corrupt_output}" "action: dyndep-app-CXX status=asFailed" "corrupt dyndep output")
+  assert_contains("${corrupt_output}" "compile-app-CMakeFiles_app.dir_main.cpp.o status=asBlocked" "corrupt dyndep output")
+  assert_contains("${corrupt_output}" "compile-app-CMakeFiles_app.dir_m.cppm.o status=asBlocked" "corrupt dyndep output")
+  assert_file_not_exists("${corrupt_binary_dir}/app" "corrupt dyndep fail-closed")
+  assert_file_not_exists("${corrupt_binary_dir}/CMakeFiles/app.dir/main.cpp.o" "corrupt dyndep fail-closed")
+  assert_file_not_exists("${corrupt_binary_dir}/CMakeFiles/app.dir/m.cppm.o" "corrupt dyndep fail-closed")
 else()
   message(FATAL_ERROR "Unknown TEST_MODE: ${TEST_MODE}")
 endif()

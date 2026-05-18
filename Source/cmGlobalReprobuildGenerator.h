@@ -43,6 +43,11 @@ public:
 
   void Generate() override;
 
+  bool CheckCxxModuleSupport(CxxModuleSupportQuery /*query*/) override
+  {
+    return true;
+  }
+
   std::vector<GeneratedMakeCommand> GenerateBuildCommand(
     std::string const& makeProgram, std::string const& projectName,
     std::string const& projectDir, std::vector<std::string> const& targetNames,

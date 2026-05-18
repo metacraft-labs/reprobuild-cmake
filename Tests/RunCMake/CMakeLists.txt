@@ -439,6 +439,42 @@ add_test(NAME e2e_cmake_reprobuild_regeneration_refresh
     -DTEST_REPROBUILD_REPRO=${_ReprobuildBin}
     -DTEST_RUNQUOTAD=${_RunQuotaDaemonBin}
     -P ${_ReprobuildGeneratorTestDir}/e2e.cmake)
+add_test(NAME e2e_cmake_reprobuild_fortran_dyndep_modules
+  COMMAND ${CMAKE_CMAKE_COMMAND}
+    -DCMAKE_COMMAND=${CMAKE_CMAKE_COMMAND}
+    -DTEST_MODE=fortran_dyndep_modules
+    -DTEST_BINARY_ROOT=${_ReprobuildGeneratorTestBin}/fortran-dyndep-modules
+    -DTEST_C_COMPILER=${CMAKE_C_COMPILER}
+    -DTEST_FORTRAN_COMPILER=${CMAKE_Fortran_COMPILER}
+    -DTEST_REPROBUILD_SOURCE_ROOT=${_ReprobuildSourceRoot}
+    -DTEST_REPROBUILD_REPO=${_ReprobuildSourceRoot}
+    -DTEST_REPROBUILD_REPRO=${_ReprobuildBin}
+    -DTEST_RUNQUOTAD=${_RunQuotaDaemonBin}
+    -P ${_ReprobuildGeneratorTestDir}/e2e.cmake)
+add_test(NAME e2e_cmake_reprobuild_cxx20_modules_dyndep
+  COMMAND ${CMAKE_CMAKE_COMMAND}
+    -DCMAKE_COMMAND=${CMAKE_CMAKE_COMMAND}
+    -DTEST_MODE=cxx20_modules_dyndep
+    -DTEST_BINARY_ROOT=${_ReprobuildGeneratorTestBin}/cxx20-modules-dyndep
+    -DTEST_C_COMPILER=${CMAKE_C_COMPILER}
+    -DTEST_CXX_COMPILER=${CMAKE_CXX_COMPILER}
+    -DTEST_REPROBUILD_SOURCE_ROOT=${_ReprobuildSourceRoot}
+    -DTEST_REPROBUILD_REPO=${_ReprobuildSourceRoot}
+    -DTEST_REPROBUILD_REPRO=${_ReprobuildBin}
+    -DTEST_RUNQUOTAD=${_RunQuotaDaemonBin}
+    -P ${_ReprobuildGeneratorTestDir}/e2e.cmake)
+add_test(NAME e2e_cmake_reprobuild_dyndep_corruption_fails_closed
+  COMMAND ${CMAKE_CMAKE_COMMAND}
+    -DCMAKE_COMMAND=${CMAKE_CMAKE_COMMAND}
+    -DTEST_MODE=dyndep_corruption_fails_closed
+    -DTEST_BINARY_ROOT=${_ReprobuildGeneratorTestBin}/dyndep-corruption-fails-closed
+    -DTEST_C_COMPILER=${CMAKE_C_COMPILER}
+    -DTEST_CXX_COMPILER=${CMAKE_CXX_COMPILER}
+    -DTEST_REPROBUILD_SOURCE_ROOT=${_ReprobuildSourceRoot}
+    -DTEST_REPROBUILD_REPO=${_ReprobuildSourceRoot}
+    -DTEST_REPROBUILD_REPRO=${_ReprobuildBin}
+    -DTEST_RUNQUOTAD=${_RunQuotaDaemonBin}
+    -P ${_ReprobuildGeneratorTestDir}/e2e.cmake)
 
 if(CMAKE_GENERATOR MATCHES "Ninja")
   set(Ninja_ARGS
