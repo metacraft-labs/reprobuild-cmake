@@ -475,6 +475,39 @@ add_test(NAME e2e_cmake_reprobuild_dyndep_corruption_fails_closed
     -DTEST_REPROBUILD_REPRO=${_ReprobuildBin}
     -DTEST_RUNQUOTAD=${_RunQuotaDaemonBin}
     -P ${_ReprobuildGeneratorTestDir}/e2e.cmake)
+add_test(NAME e2e_cmake_reprobuild_multi_config_debug_release
+  COMMAND ${CMAKE_CMAKE_COMMAND}
+    -DCMAKE_COMMAND=${CMAKE_CMAKE_COMMAND}
+    -DTEST_MODE=multi_config_debug_release
+    -DTEST_BINARY_ROOT=${_ReprobuildGeneratorTestBin}/multi-config-debug-release
+    -DTEST_C_COMPILER=${CMAKE_C_COMPILER}
+    -DTEST_REPROBUILD_SOURCE_ROOT=${_ReprobuildSourceRoot}
+    -DTEST_REPROBUILD_REPO=${_ReprobuildSourceRoot}
+    -DTEST_REPROBUILD_REPRO=${_ReprobuildBin}
+    -DTEST_RUNQUOTAD=${_RunQuotaDaemonBin}
+    -P ${_ReprobuildGeneratorTestDir}/e2e.cmake)
+add_test(NAME e2e_cmake_reprobuild_multi_config_target_selection
+  COMMAND ${CMAKE_CMAKE_COMMAND}
+    -DCMAKE_COMMAND=${CMAKE_CMAKE_COMMAND}
+    -DTEST_MODE=multi_config_target_selection
+    -DTEST_BINARY_ROOT=${_ReprobuildGeneratorTestBin}/multi-config-target-selection
+    -DTEST_C_COMPILER=${CMAKE_C_COMPILER}
+    -DTEST_REPROBUILD_SOURCE_ROOT=${_ReprobuildSourceRoot}
+    -DTEST_REPROBUILD_REPO=${_ReprobuildSourceRoot}
+    -DTEST_REPROBUILD_REPRO=${_ReprobuildBin}
+    -DTEST_RUNQUOTAD=${_RunQuotaDaemonBin}
+    -P ${_ReprobuildGeneratorTestDir}/e2e.cmake)
+add_test(NAME e2e_cmake_reprobuild_cross_config_generated_source
+  COMMAND ${CMAKE_CMAKE_COMMAND}
+    -DCMAKE_COMMAND=${CMAKE_CMAKE_COMMAND}
+    -DTEST_MODE=cross_config_generated_source
+    -DTEST_BINARY_ROOT=${_ReprobuildGeneratorTestBin}/cross-config-generated-source
+    -DTEST_C_COMPILER=${CMAKE_C_COMPILER}
+    -DTEST_REPROBUILD_SOURCE_ROOT=${_ReprobuildSourceRoot}
+    -DTEST_REPROBUILD_REPO=${_ReprobuildSourceRoot}
+    -DTEST_REPROBUILD_REPRO=${_ReprobuildBin}
+    -DTEST_RUNQUOTAD=${_RunQuotaDaemonBin}
+    -P ${_ReprobuildGeneratorTestDir}/e2e.cmake)
 
 if(CMAKE_GENERATOR MATCHES "Ninja")
   set(Ninja_ARGS

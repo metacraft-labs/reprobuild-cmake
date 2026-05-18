@@ -64,7 +64,10 @@ function(run_configure source_dir binary_dir expect_success expected_error)
   if(DEFINED TEST_CXX_COMPILER AND NOT "${TEST_CXX_COMPILER}" STREQUAL "")
     list(APPEND command "-DCMAKE_CXX_COMPILER=${TEST_CXX_COMPILER}")
   endif()
-  list(APPEND command ${ARGN})
+  foreach(arg IN LISTS ARGN)
+    string(REPLACE ";" "\\;" escaped_arg "${arg}")
+    list(APPEND command "${escaped_arg}")
+  endforeach()
   execute_process(
     COMMAND ${command}
     OUTPUT_VARIABLE stdout
@@ -252,6 +255,41 @@ function(run_build binary_dir target socket out_var)
       "REPROBUILD_REPRO=${TEST_REPROBUILD_REPRO}"
       "REPROBUILD_SOURCE_ROOT=${TEST_REPROBUILD_SOURCE_ROOT}"
       "${CMAKE_COMMAND}" --build "${binary_dir}")
+  if(NOT "${target}" STREQUAL "")
+    list(APPEND command --target "${target}")
+  endif()
+  execute_process(
+    COMMAND ${command}
+    OUTPUT_VARIABLE stdout
+    ERROR_VARIABLE stderr
+    RESULT_VARIABLE result
+    ENCODING UTF8)
+  set(output "${stdout}\n${stderr}")
+  if(NOT result EQUAL 0)
+    message(FATAL_ERROR
+      "Reprobuild build failed.\n"
+      "Command: ${command}\n"
+      "Output:\n${output}")
+  endif()
+  set(${out_var} "${output}" PARENT_SCOPE)
+endfunction()
+
+function(run_build_config binary_dir config target socket out_var)
+  foreach(var IN ITEMS TEST_REPROBUILD_REPRO TEST_REPROBUILD_SOURCE_ROOT)
+    if(NOT DEFINED ${var} OR "${${var}}" STREQUAL "")
+      message(FATAL_ERROR "${var} is required for M7 build gates")
+    endif()
+  endforeach()
+  require_tool("${TEST_REPROBUILD_REPRO}" "repro")
+  set(command
+    "${CMAKE_COMMAND}" -E env
+      "RUNQUOTA_SOCKET=${socket}"
+      "REPROBUILD_REPRO=${TEST_REPROBUILD_REPRO}"
+      "REPROBUILD_SOURCE_ROOT=${TEST_REPROBUILD_SOURCE_ROOT}"
+      "${CMAKE_COMMAND}" --build "${binary_dir}")
+  if(NOT "${config}" STREQUAL "")
+    list(APPEND command --config "${config}")
+  endif()
   if(NOT "${target}" STREQUAL "")
     list(APPEND command --target "${target}")
   endif()
@@ -519,6 +557,65 @@ function(write_generated_source_project source_dir project_name)
     "int main(void) { return generated_value() == 42 ? 0 : 1; }\n")
 endfunction()
 
+function(write_multi_config_project source_dir project_name)
+  file(REMOVE_RECURSE "${source_dir}")
+  file(MAKE_DIRECTORY "${source_dir}")
+  file(WRITE "${source_dir}/CMakeLists.txt"
+    "cmake_minimum_required(VERSION 3.20)\n"
+    "project(${project_name} C)\n"
+    "add_executable(app main.c)\n"
+    "add_executable(side side.c)\n"
+    "target_compile_definitions(app PRIVATE $<$<CONFIG:Debug>:APP_CONFIG=\\\"debug\\\"> $<$<CONFIG:Release>:APP_CONFIG=\\\"release\\\">)\n"
+    "target_compile_definitions(side PRIVATE SIDE_CONFIG=\\\"side\\\")\n")
+  file(WRITE "${source_dir}/main.c"
+    "#include <stdio.h>\n"
+    "#ifndef APP_CONFIG\n"
+    "#  define APP_CONFIG \"missing\"\n"
+    "#endif\n"
+    "int main(void) { puts(APP_CONFIG); return 0; }\n")
+  file(WRITE "${source_dir}/side.c"
+    "#include <stdio.h>\n"
+    "int main(void) { puts(SIDE_CONFIG); return 0; }\n")
+endfunction()
+
+function(write_cross_config_generated_source_project source_dir project_name)
+  file(REMOVE_RECURSE "${source_dir}")
+  file(MAKE_DIRECTORY "${source_dir}")
+  file(WRITE "${source_dir}/CMakeLists.txt"
+    "cmake_minimum_required(VERSION 3.20)\n"
+    "project(${project_name} C)\n"
+    "add_executable(gen gen.c)\n"
+    "foreach(cfg Debug Release)\n"
+    "  set(src_\${cfg} \"\${CMAKE_CURRENT_BINARY_DIR}/\${cfg}/generated.c\")\n"
+    "  set_source_files_properties(\"\${src_\${cfg}}\" PROPERTIES GENERATED 1)\n"
+    "endforeach()\n"
+    "add_custom_command(OUTPUT \"\${CMAKE_CURRENT_BINARY_DIR}/$<CONFIG>/generated.c\"\n"
+    "  COMMAND gen \"$<COMMAND_CONFIG:$<CONFIG>>\" \"$<OUTPUT_CONFIG:$<CONFIG>>\" \"\${CMAKE_CURRENT_BINARY_DIR}/$<OUTPUT_CONFIG:$<CONFIG>>/generated.c\"\n"
+    "  DEPENDS gen\n"
+    "  VERBATIM)\n"
+    "add_executable(app main.c \"$<$<CONFIG:Debug>:\${src_Debug}>\" \"$<$<CONFIG:Release>:\${src_Release}>\")\n")
+  file(WRITE "${source_dir}/gen.c"
+    "#include <stdio.h>\n"
+    "#include <string.h>\n"
+    "int main(int argc, char** argv) {\n"
+    "  if (argc != 4) return 2;\n"
+    "  FILE* f = fopen(argv[3], \"w\");\n"
+    "  if (!f) return 3;\n"
+    "#ifdef NDEBUG\n"
+    "  int release_generator = 1;\n"
+    "#else\n"
+    "  int release_generator = 0;\n"
+    "#endif\n"
+    "  int ok = (strcmp(argv[1], argv[2]) == 0) || (release_generator && strcmp(argv[1], \"Release\") == 0 && strcmp(argv[2], \"Debug\") == 0);\n"
+    "  fprintf(f, \"int generated_value(void) { return %d; }\\n\", ok ? 42 : 7);\n"
+    "  fclose(f);\n"
+    "  return ok ? 0 : 4;\n"
+    "}\n")
+  file(WRITE "${source_dir}/main.c"
+    "int generated_value(void);\n"
+    "int main(void) { return generated_value() == 42 ? 0 : 1; }\n")
+endfunction()
+
 function(write_custom_depfile_project source_dir project_name)
   file(REMOVE_RECURSE "${source_dir}")
   file(MAKE_DIRECTORY "${source_dir}")
@@ -734,9 +831,18 @@ if(TEST_MODE STREQUAL "configure")
   endif()
 
   set(multi_binary_dir "${TEST_BINARY_ROOT}/multi-config-build")
-  run_configure("${source_dir}" "${multi_binary_dir}" FALSE
-    "single-config"
-    "-DCMAKE_CONFIGURATION_TYPES=Debug")
+  run_configure("${source_dir}" "${multi_binary_dir}" TRUE ""
+    "-DCMAKE_CONFIGURATION_TYPES=Debug\\;Release"
+    "-DCMAKE_DEFAULT_BUILD_TYPE=Debug"
+    "-DCMAKE_DEFAULT_CONFIGS=Debug")
+  file(READ "${multi_binary_dir}/CMakeFiles/reprobuild/provider.meta" multi_metadata)
+  foreach(expected IN ITEMS
+      "configurations=Debug,Release"
+      "default_build_type=Debug"
+      "default_configs=Debug"
+      "targets=all,default,hello:Debug,hello:Release")
+    assert_contains("${multi_metadata}" "${expected}" "multi-config configure metadata")
+  endforeach()
 elseif(TEST_MODE STREQUAL "hello_c_build")
   start_runquota("${TEST_BINARY_ROOT}" runquota_socket runquota_pid)
   run_build("${binary_dir}" "" "${runquota_socket}" default_output)
@@ -1127,6 +1233,201 @@ elseif(TEST_MODE STREQUAL "custom_depfile_hidden_input")
   report_path_from_output("${second_output}" second_report_path)
   file(READ "${second_report_path}" second_report)
   assert_contains("${second_report}" "\"id\": \"custom-command-depgen" "custom depfile report")
+elseif(TEST_MODE STREQUAL "multi_config_debug_release")
+  set(multi_source_dir "${TEST_BINARY_ROOT}/multi-src")
+  set(multi_binary_dir "${TEST_BINARY_ROOT}/multi-build")
+  write_multi_config_project("${multi_source_dir}" ReprobuildMultiConfig)
+  run_configure("${multi_source_dir}" "${multi_binary_dir}" TRUE ""
+    "-DCMAKE_CONFIGURATION_TYPES=Debug\\;Release"
+    "-DCMAKE_DEFAULT_BUILD_TYPE=Debug"
+    "-DCMAKE_DEFAULT_CONFIGS=Debug")
+  file(READ "${multi_binary_dir}/reprobuild.nim" multi_provider)
+  foreach(expected IN ITEMS
+      "target(\"app:Debug\""
+      "target(\"app:Release\""
+      "aggregate(\"app:all\""
+      "aggregate(\"app\"")
+    assert_contains("${multi_provider}" "${expected}" "multi-config provider")
+  endforeach()
+
+  start_runquota("${TEST_BINARY_ROOT}" runquota_socket runquota_pid)
+  run_build_config("${multi_binary_dir}" "Debug" "app" "${runquota_socket}" debug_output)
+  run_build_config("${multi_binary_dir}" "Release" "app" "${runquota_socket}" release_output)
+  stop_runquota("${runquota_pid}")
+  foreach(expected IN ITEMS
+      "selectedTarget: app:Debug"
+      "action: app:Debug status=asSucceeded launched=true")
+    assert_contains("${debug_output}" "${expected}" "Debug multi-config build output")
+  endforeach()
+  foreach(expected IN ITEMS
+      "selectedTarget: app:Release"
+      "action: app:Release status=asSucceeded launched=true")
+    assert_contains("${release_output}" "${expected}" "Release multi-config build output")
+  endforeach()
+  execute_process(COMMAND "${multi_binary_dir}/Debug/app"
+    OUTPUT_VARIABLE debug_run OUTPUT_STRIP_TRAILING_WHITESPACE RESULT_VARIABLE debug_result)
+  execute_process(COMMAND "${multi_binary_dir}/Release/app"
+    OUTPUT_VARIABLE release_run OUTPUT_STRIP_TRAILING_WHITESPACE RESULT_VARIABLE release_result)
+  if(NOT debug_result EQUAL 0 OR NOT "${debug_run}" STREQUAL "debug")
+    message(FATAL_ERROR "Debug app output mismatch: result=${debug_result} output=${debug_run}")
+  endif()
+  if(NOT release_result EQUAL 0 OR NOT "${release_run}" STREQUAL "release")
+    message(FATAL_ERROR "Release app output mismatch: result=${release_result} output=${release_run}")
+  endif()
+
+  execute_process(
+    COMMAND "${CMAKE_COMMAND}" --build "${multi_binary_dir}" --config Debug --target clean
+    OUTPUT_VARIABLE clean_stdout ERROR_VARIABLE clean_stderr RESULT_VARIABLE clean_result ENCODING UTF8)
+  if(NOT clean_result EQUAL 0)
+    message(FATAL_ERROR "Per-config clean failed.\nstdout:\n${clean_stdout}\nstderr:\n${clean_stderr}")
+  endif()
+  assert_file_not_exists("${multi_binary_dir}/Debug/app" "Debug per-config clean")
+  assert_file_exists("${multi_binary_dir}/Release/app" "Release output after Debug clean")
+elseif(TEST_MODE STREQUAL "multi_config_target_selection")
+  set(sel_source_dir "${TEST_BINARY_ROOT}/selection-src")
+  set(sel_binary_dir "${TEST_BINARY_ROOT}/selection-build")
+  write_multi_config_project("${sel_source_dir}" ReprobuildMultiSelection)
+  run_configure("${sel_source_dir}" "${sel_binary_dir}" TRUE ""
+    "-DCMAKE_CONFIGURATION_TYPES=Debug\\;Release"
+    "-DCMAKE_DEFAULT_BUILD_TYPE=Debug"
+    "-DCMAKE_DEFAULT_CONFIGS=Debug")
+
+  start_runquota("${TEST_BINARY_ROOT}" runquota_socket runquota_pid)
+  run_build_config("${sel_binary_dir}" "Debug" "app" "${runquota_socket}" selection_output)
+  stop_runquota("${runquota_pid}")
+  assert_contains("${selection_output}" "selectedTarget: app:Debug" "multi-config selection output")
+  assert_contains("${selection_output}" "action: app:Debug status=asSucceeded launched=true" "multi-config selection output")
+  assert_not_contains("${selection_output}" "link-side-Debug status=asSucceeded launched=true" "multi-config selection output")
+  assert_not_contains("${selection_output}" "link-app-Release status=asSucceeded launched=true" "multi-config selection output")
+  assert_file_exists("${sel_binary_dir}/Debug/app" "selected Debug app")
+  assert_file_not_exists("${sel_binary_dir}/Debug/side" "unselected Debug side")
+  assert_file_not_exists("${sel_binary_dir}/Release/app" "unselected Release app")
+
+  set(order_source_dir "${TEST_BINARY_ROOT}/default-order-src")
+  set(order_binary_dir "${TEST_BINARY_ROOT}/default-order-build")
+  write_multi_config_project("${order_source_dir}" ReprobuildDefaultOrder)
+  run_configure("${order_source_dir}" "${order_binary_dir}" TRUE ""
+    "-DCMAKE_CONFIGURATION_TYPES=Release\\;Debug")
+  file(READ "${order_binary_dir}/CMakeFiles/reprobuild/provider.meta" order_metadata)
+  assert_contains("${order_metadata}" "configurations=Release,Debug" "default-order metadata")
+  assert_contains("${order_metadata}" "default_build_type=Release" "default-order metadata")
+  assert_contains("${order_metadata}" "default_configs=Release" "default-order metadata")
+
+  start_runquota("${TEST_BINARY_ROOT}" runquota_socket runquota_pid)
+  run_build_config("${order_binary_dir}" "" "app" "${runquota_socket}" order_output)
+  stop_runquota("${runquota_pid}")
+  assert_contains("${order_output}" "selectedTarget: app" "default-order build output")
+  assert_contains("${order_output}" "action: app:Release status=asSucceeded launched=true" "default-order build output")
+  assert_not_contains("${order_output}" "link-app-Debug status=asSucceeded launched=true" "default-order build output")
+  assert_file_exists("${order_binary_dir}/Release/app" "implicit Release app")
+  assert_file_not_exists("${order_binary_dir}/Debug/app" "implicit default should not build Debug app")
+elseif(TEST_MODE STREQUAL "cross_config_generated_source")
+  set(cross_source_dir "${TEST_BINARY_ROOT}/cross-src")
+  set(cross_binary_dir "${TEST_BINARY_ROOT}/cross-build")
+  write_cross_config_generated_source_project("${cross_source_dir}" ReprobuildCrossGenerated)
+  run_configure("${cross_source_dir}" "${cross_binary_dir}" TRUE ""
+    "-DCMAKE_CONFIGURATION_TYPES=Debug\\;Release"
+    "-DCMAKE_DEFAULT_BUILD_TYPE=Release"
+    "-DCMAKE_DEFAULT_CONFIGS=Release"
+    "-DCMAKE_CROSS_CONFIGS=all")
+  file(READ "${cross_binary_dir}/reprobuild.nim" cross_provider)
+  foreach(expected IN ITEMS
+      "target(\"app:Debug\""
+      "target(\"app:Release\""
+      "target(\"app:Debug:Release\""
+      "aggregate(\"app:all:Release\""
+      "$<COMMAND_CONFIG:"
+      "Debug/generated.c"
+      "commandStatsId = \"compile-app-CMakeFiles_app.dir_Debug_generated")
+    if("${expected}" STREQUAL "$<COMMAND_CONFIG:")
+      assert_contains("${cross_provider}" "custom-command-app-Debug_generated.c-Debug-from-Release" "cross-config provider")
+    else()
+      assert_contains("${cross_provider}" "${expected}" "cross-config provider")
+    endif()
+  endforeach()
+
+  start_runquota("${TEST_BINARY_ROOT}" runquota_socket runquota_pid)
+  run_build_config("${cross_binary_dir}" "Release" "app:Debug" "${runquota_socket}" cross_output)
+  stop_runquota("${runquota_pid}")
+  assert_contains("${cross_output}" "selectedTarget: app:Debug:Release" "cross-config build output")
+  assert_contains("${cross_output}" "custom-command-app-Debug_generated.c-Debug-from-Release status=asSucceeded launched=true" "cross-config build output")
+  assert_contains("${cross_output}" "compile-app-CMakeFiles_app.dir_Debug_generated.c.o-Debug-from-Release status=asSucceeded launched=true" "cross-config build output")
+  assert_contains("${cross_output}" "gen:Release status=asSucceeded launched=true" "cross-config build output")
+  assert_file_exists("${cross_binary_dir}/Debug/generated.c" "cross-config generated source")
+  assert_file_exists("${cross_binary_dir}/Debug/app" "cross-config app")
+  execute_process(COMMAND "${cross_binary_dir}/Debug/app" RESULT_VARIABLE cross_result)
+  if(NOT cross_result EQUAL 0)
+    message(FATAL_ERROR "Cross-config generated-source executable failed with ${cross_result}")
+  endif()
+  file(READ "${cross_binary_dir}/Debug/generated.c" generated_content)
+  assert_contains("${generated_content}" "return 42" "cross-config generated source")
+
+  set(native_cross_binary_dir "${TEST_BINARY_ROOT}/cross-native-build")
+  run_configure("${cross_source_dir}" "${native_cross_binary_dir}" TRUE ""
+    "-DCMAKE_CONFIGURATION_TYPES=Debug\\;Release"
+    "-DCMAKE_DEFAULT_BUILD_TYPE=Release"
+    "-DCMAKE_DEFAULT_CONFIGS=Release"
+    "-DCMAKE_CROSS_CONFIGS=all")
+  start_runquota("${TEST_BINARY_ROOT}" runquota_socket runquota_pid)
+  run_build_config("${native_cross_binary_dir}" "Debug" "app" "${runquota_socket}" native_output)
+  stop_runquota("${runquota_pid}")
+  assert_contains("${native_output}" "selectedTarget: app:Debug" "native-with-cross-config build output")
+  assert_contains("${native_output}" "custom-command-app-Debug_generated.c-Debug status=asSucceeded launched=true" "native-with-cross-config build output")
+  assert_contains("${native_output}" "compile-app-CMakeFiles_app.dir_Debug_generated.c.o-Debug status=asSucceeded launched=true" "native-with-cross-config build output")
+  assert_not_contains("${native_output}" "unknown build target/action id: app:Debug" "native-with-cross-config build output")
+  assert_file_exists("${native_cross_binary_dir}/Debug/app" "native Debug app with cross configs enabled")
+  execute_process(COMMAND "${native_cross_binary_dir}/Debug/app" RESULT_VARIABLE native_result)
+  if(NOT native_result EQUAL 0)
+    message(FATAL_ERROR "Native Debug executable failed with ${native_result}")
+  endif()
+
+  set(default_all_binary_dir "${TEST_BINARY_ROOT}/cross-default-all-build")
+  run_configure("${cross_source_dir}" "${default_all_binary_dir}" TRUE ""
+    "-DCMAKE_CONFIGURATION_TYPES=Debug\\;Release"
+    "-DCMAKE_DEFAULT_BUILD_TYPE=Release"
+    "-DCMAKE_DEFAULT_CONFIGS=all"
+    "-DCMAKE_CROSS_CONFIGS=Debug")
+  file(READ "${default_all_binary_dir}/CMakeFiles/reprobuild/provider.meta" default_all_metadata)
+  assert_contains("${default_all_metadata}" "default_build_type=Release" "default-all metadata")
+  assert_contains("${default_all_metadata}" "default_configs=Debug" "default-all metadata")
+  assert_contains("${default_all_metadata}" "cross_configs=Debug" "default-all metadata")
+  assert_not_contains("${default_all_metadata}" "default_configs=Debug,Release" "default-all metadata")
+
+  start_runquota("${TEST_BINARY_ROOT}" runquota_socket runquota_pid)
+  run_build_config("${default_all_binary_dir}" "" "app" "${runquota_socket}" default_all_output)
+  stop_runquota("${runquota_pid}")
+  assert_contains("${default_all_output}" "selectedTarget: app" "default-all build output")
+  assert_contains("${default_all_output}" "custom-command-app-Debug_generated.c-Debug-from-Release status=asSucceeded launched=true" "default-all build output")
+  assert_contains("${default_all_output}" "compile-app-CMakeFiles_app.dir_Debug_generated.c.o-Debug-from-Release status=asSucceeded launched=true" "default-all build output")
+  assert_contains("${default_all_output}" "gen:Release status=asSucceeded launched=true" "default-all build output")
+  assert_not_contains("${default_all_output}" "action: app:Release status=asSucceeded launched=true" "default-all build output")
+  assert_file_exists("${default_all_binary_dir}/Debug/app" "default-all Debug app")
+  assert_file_not_exists("${default_all_binary_dir}/Release/app" "default-all must not build Release app")
+  execute_process(COMMAND "${default_all_binary_dir}/Debug/app" RESULT_VARIABLE default_all_result)
+  if(NOT default_all_result EQUAL 0)
+    message(FATAL_ERROR "Default-all Debug executable failed with ${default_all_result}")
+  endif()
+
+  set(target_all_binary_dir "${TEST_BINARY_ROOT}/cross-target-all-build")
+  run_configure("${cross_source_dir}" "${target_all_binary_dir}" TRUE ""
+    "-DCMAKE_CONFIGURATION_TYPES=Debug\\;Release"
+    "-DCMAKE_DEFAULT_BUILD_TYPE=Release"
+    "-DCMAKE_DEFAULT_CONFIGS=Release"
+    "-DCMAKE_CROSS_CONFIGS=Debug")
+  start_runquota("${TEST_BINARY_ROOT}" runquota_socket runquota_pid)
+  run_build_config("${target_all_binary_dir}" "Release" "app:all" "${runquota_socket}" target_all_output)
+  stop_runquota("${runquota_pid}")
+  assert_contains("${target_all_output}" "selectedTarget: app:all:Release" "target-all build output")
+  assert_contains("${target_all_output}" "custom-command-app-Debug_generated.c-Debug-from-Release status=asSucceeded launched=true" "target-all build output")
+  assert_contains("${target_all_output}" "compile-app-CMakeFiles_app.dir_Debug_generated.c.o-Debug-from-Release status=asSucceeded launched=true" "target-all build output")
+  assert_contains("${target_all_output}" "gen:Release status=asSucceeded launched=true" "target-all build output")
+  assert_not_contains("${target_all_output}" "action: app:Release status=asSucceeded launched=true" "target-all build output")
+  assert_file_exists("${target_all_binary_dir}/Debug/app" "target-all Debug app")
+  assert_file_not_exists("${target_all_binary_dir}/Release/app" "target-all must not build Release app")
+  execute_process(COMMAND "${target_all_binary_dir}/Debug/app" RESULT_VARIABLE target_all_result)
+  if(NOT target_all_result EQUAL 0)
+    message(FATAL_ERROR "Target-all Debug executable failed with ${target_all_result}")
+  endif()
 elseif(TEST_MODE STREQUAL "builtin_install_and_test_targets")
   set(builtin_source_dir "${TEST_BINARY_ROOT}/builtin-src")
   set(builtin_binary_dir "${TEST_BINARY_ROOT}/builtin-build")

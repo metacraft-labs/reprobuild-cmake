@@ -696,11 +696,14 @@ int do_reprobuild_launch(int ac, char const* const* av)
 
   std::string const buildDir = cmSystemTools::ToNormalizedPathOnDisk(av[2]);
   std::string action = "build";
+  std::string config;
   std::vector<std::string> targets;
   for (int i = 3; i < ac; ++i) {
     std::string const arg = av[i];
     if (cmHasLiteralPrefix(arg, "--action=")) {
       action = arg.substr(9);
+    } else if (cmHasLiteralPrefix(arg, "--config=")) {
+      config = arg.substr(9);
     } else if (cmHasLiteralPrefix(arg, "--target=")) {
       targets.push_back(arg.substr(9));
     }
@@ -731,6 +734,7 @@ int do_reprobuild_launch(int ac, char const* const* av)
     }
     return std::string();
   };
+  bool const multiConfig = !metadataValue("configurations").empty();
 
   std::string const sourceDir = metadataValue("source_dir");
   if (!sourceDir.empty() && action == "build") {
@@ -814,7 +818,13 @@ int do_reprobuild_launch(int ac, char const* const* av)
   }
 
   if (action == "clean") {
-    std::string const cleanManifest = metadataValue("clean_manifest");
+    std::string cleanManifest;
+    if (multiConfig && !config.empty()) {
+      cleanManifest = metadataValue(cmStrCat("clean_manifest_", config));
+    }
+    if (cleanManifest.empty()) {
+      cleanManifest = metadataValue("clean_manifest");
+    }
     if (cleanManifest.empty() || !cmSystemTools::FileExists(cleanManifest)) {
       std::cerr << "Reprobuild clean manifest is missing: " << cleanManifest
                 << "\n";
@@ -877,10 +887,36 @@ int do_reprobuild_launch(int ac, char const* const* av)
   }
 
   std::vector<std::string> selectedTargets;
+  std::string const effectiveConfig = multiConfig ? config : std::string();
   if (targets.empty()) {
-    selectedTargets.push_back("");
+    selectedTargets.push_back(effectiveConfig.empty()
+                                ? ""
+                                : cmStrCat("all:", effectiveConfig));
   } else {
-    selectedTargets = targets;
+    for (std::string const& target : targets) {
+      if (effectiveConfig.empty()) {
+        selectedTargets.push_back(target);
+        continue;
+      }
+      if (target == "all" || target == "default") {
+        selectedTargets.push_back(cmStrCat(target, ":", effectiveConfig));
+        continue;
+      }
+      std::string::size_type colon = target.find(':');
+      if (colon == std::string::npos) {
+        selectedTargets.push_back(cmStrCat(target, ":", effectiveConfig));
+        continue;
+      }
+      std::string const suffix = target.substr(colon + 1);
+      if (suffix == "all") {
+        selectedTargets.push_back(cmStrCat(target, ":", effectiveConfig));
+      } else if (suffix == effectiveConfig ||
+                 suffix.find(':') != std::string::npos) {
+        selectedTargets.push_back(target);
+      } else {
+        selectedTargets.push_back(cmStrCat(target, ":", effectiveConfig));
+      }
+    }
   }
 
   for (std::string const& target : selectedTargets) {

@@ -9,6 +9,7 @@
 #include <map>
 #include <set>
 #include <sstream>
+#include <tuple>
 #include <utility>
 #include <vector>
 
@@ -18,6 +19,7 @@
 #include "cmsys/FStream.hxx"
 
 #include "cmComputeLinkInformation.h"
+#include "cmCryptoHash.h"
 #include "cmCustomCommand.h"
 #include "cmCustomCommandGenerator.h"
 #include "cmDocumentationEntry.h"
@@ -33,6 +35,7 @@
 #include "cmMakefile.h"
 #include "cmPolicies.h"
 #include "cmSourceFile.h"
+#include "cmState.h"
 #include "cmStateTypes.h"
 #include "cmStringAlgorithms.h"
 #include "cmSystemTools.h"
@@ -121,6 +124,18 @@ std::string ReprobuildSafeId(std::string value)
     value = "action";
   }
   return value;
+}
+
+std::string ReprobuildCommandStatsId(std::string const& id)
+{
+  constexpr std::size_t maxCommandStatsIdBytes = 64;
+  if (id.size() <= maxCommandStatsIdBytes) {
+    return id;
+  }
+  cmCryptoHash hash(cmCryptoHash::AlgoSHA256);
+  std::string const suffix = hash.HashString(id).substr(0, 16);
+  return cmStrCat(id.substr(0, maxCommandStatsIdBytes - suffix.size() - 1),
+                  "-", suffix);
 }
 
 std::string ReprobuildRspQuote(std::string const& value)
@@ -625,8 +640,11 @@ struct ReprobuildAction
 
 struct ReprobuildTarget
 {
+  std::string BaseName;
   std::string Name;
   std::string Var;
+  std::string OutputConfig;
+  std::string CommandConfig;
   std::vector<ReprobuildAction> CustomActions;
   std::vector<ReprobuildAction> CompileActions;
   std::vector<ReprobuildAction> PreBuildActions;
@@ -640,6 +658,7 @@ struct ReprobuildTarget
   bool IsUtility = false;
   bool HasLinkAction = false;
   bool IncludeInAll = true;
+  bool IsCrossConfig = false;
 };
 
 struct ReprobuildPool
@@ -647,6 +666,96 @@ struct ReprobuildPool
   std::string Name;
   unsigned int Capacity = 1;
 };
+
+struct ReprobuildConfigPair
+{
+  std::string OutputConfig;
+  std::string CommandConfig;
+  bool IsCrossConfig = false;
+};
+
+std::string ReprobuildConfigSuffix(std::string const& outputConfig,
+                                   std::string const& commandConfig,
+                                   bool multiConfig)
+{
+  if (!multiConfig) {
+    return "";
+  }
+  if (outputConfig == commandConfig) {
+    return cmStrCat("-", outputConfig);
+  }
+  return cmStrCat("-", outputConfig, "-from-", commandConfig);
+}
+
+std::string ReprobuildTargetName(std::string const& baseName,
+                                 std::string const& outputConfig,
+                                 std::string const& commandConfig,
+                                 bool multiConfig)
+{
+  if (!multiConfig) {
+    return baseName;
+  }
+  if (outputConfig == commandConfig) {
+    return cmStrCat(baseName, ":", outputConfig);
+  }
+  return cmStrCat(baseName, ":", outputConfig, ":", commandConfig);
+}
+
+std::string ReprobuildConfigPath(std::string const& rel,
+                                 std::string const& config, bool multiConfig)
+{
+  if (!multiConfig || config.empty() || rel.empty() ||
+      cmSystemTools::FileIsFullPath(rel)) {
+    return rel;
+  }
+  if (rel == config || cmHasPrefix(rel, cmStrCat(config, "/"))) {
+    return rel;
+  }
+  if (cmHasLiteralPrefix(rel, "CMakeFiles/reprobuild/")) {
+    return rel;
+  }
+  std::string::size_type dirPos = rel.find(".dir/");
+  if (cmHasLiteralPrefix(rel, "CMakeFiles/") && dirPos != std::string::npos) {
+    dirPos += 5;
+    if (cmHasPrefix(rel.substr(dirPos), cmStrCat(config, "/"))) {
+      return rel;
+    }
+    return cmStrCat(rel.substr(0, dirPos), config, "/",
+                    rel.substr(dirPos));
+  }
+  return cmStrCat(config, "/", rel);
+}
+
+std::string ReprobuildConfigFullPath(std::string const& binaryDir,
+                                     std::string const& fullPath,
+                                     std::string const& config,
+                                     bool multiConfig)
+{
+  std::string rel = ReprobuildRelativeTo(binaryDir, fullPath);
+  return ReprobuildConfigPath(rel, config, multiConfig);
+}
+
+bool ReprobuildListSubsetWithAll(std::set<std::string> const& all,
+                                 std::set<std::string> const& defaults,
+                                 std::vector<std::string> const& items,
+                                 std::set<std::string>& result)
+{
+  result.clear();
+  for (std::string const& item : items) {
+    if (item == "all") {
+      if (items.size() == 1) {
+        result = defaults;
+      } else {
+        return false;
+      }
+    } else if (all.count(item)) {
+      result.insert(item);
+    } else {
+      return false;
+    }
+  }
+  return true;
+}
 }
 
 cmGlobalReprobuildGenerator::cmGlobalReprobuildGenerator(cmake* cm)
@@ -679,6 +788,10 @@ cmGlobalReprobuildGenerator::CreateLocalGenerator(cmMakefile* mf)
 void cmGlobalReprobuildGenerator::EnableLanguage(
   std::vector<std::string> const& languages, cmMakefile* mf, bool optional)
 {
+  if (this->IsMultiConfig()) {
+    mf->InitCMAKE_CONFIGURATION_TYPES("Debug;Release;RelWithDebInfo");
+  }
+
   for (std::string const& lang : languages) {
     if (lang != "NONE" && lang != "C" && lang != "CXX" &&
         lang != "Fortran") {
@@ -696,27 +809,119 @@ void cmGlobalReprobuildGenerator::EnableLanguage(
                                                        optional);
 }
 
-bool cmGlobalReprobuildGenerator::ValidateConfiguration()
+bool cmGlobalReprobuildGenerator::IsMultiConfig() const
 {
-  if (cmValue configs = this->GetCMakeInstance()->GetState()->GetCacheEntryValue(
-        "CMAKE_CONFIGURATION_TYPES")) {
-    if (!configs->empty()) {
-      this->GetCMakeInstance()->IssueMessage(
-        MessageType::FATAL_ERROR,
-        "The Reprobuild generator M2 slice supports only single-config "
-        "build trees; CMAKE_CONFIGURATION_TYPES is not supported.");
-      return false;
+  cmake* cm = this->GetCMakeInstance();
+  cmState* state = cm ? cm->GetState() : nullptr;
+  if (!state) {
+    return false;
+  }
+  for (std::string const& var :
+       { "CMAKE_CONFIGURATION_TYPES", "CMAKE_DEFAULT_BUILD_TYPE",
+         "CMAKE_DEFAULT_CONFIGS", "CMAKE_CROSS_CONFIGS" }) {
+    if (cmValue value = state->GetCacheEntryValue(var)) {
+      if (!value->empty()) {
+        return true;
+      }
     }
   }
+  return false;
+}
+
+bool cmGlobalReprobuildGenerator::InspectConfigTypeVariables()
+{
+  if (!this->IsMultiConfig()) {
+    this->CrossConfigs.clear();
+    this->DefaultConfigs.clear();
+    this->DefaultFileConfig.clear();
+    return true;
+  }
+
+  std::vector<std::string> configsList =
+    this->Makefiles.front()->GetGeneratorConfigs(
+      cmMakefile::IncludeEmptyConfig);
+  std::set<std::string> configs(configsList.cbegin(), configsList.cend());
+  configs.erase("");
+  if (configs.empty()) {
+    this->GetCMakeInstance()->IssueMessage(
+      MessageType::FATAL_ERROR,
+      "CMAKE_CONFIGURATION_TYPES must contain at least one configuration.");
+    return false;
+  }
+
+  this->DefaultFileConfig =
+    this->Makefiles.front()->GetSafeDefinition("CMAKE_DEFAULT_BUILD_TYPE");
+  if (this->DefaultFileConfig.empty()) {
+    for (std::string const& config : configsList) {
+      if (!config.empty()) {
+        this->DefaultFileConfig = config;
+        break;
+      }
+    }
+  }
+  if (!configs.count(this->DefaultFileConfig)) {
+    this->GetCMakeInstance()->IssueMessage(
+      MessageType::FATAL_ERROR,
+      cmStrCat("The configuration specified by CMAKE_DEFAULT_BUILD_TYPE (",
+               this->DefaultFileConfig,
+               ") is not present in CMAKE_CONFIGURATION_TYPES"));
+    return false;
+  }
+
+  cmList crossConfigsList{
+    this->Makefiles.front()->GetSafeDefinition("CMAKE_CROSS_CONFIGS")
+  };
+  std::set<std::string> crossConfigs;
+  if (!ReprobuildListSubsetWithAll(configs, configs, crossConfigsList,
+                                   crossConfigs)) {
+    this->GetCMakeInstance()->IssueMessage(
+      MessageType::FATAL_ERROR,
+      "CMAKE_CROSS_CONFIGS is not a subset of CMAKE_CONFIGURATION_TYPES");
+    return false;
+  }
+  this->CrossConfigs = crossConfigs;
+
+  std::string defaultConfigsString =
+    this->Makefiles.front()->GetSafeDefinition("CMAKE_DEFAULT_CONFIGS");
+  if (defaultConfigsString.empty()) {
+    defaultConfigsString = this->DefaultFileConfig;
+  }
+  if (!defaultConfigsString.empty() &&
+      defaultConfigsString != this->DefaultFileConfig &&
+      (this->DefaultFileConfig.empty() || this->CrossConfigs.empty())) {
+    this->GetCMakeInstance()->IssueMessage(
+      MessageType::FATAL_ERROR,
+      "CMAKE_DEFAULT_CONFIGS cannot be used without CMAKE_DEFAULT_BUILD_TYPE "
+      "or CMAKE_CROSS_CONFIGS");
+    return false;
+  }
+
+  cmList defaultConfigsList(defaultConfigsString);
+  std::set<std::string> allowedDefaults = this->CrossConfigs;
+  allowedDefaults.insert(this->DefaultFileConfig);
+  std::set<std::string> defaultConfigs;
+  if (!ReprobuildListSubsetWithAll(allowedDefaults, this->CrossConfigs,
+                                   defaultConfigsList, defaultConfigs)) {
+    this->GetCMakeInstance()->IssueMessage(
+      MessageType::FATAL_ERROR,
+      "CMAKE_DEFAULT_CONFIGS is not a subset of CMAKE_CROSS_CONFIGS");
+    return false;
+  }
+  this->DefaultConfigs = defaultConfigs;
+  if (this->DefaultConfigs.empty()) {
+    this->DefaultConfigs.insert(this->DefaultFileConfig);
+  }
+
   return true;
+}
+
+std::string cmGlobalReprobuildGenerator::GetDefaultBuildConfig() const
+{
+  return this->IsMultiConfig() ? std::string() : "Debug";
 }
 
 void cmGlobalReprobuildGenerator::Generate()
 {
-  if (!this->ValidateConfiguration()) {
-    return;
-  }
-
   this->cmGlobalUnixMakefileGenerator3::Generate();
   if (cmSystemTools::GetErrorOccurredFlag()) {
     return;
@@ -755,13 +960,91 @@ void cmGlobalReprobuildGenerator::WriteProviderMetadata()
 
   std::vector<ReprobuildTarget> buildTargets;
   std::vector<ReprobuildPool> pools;
-  std::set<std::string> cleanFiles;
+  std::map<std::string, std::set<std::string>> cleanFilesByConfig;
   std::set<std::string> usedLanguages;
   std::set<std::string> usedTools;
   bool sawImportLibraryOutput = false;
   bool sawLinkDepfile = false;
   bool sawSymlinkOutput = false;
-  std::string const config;
+  bool const multiConfig = this->IsMultiConfig();
+  cmMakefile* rootMf = this->LocalGenerators.front()->GetMakefile();
+  std::vector<std::string> configs;
+  if (multiConfig) {
+    configs = rootMf->GetGeneratorConfigs(cmMakefile::ExcludeEmptyConfig);
+  } else {
+    configs.emplace_back();
+  }
+  std::set<std::string> nativeCommandConfigTargets;
+  if (multiConfig && !this->CrossConfigs.empty()) {
+    auto recordCommandConfigUtilities =
+      [&](cmLocalGenerator* lg, cmCustomCommand const& cc) {
+        for (std::string const& config : configs) {
+          cmCustomCommandGenerator ccg(cc, config, lg);
+          for (auto const& utility : ccg.GetUtilities()) {
+            if (!utility.Value.second) {
+              continue;
+            }
+            cmGeneratorTarget* utilityTarget =
+              lg->FindGeneratorTargetToUse(utility.Value.first);
+            if (utilityTarget &&
+                utilityTarget->GetType() == cmStateEnums::EXECUTABLE &&
+                !utilityTarget->IsImported()) {
+              nativeCommandConfigTargets.insert(utilityTarget->GetName());
+            }
+          }
+        }
+      };
+    for (auto const& lg : this->LocalGenerators) {
+      for (auto const& gtPtr : lg->GetGeneratorTargets()) {
+        cmGeneratorTarget* gt = gtPtr.get();
+        std::vector<cmCustomCommand> commands = gt->GetPreBuildCommands();
+        cm::append(commands, gt->GetPreLinkCommands());
+        cm::append(commands, gt->GetPostBuildCommands());
+        for (cmCustomCommand const& cc : commands) {
+          recordCommandConfigUtilities(lg.get(), cc);
+        }
+        std::vector<cmSourceFile const*> customCommandSources;
+        gt->GetCustomCommands(customCommandSources, configs.front());
+        for (cmSourceFile const* customSource : customCommandSources) {
+          if (cmCustomCommand const* cc = customSource->GetCustomCommand()) {
+            recordCommandConfigUtilities(lg.get(), *cc);
+          }
+        }
+        if (gt->GetType() == cmStateEnums::UTILITY) {
+          std::vector<cmSourceFile*> utilitySources;
+          gt->GetSourceFiles(utilitySources, configs.front());
+          for (cmSourceFile const* source : utilitySources) {
+            if (cmCustomCommand const* cc = source->GetCustomCommand()) {
+              recordCommandConfigUtilities(lg.get(), *cc);
+            }
+          }
+        }
+      }
+    }
+  }
+  std::vector<ReprobuildConfigPair> configPairs;
+  if (multiConfig && !this->CrossConfigs.empty()) {
+    std::set<std::string> allConfigs(configs.begin(), configs.end());
+    std::set<std::pair<std::string, std::string>> seenPairs;
+    for (std::string const& commandConfig : configs) {
+      for (std::string const& outputConfig : this->CrossConfigs) {
+        if (outputConfig == commandConfig || !allConfigs.count(outputConfig)) {
+          continue;
+        }
+        if (seenPairs.insert({ outputConfig, commandConfig }).second) {
+          configPairs.push_back(ReprobuildConfigPair{
+            outputConfig, commandConfig, true });
+        }
+      }
+    }
+    for (std::string const& config : configs) {
+      configPairs.push_back(ReprobuildConfigPair{ config, config, false });
+    }
+  } else {
+    for (std::string const& config : configs) {
+      configPairs.push_back(ReprobuildConfigPair{ config, config, false });
+    }
+  }
   std::size_t nextActionVar = 0;
   std::size_t nextTargetVar = 0;
   std::size_t nextRsp = 0;
@@ -793,13 +1076,58 @@ void cmGlobalReprobuildGenerator::WriteProviderMetadata()
     }
   }
 
-  for (auto const& lg : this->LocalGenerators) {
-    for (auto const& gtPtr : lg->GetGeneratorTargets()) {
+  for (ReprobuildConfigPair const& configPair : configPairs) {
+    std::string const& config = configPair.OutputConfig;
+    std::string const& commandConfig = configPair.CommandConfig;
+    std::string const configSuffix =
+      ReprobuildConfigSuffix(config, commandConfig, multiConfig);
+    bool const declareOutputs = !configPair.IsCrossConfig;
+    std::set<std::string>& cleanFiles = cleanFilesByConfig[config];
+    for (auto const& lg : this->LocalGenerators) {
+      auto retargetCommandConfigExecutables =
+        [&](cmCustomCommandGenerator const& ccg,
+            std::vector<std::string>& commandLines) {
+          if (!multiConfig) {
+            return;
+          }
+          for (auto const& utility : ccg.GetUtilities()) {
+            cmGeneratorTarget* utilityTarget =
+              lg->FindGeneratorTargetToUse(utility.Value.first);
+            if (!utilityTarget ||
+                utilityTarget->GetType() != cmStateEnums::EXECUTABLE ||
+                utilityTarget->IsImported()) {
+              continue;
+            }
+            std::string const depConfig =
+              utility.Value.second ? commandConfig : config;
+            std::string const oldPath = utilityTarget->GetFullPath(depConfig);
+            std::string const newPath = cmStrCat(
+              binaryDir, "/",
+              ReprobuildConfigFullPath(binaryDir, oldPath, depConfig, true));
+            if (oldPath == newPath) {
+              continue;
+            }
+            for (std::string& commandLine : commandLines) {
+              cmSystemTools::ReplaceString(
+                commandLine, ReprobuildShellSingleQuote(oldPath),
+                ReprobuildShellSingleQuote(newPath));
+              cmSystemTools::ReplaceString(commandLine, oldPath, newPath);
+            }
+          }
+        };
+      for (auto const& gtPtr : lg->GetGeneratorTargets()) {
       cmGeneratorTarget* gt = gtPtr.get();
       auto const type = gt->GetType();
       if (type == cmStateEnums::INTERFACE_LIBRARY ||
           type == cmStateEnums::GLOBAL_TARGET || type == cmStateEnums::UNKNOWN_LIBRARY) {
         continue;
+      }
+      bool const isNativeCommandConfigTarget =
+        nativeCommandConfigTargets.count(gt->GetName()) > 0;
+      if (multiConfig && !this->CrossConfigs.empty()) {
+        if (configPair.IsCrossConfig && isNativeCommandConfigTarget) {
+          continue;
+        }
       }
       if (type == cmStateEnums::UTILITY) {
         std::vector<cmCustomCommand> utilityCommands =
@@ -812,33 +1140,52 @@ void cmGlobalReprobuildGenerator::WriteProviderMetadata()
         std::vector<std::string> utilityOutputs;
         std::string utilityDepfile;
         auto appendCustomCommand = [&](cmCustomCommand const& cc) {
-          cmCustomCommandGenerator ccg(cc, config, lg.get());
+          cmCustomCommandGenerator ccg(cc, commandConfig, lg.get(), false,
+                                       config);
           if (utilityDepfile.empty()) {
             utilityDepfile = ReprobuildCustomDepfilePath(binaryDir, lg.get(),
                                                          ccg);
           }
           for (std::string const& output : ccg.GetOutputs()) {
-            utilityOutputs.push_back(ReprobuildOutputPath(
-              binaryDir, lg->GetCurrentBinaryDirectory(), output));
+            utilityOutputs.push_back(ReprobuildConfigPath(
+              ReprobuildOutputPath(binaryDir, lg->GetCurrentBinaryDirectory(),
+                                   output),
+              config, multiConfig));
             ReprobuildAppendCleanFile(cleanFiles,
-                                      lg->GetCurrentBinaryDirectory(),
-                                      output);
+                                      binaryDir,
+                                      ReprobuildConfigPath(
+                                        ReprobuildOutputPath(
+                                          binaryDir,
+                                          lg->GetCurrentBinaryDirectory(),
+                                          output),
+                                        config, multiConfig));
           }
           for (std::string const& byproduct : ccg.GetByproducts()) {
-            utilityOutputs.push_back(ReprobuildOutputPath(
-              binaryDir, lg->GetCurrentBinaryDirectory(), byproduct));
+            utilityOutputs.push_back(ReprobuildConfigPath(
+              ReprobuildOutputPath(binaryDir, lg->GetCurrentBinaryDirectory(),
+                                   byproduct),
+              config, multiConfig));
             ReprobuildAppendCleanFile(cleanFiles,
-                                      lg->GetCurrentBinaryDirectory(),
-                                      byproduct);
+                                      binaryDir,
+                                      ReprobuildConfigPath(
+                                        ReprobuildOutputPath(
+                                          binaryDir,
+                                          lg->GetCurrentBinaryDirectory(),
+                                          byproduct),
+                                        config, multiConfig));
           }
-          for (std::string const& dep : ccg.GetDepends()) {
-            std::string realDep;
-            if (lg->GetRealDependency(dep, config, realDep,
-                                      cc.GetCMP0212Status())) {
-              utilityInputs.push_back(ReprobuildOutputPath(
-                binaryDir, lg->GetCurrentBinaryDirectory(), realDep));
-            }
+        for (std::string const& dep : ccg.GetDepends()) {
+          std::string realDep;
+          if (lg->GetRealDependency(dep, ccg.GetOutputConfig(), realDep,
+                                    cc.GetCMP0212Status())) {
+              utilityInputs.push_back(ReprobuildConfigPath(
+                ReprobuildOutputPath(binaryDir, lg->GetCurrentBinaryDirectory(),
+                                     realDep),
+                configPair.IsCrossConfig ? commandConfig
+                                         : ccg.GetOutputConfig(),
+                multiConfig));
           }
+        }
           if (cc.GetUsesTerminal()) {
             usesTerminal = true;
           } else if (jobPool.empty() && !cc.GetJobPool().empty()) {
@@ -847,6 +1194,7 @@ void cmGlobalReprobuildGenerator::WriteProviderMetadata()
           cm::append(commandLines,
                      ReprobuildCustomCommandLines(
                        ccg, true, lg->GetCurrentBinaryDirectory()));
+          retargetCommandConfigExecutables(ccg, commandLines);
         };
         for (cmCustomCommand const& cc : utilityCommands) {
           appendCustomCommand(cc);
@@ -863,15 +1211,23 @@ void cmGlobalReprobuildGenerator::WriteProviderMetadata()
         }
 
         ReprobuildTarget target;
-        target.Name = gt->GetName();
+        target.BaseName = gt->GetName();
+        target.Name = ReprobuildTargetName(gt->GetName(), config,
+                                           commandConfig, multiConfig);
+        target.OutputConfig = config;
+        target.CommandConfig = commandConfig;
+        target.IsCrossConfig = configPair.IsCrossConfig;
         target.Var = ReprobuildNimIdent("target", nextTargetVar++, target.Name);
         target.IsUtility = true;
-        target.IncludeInAll = !gt->GetPropertyAsBool("EXCLUDE_FROM_ALL");
-        for (auto const& utility : gt->GetUtilities()) {
-          target.TargetDeps.push_back(utility.Value.first);
+        target.IncludeInAll = !configPair.IsCrossConfig &&
+          !gt->GetPropertyAsBool("EXCLUDE_FROM_ALL");
+        if (!configPair.IsCrossConfig) {
+          for (auto const& utility : gt->GetUtilities()) {
+            target.TargetDeps.push_back(utility.Value.first);
+          }
         }
         target.UtilityAction.Id =
-          ReprobuildSafeId(cmStrCat("custom-", gt->GetName()));
+          ReprobuildSafeId(cmStrCat("custom-", gt->GetName(), configSuffix));
         target.UtilityAction.Var = ReprobuildNimIdent(
           "action", nextActionVar++, target.UtilityAction.Id);
         target.UtilityAction.ToolId =
@@ -879,8 +1235,10 @@ void cmGlobalReprobuildGenerator::WriteProviderMetadata()
                                     target.UtilityAction.Var));
         target.UtilityAction.Pool = usesTerminal ? "console" : jobPool;
         target.UtilityAction.Inputs = utilityInputs;
-        target.UtilityAction.Outputs = utilityOutputs;
-        target.UtilityAction.Depfile = utilityDepfile;
+        if (declareOutputs) {
+          target.UtilityAction.Outputs = utilityOutputs;
+          target.UtilityAction.Depfile = utilityDepfile;
+        }
         target.UtilityAction.Cacheable = false;
         std::string const wrapperPath =
           cmStrCat(wrapperDir, "/", target.UtilityAction.ToolId);
@@ -927,11 +1285,19 @@ void cmGlobalReprobuildGenerator::WriteProviderMetadata()
       }
 
       ReprobuildTarget target;
-      target.Name = gt->GetName();
+      target.BaseName = gt->GetName();
+      target.Name = ReprobuildTargetName(gt->GetName(), config, commandConfig,
+                                         multiConfig);
+      target.OutputConfig = config;
+      target.CommandConfig = commandConfig;
+      target.IsCrossConfig = configPair.IsCrossConfig;
       target.Var = ReprobuildNimIdent("target", nextTargetVar++, target.Name);
-      target.IncludeInAll = !gt->GetPropertyAsBool("EXCLUDE_FROM_ALL");
-      for (auto const& utility : gt->GetUtilities()) {
-        target.TargetDeps.push_back(utility.Value.first);
+      target.IncludeInAll = !configPair.IsCrossConfig &&
+        !gt->GetPropertyAsBool("EXCLUDE_FROM_ALL");
+      if (!configPair.IsCrossConfig) {
+        for (auto const& utility : gt->GetUtilities()) {
+          target.TargetDeps.push_back(utility.Value.first);
+        }
       }
 
       std::vector<cmSourceFile const*> customCommandSources;
@@ -943,10 +1309,12 @@ void cmGlobalReprobuildGenerator::WriteProviderMetadata()
         if (cc == nullptr || !emittedCustomCommands.insert(cc).second) {
           continue;
         }
-        cmCustomCommandGenerator ccg(*cc, config, lg.get());
+        cmCustomCommandGenerator ccg(*cc, commandConfig, lg.get(), false,
+                                     config);
         std::vector<std::string> commandLines =
           ReprobuildCustomCommandLines(
             ccg, true, lg->GetCurrentBinaryDirectory());
+        retargetCommandConfigExecutables(ccg, commandLines);
         if (commandLines.empty()) {
           continue;
         }
@@ -955,39 +1323,80 @@ void cmGlobalReprobuildGenerator::WriteProviderMetadata()
         std::string const primaryOutput =
           ccg.GetOutputs().empty()
           ? cmStrCat("custom-", gt->GetName(), "-", customIndex)
-          : ReprobuildOutputPath(binaryDir, lg->GetCurrentBinaryDirectory(),
-                                 ccg.GetOutputs().front());
+          : ReprobuildConfigPath(
+              ReprobuildOutputPath(binaryDir, lg->GetCurrentBinaryDirectory(),
+                                   ccg.GetOutputs().front()),
+              config, multiConfig);
         custom.Id =
           ReprobuildSafeId(cmStrCat("custom-command-", gt->GetName(), "-",
-                                    primaryOutput));
+                                    primaryOutput, configSuffix));
         custom.Var = ReprobuildNimIdent("action", nextActionVar++,
                                         custom.Id);
         custom.ToolId =
           ReprobuildSafeId(cmStrCat("reprobuild-cmake-", custom.Var));
         custom.Pool = cc->GetUsesTerminal() ? "console" : cc->GetJobPool();
-        custom.Cacheable = true;
+        custom.Cacheable = declareOutputs;
         for (std::string const& output : ccg.GetOutputs()) {
-          custom.Outputs.push_back(ReprobuildOutputPath(
-            binaryDir, lg->GetCurrentBinaryDirectory(), output));
+          if (declareOutputs) {
+            custom.Outputs.push_back(ReprobuildConfigPath(
+              ReprobuildOutputPath(binaryDir, lg->GetCurrentBinaryDirectory(),
+                                   output),
+              config, multiConfig));
+          }
           ReprobuildAppendCleanFile(cleanFiles,
-                                    lg->GetCurrentBinaryDirectory(), output);
+                                    binaryDir,
+                                    ReprobuildConfigPath(
+                                      ReprobuildOutputPath(
+                                        binaryDir,
+                                        lg->GetCurrentBinaryDirectory(),
+                                        output),
+                                      config, multiConfig));
         }
         for (std::string const& byproduct : ccg.GetByproducts()) {
-          custom.Outputs.push_back(ReprobuildOutputPath(
-            binaryDir, lg->GetCurrentBinaryDirectory(), byproduct));
+          if (declareOutputs) {
+            custom.Outputs.push_back(ReprobuildConfigPath(
+              ReprobuildOutputPath(binaryDir, lg->GetCurrentBinaryDirectory(),
+                                   byproduct),
+              config, multiConfig));
+          }
           ReprobuildAppendCleanFile(cleanFiles,
-                                    lg->GetCurrentBinaryDirectory(),
-                                    byproduct);
+                                    binaryDir,
+                                    ReprobuildConfigPath(
+                                      ReprobuildOutputPath(
+                                        binaryDir,
+                                        lg->GetCurrentBinaryDirectory(),
+                                        byproduct),
+                                      config, multiConfig));
         }
         for (std::string const& dep : ccg.GetDepends()) {
           std::string realDep;
-          if (lg->GetRealDependency(dep, config, realDep,
+          if (lg->GetRealDependency(dep, ccg.GetOutputConfig(), realDep,
                                     cc->GetCMP0212Status())) {
-            custom.Inputs.push_back(ReprobuildOutputPath(
-              binaryDir, lg->GetCurrentBinaryDirectory(), realDep));
+            custom.Inputs.push_back(ReprobuildConfigPath(
+              ReprobuildOutputPath(binaryDir, lg->GetCurrentBinaryDirectory(),
+                                   realDep),
+              configPair.IsCrossConfig ? commandConfig : ccg.GetOutputConfig(),
+              multiConfig));
           }
         }
-        custom.Depfile = ReprobuildCustomDepfilePath(binaryDir, lg.get(), ccg);
+        for (auto const& utility : ccg.GetUtilities()) {
+          cmGeneratorTarget* utilityTarget =
+            lg->FindGeneratorTargetToUse(utility.Value.first);
+          if (utilityTarget &&
+              utilityTarget->GetType() == cmStateEnums::EXECUTABLE &&
+              !utilityTarget->IsImported()) {
+            std::string const depConfig =
+              utility.Value.second ? commandConfig : config;
+            ReprobuildAppendUnique(
+              custom.Deps,
+              ReprobuildSafeId(cmStrCat(
+                "link-", utilityTarget->GetName(),
+                ReprobuildConfigSuffix(depConfig, depConfig, multiConfig))));
+          }
+        }
+        if (declareOutputs) {
+          custom.Depfile = ReprobuildCustomDepfilePath(binaryDir, lg.get(), ccg);
+        }
         if (!custom.Depfile.empty()) {
           ReprobuildAppendCleanFile(cleanFiles, binaryDir, custom.Depfile);
         }
@@ -1024,9 +1433,11 @@ void cmGlobalReprobuildGenerator::WriteProviderMetadata()
         }
         std::string const objFull =
           cmStrCat(gt->GetObjectDirectory(config), gt->GetObjectName(source));
-        std::string const objRel = ReprobuildRelativeTo(binaryDir, objFull);
+        std::string const objRel =
+          ReprobuildConfigFullPath(binaryDir, objFull, config, multiConfig);
         pchActionIds[source->GetFullPath()] =
-          ReprobuildSafeId(cmStrCat("compile-", gt->GetName(), "-", objRel));
+          ReprobuildSafeId(cmStrCat("compile-", gt->GetName(), "-", objRel,
+                                    configSuffix));
       }
 
       std::map<std::string, std::vector<std::string>> dyndepDdis;
@@ -1070,7 +1481,8 @@ void cmGlobalReprobuildGenerator::WriteProviderMetadata()
 
         std::string const objFull =
           cmStrCat(gt->GetObjectDirectory(config), gt->GetObjectName(source));
-        std::string const objRel = ReprobuildRelativeTo(binaryDir, objFull);
+        std::string const objRel =
+          ReprobuildConfigFullPath(binaryDir, objFull, config, multiConfig);
         std::string const depRel = cmStrCat(objRel, ".d");
         if (!source->IsPchSource() || mf->IsOn("CMAKE_LINK_PCH")) {
           linkObjects.push_back(objRel);
@@ -1079,6 +1491,14 @@ void cmGlobalReprobuildGenerator::WriteProviderMetadata()
         ReprobuildAppendCleanFile(cleanFiles, binaryDir, depRel);
         cmSystemTools::MakeDirectory(
           cmSystemTools::GetFilenamePath(cmStrCat(binaryDir, "/", objRel)));
+        std::string sourcePath = source->GetFullPath();
+        std::string sourceArg = sourcePath;
+        std::string const binaryPrefix = cmStrCat(binaryDir, "/");
+        if (multiConfig && sourcePath.rfind(binaryPrefix, 0) == 0) {
+          sourcePath =
+            ReprobuildConfigFullPath(binaryDir, sourcePath, config, true);
+          sourceArg = cmStrCat(binaryDir, "/", sourcePath);
+        }
 
         std::vector<std::string> args;
         std::string flags;
@@ -1127,7 +1547,7 @@ void cmGlobalReprobuildGenerator::WriteProviderMetadata()
 
           ReprobuildAction scan;
           scan.Id = ReprobuildSafeId(cmStrCat("scan-", gt->GetName(), "-",
-                                              objRel));
+                                              objRel, configSuffix));
           scan.Var = ReprobuildNimIdent("action", nextActionVar++, scan.Id);
           scan.ToolId = ReprobuildSafeId(cmStrCat("reprobuild-cmake-",
                                                   scan.Var));
@@ -1136,7 +1556,7 @@ void cmGlobalReprobuildGenerator::WriteProviderMetadata()
             ReprobuildShellSingleQuote(
               mf->GetSafeDefinition(ReprobuildCompilerVar(lang))),
             " -cpp -E ", cmJoin(args, " "), " ",
-            ReprobuildShellSingleQuote(source->GetFullPath()), " -o ",
+              ReprobuildShellSingleQuote(sourceArg), " -o ",
             ReprobuildShellSingleQuote(ppRel)));
           std::string const tdiRel =
             cmStrCat("CMakeFiles/reprobuild/dyndep/", target.Var, "-",
@@ -1150,7 +1570,7 @@ void cmGlobalReprobuildGenerator::WriteProviderMetadata()
             ReprobuildShellSingleQuote(scanDepRel), " --obj=",
             ReprobuildShellSingleQuote(objRel), " --ddi=",
             ReprobuildShellSingleQuote(ddiRel), " --src-orig=",
-            ReprobuildShellSingleQuote(source->GetFullPath())));
+            ReprobuildShellSingleQuote(sourceArg)));
           std::string const scanWrapper =
             cmStrCat(wrapperDir, "/", scan.ToolId);
           if (!ReprobuildWriteCommandScript(scanWrapper, binaryDir,
@@ -1162,15 +1582,20 @@ void cmGlobalReprobuildGenerator::WriteProviderMetadata()
             return;
           }
           usedTools.insert(scan.ToolId);
-          scan.Inputs = { source->GetFullPath(), tdiRel };
-          scan.Outputs = { ppRel, ddiRel };
-          scan.Depfile = scanDepRel;
+          scan.Inputs = { sourcePath, tdiRel };
+          if (declareOutputs) {
+            scan.Outputs = { ppRel, ddiRel };
+            scan.Depfile = scanDepRel;
+          } else {
+            scan.Cacheable = false;
+          }
           dyndepDdis[lang].push_back(ddiRel);
           dyndepScanActions[lang].push_back(scan.Id);
           dyndepActionMaps[lang].push_back({ objRel, ReprobuildSafeId(
                                                        cmStrCat("compile-",
                                                                 gt->GetName(),
-                                                                "-", objRel)) });
+                                                                "-", objRel,
+                                                                configSuffix)) });
           target.CustomActions.push_back(std::move(scan));
 
           args.push_back("-o");
@@ -1185,7 +1610,7 @@ void cmGlobalReprobuildGenerator::WriteProviderMetadata()
             std::string const scanDepRel = cmStrCat(ddiRel, ".d");
             ReprobuildAction scan;
             scan.Id = ReprobuildSafeId(cmStrCat("scan-", gt->GetName(), "-",
-                                                objRel));
+                                                objRel, configSuffix));
             scan.Var = ReprobuildNimIdent("action", nextActionVar++,
                                           scan.Id);
             scan.ToolId = ReprobuildSafeId(cmStrCat("reprobuild-cmake-",
@@ -1205,7 +1630,7 @@ void cmGlobalReprobuildGenerator::WriteProviderMetadata()
               ReprobuildShellSingleQuote(
                 mf->GetSafeDefinition(ReprobuildCompilerVar(lang))),
               " ", cmJoin(args, " "), " -x c++ ",
-              ReprobuildShellSingleQuote(source->GetFullPath()), " -c -o ",
+              ReprobuildShellSingleQuote(sourceArg), " -c -o ",
               ReprobuildShellSingleQuote(objRel), " -MT ",
               ReprobuildShellSingleQuote(ddiRel), " -MD -MF ",
               ReprobuildShellSingleQuote(scanDepRel), " > ",
@@ -1221,15 +1646,20 @@ void cmGlobalReprobuildGenerator::WriteProviderMetadata()
               return;
             }
             usedTools.insert(scan.ToolId);
-            scan.Inputs = { source->GetFullPath() };
-            scan.Outputs = { ddiRel };
-            scan.Depfile = scanDepRel;
+            scan.Inputs = { sourcePath };
+            if (declareOutputs) {
+              scan.Outputs = { ddiRel };
+              scan.Depfile = scanDepRel;
+            } else {
+              scan.Cacheable = false;
+            }
             dyndepDdis[lang].push_back(ddiRel);
             dyndepScanActions[lang].push_back(scan.Id);
             dyndepActionMaps[lang].push_back({ objRel, ReprobuildSafeId(
                                                          cmStrCat("compile-",
                                                                   gt->GetName(),
-                                                                  "-", objRel)) });
+                                                                  "-", objRel,
+                                                                  configSuffix)) });
             if (cmGeneratorFileSet const* fs =
                   gt->GetFileSetForSource(config, source)) {
               if (fs->GetType() == cm::FileSetMetadata::CXX_MODULES) {
@@ -1251,12 +1681,12 @@ void cmGlobalReprobuildGenerator::WriteProviderMetadata()
           args.push_back("-o");
           args.push_back(objRel);
           args.push_back("-c");
-          args.push_back(source->GetFullPath());
+          args.push_back(sourceArg);
         }
 
         ReprobuildAction action;
         action.Id = ReprobuildSafeId(cmStrCat("compile-", gt->GetName(), "-",
-                                              objRel));
+                                              objRel, configSuffix));
         action.Var = ReprobuildNimIdent("action", nextActionVar++, action.Id);
         action.ToolId = ReprobuildToolId(lang);
         std::string const launcher = lg->GetRuleLauncher(
@@ -1290,14 +1720,22 @@ void cmGlobalReprobuildGenerator::WriteProviderMetadata()
         if (lang == "Fortran") {
           action.Inputs = { cmStrCat(objRel, ".ddi.i") };
         } else {
-          action.Inputs = { source->GetFullPath() };
+          action.Inputs = { sourcePath };
         }
-        action.Outputs = { objRel };
-        if (lang != "Fortran") {
+        if (declareOutputs) {
+          action.Outputs = { objRel };
+        } else {
+          action.Cacheable = false;
+          for (ReprobuildAction const& custom : target.CustomActions) {
+            ReprobuildAppendUnique(action.Deps, custom.Id);
+          }
+        }
+        if (declareOutputs && lang != "Fortran") {
           action.Depfile = depRel;
         }
-        if (lang == "Fortran" ||
-            (lang == "CXX" && gt->NeedDyndepForSource(lang, config, source))) {
+        if (declareOutputs &&
+            (lang == "Fortran" ||
+             (lang == "CXX" && gt->NeedDyndepForSource(lang, config, source)))) {
           action.DynamicDepsFile =
             cmStrCat("CMakeFiles/reprobuild/dyndep/", target.Var, "-", lang,
                      ".rbdyn");
@@ -1332,7 +1770,7 @@ void cmGlobalReprobuildGenerator::WriteProviderMetadata()
                                                "JOB_POOL_COMPILE");
         }
         action.CompileDirectory = binaryDir;
-        action.CompileFile = source->GetFullPath();
+        action.CompileFile = sourceArg;
         action.CompileCommand =
           cmStrCat(mf->GetSafeDefinition(ReprobuildCompilerVar(lang)),
                    " ", cmJoin(args, " "));
@@ -1380,7 +1818,7 @@ void cmGlobalReprobuildGenerator::WriteProviderMetadata()
 
         ReprobuildAction dyndep;
         dyndep.Id = ReprobuildSafeId(cmStrCat("dyndep-", gt->GetName(), "-",
-                                              lang));
+                                              lang, configSuffix));
         dyndep.Var =
           ReprobuildNimIdent("action", nextActionVar++, dyndep.Id);
         dyndep.ToolId =
@@ -1389,12 +1827,14 @@ void cmGlobalReprobuildGenerator::WriteProviderMetadata()
         dyndep.Inputs = ddis;
         dyndep.Inputs.push_back(tdiRel);
         dyndep.Inputs.push_back(mapRel);
-        dyndep.Outputs = { ddRel, fragmentRel,
-                           cmStrCat(cmSystemTools::GetFilenamePath(ddRel),
-                                    "/", lang, "Modules.json") };
-        if (lang == "CXX") {
-          for (auto const& mapEntry : dyndepActionMaps[lang]) {
-            dyndep.Outputs.push_back(cmStrCat(mapEntry.first, ".modmap"));
+        if (declareOutputs) {
+          dyndep.Outputs = { ddRel, fragmentRel,
+                             cmStrCat(cmSystemTools::GetFilenamePath(ddRel),
+                                      "/", lang, "Modules.json") };
+          if (lang == "CXX") {
+            for (auto const& mapEntry : dyndepActionMaps[lang]) {
+              dyndep.Outputs.push_back(cmStrCat(mapEntry.first, ".modmap"));
+            }
           }
         }
         dyndep.Cacheable = false;
@@ -1457,10 +1897,11 @@ void cmGlobalReprobuildGenerator::WriteProviderMetadata()
 
       auto objectOutputFor = [&](cmGeneratorTarget* objectTarget,
                                  cmSourceFile const* source) {
-        return ReprobuildRelativeTo(
+        return ReprobuildConfigFullPath(
           binaryDir,
           cmStrCat(objectTarget->GetObjectDirectory(config),
-                   objectTarget->GetObjectName(source)));
+                   objectTarget->GetObjectName(source)),
+          config, multiConfig);
       };
       auto appendObjectLibraryOutputs = [&](cmGeneratorTarget* objectTarget,
                                             std::vector<std::string>& objects,
@@ -1473,7 +1914,7 @@ void cmGlobalReprobuildGenerator::WriteProviderMetadata()
           ReprobuildAppendUnique(
             deps, ReprobuildSafeId(cmStrCat("compile-",
                                             objectTarget->GetName(), "-",
-                                            objRel)));
+                                            objRel, configSuffix)));
         }
       };
 
@@ -1482,7 +1923,8 @@ void cmGlobalReprobuildGenerator::WriteProviderMetadata()
             std::string const& stage, std::vector<ReprobuildAction>& actions) {
           unsigned int eventIndex = 0;
           for (cmCustomCommand const& cc : commands) {
-            cmCustomCommandGenerator ccg(cc, config, lg.get());
+            cmCustomCommandGenerator ccg(cc, commandConfig, lg.get(), false,
+                                         config);
             std::vector<std::string> commandLines;
             for (unsigned int i = 0; i < ccg.GetNumberOfCommands(); ++i) {
               std::string commandLine;
@@ -1499,10 +1941,12 @@ void cmGlobalReprobuildGenerator::WriteProviderMetadata()
             if (commandLines.empty()) {
               continue;
             }
+            retargetCommandConfigExecutables(ccg, commandLines);
 
             ReprobuildAction event;
             event.Id = ReprobuildSafeId(cmStrCat(stage, "-", gt->GetName(),
-                                                 "-", eventIndex++));
+                                                 "-", eventIndex++,
+                                                 configSuffix));
             event.Var = ReprobuildNimIdent("action", nextActionVar++,
                                            event.Id);
             event.ToolId =
@@ -1514,10 +1958,12 @@ void cmGlobalReprobuildGenerator::WriteProviderMetadata()
               ReprobuildAppendCleanFile(cleanFiles,
                                         lg->GetCurrentBinaryDirectory(),
                                         byproduct);
-              event.Outputs.push_back(ReprobuildRelativeTo(
-                binaryDir,
-                cmSystemTools::CollapseFullPath(
-                  byproduct, lg->GetCurrentBinaryDirectory())));
+              if (declareOutputs) {
+                event.Outputs.push_back(ReprobuildRelativeTo(
+                  binaryDir,
+                  cmSystemTools::CollapseFullPath(
+                    byproduct, lg->GetCurrentBinaryDirectory())));
+              }
             }
             std::string const wrapperPath =
               cmStrCat(wrapperDir, "/", event.ToolId);
@@ -1566,7 +2012,7 @@ void cmGlobalReprobuildGenerator::WriteProviderMetadata()
       usedLanguages.insert(linkLang);
 
       target.LinkAction.Id =
-        ReprobuildSafeId(cmStrCat("link-", gt->GetName()));
+        ReprobuildSafeId(cmStrCat("link-", gt->GetName(), configSuffix));
       target.LinkAction.Var =
         ReprobuildNimIdent("action", nextActionVar++, target.LinkAction.Id);
       target.LinkAction.Pool = ReprobuildPoolProperty(gt, nullptr,
@@ -1607,10 +2053,13 @@ void cmGlobalReprobuildGenerator::WriteProviderMetadata()
             : cmStateEnums::RuntimeBinaryArtifact;
           std::string const depPath = ReprobuildRelativeTo(
             binaryDir, depTarget->GetFullPath(config, artifact, true));
-          ReprobuildAppendUnique(linkObjects, depPath);
+          ReprobuildAppendUnique(
+            linkObjects,
+            ReprobuildConfigPath(depPath, config, multiConfig));
           ReprobuildAppendUnique(linkDependencyActions,
                                 ReprobuildSafeId(cmStrCat("link-",
-                                                          depTarget->GetName())));
+                                                          depTarget->GetName(),
+                                                          configSuffix)));
         }
       };
 
@@ -1622,8 +2071,9 @@ void cmGlobalReprobuildGenerator::WriteProviderMetadata()
           appendLinkedTarget(lg->FindGeneratorTargetToUse(objLib));
         } else {
           ReprobuildAppendUnique(
-            linkObjects, ReprobuildRelativeTo(binaryDir,
-                                              externalObject->GetFullPath()));
+            linkObjects,
+            ReprobuildConfigFullPath(binaryDir, externalObject->GetFullPath(),
+                                     config, multiConfig));
         }
       }
       if (cmComputeLinkInformation* cli = gt->GetLinkInformation(config)) {
@@ -1637,8 +2087,9 @@ void cmGlobalReprobuildGenerator::WriteProviderMetadata()
             } else {
               ReprobuildAppendUnique(
                 linkObjects,
-                ReprobuildRelativeTo(binaryDir,
-                                      item.ObjectSource->GetFullPath()));
+                ReprobuildConfigFullPath(binaryDir,
+                                         item.ObjectSource->GetFullPath(),
+                                         config, multiConfig));
             }
           }
         }
@@ -1653,13 +2104,16 @@ void cmGlobalReprobuildGenerator::WriteProviderMetadata()
         ReprobuildAppendUnique(target.LinkAction.Deps, preLink.Id);
       }
 
-      std::string const output = ReprobuildRelativeTo(
-        binaryDir, gt->GetFullPath(config));
-      std::string const realOutput = ReprobuildRelativeTo(
-        binaryDir, gt->GetFullPath(config, cmStateEnums::RuntimeBinaryArtifact,
-                                   true));
+      std::string const output = ReprobuildConfigFullPath(
+        binaryDir, gt->GetFullPath(config), config, multiConfig);
+      std::string const realOutput = ReprobuildConfigFullPath(
+        binaryDir,
+        gt->GetFullPath(config, cmStateEnums::RuntimeBinaryArtifact, true),
+        config, multiConfig);
       ReprobuildAppendCleanFile(cleanFiles, binaryDir, output);
       ReprobuildAppendCleanFile(cleanFiles, binaryDir, realOutput);
+      cmSystemTools::MakeDirectory(
+        cmSystemTools::GetFilenamePath(cmStrCat(binaryDir, "/", realOutput)));
 
       if (type == cmStateEnums::STATIC_LIBRARY) {
         usedTools.insert(ReprobuildArchiveToolId());
@@ -1678,7 +2132,9 @@ void cmGlobalReprobuildGenerator::WriteProviderMetadata()
         target.LinkAction.Args = { arTool, ranlibTool, "qc", output };
         cm::append(target.LinkAction.Args, linkObjects);
         target.LinkAction.Inputs = linkObjects;
-        target.LinkAction.Outputs = { output };
+        if (declareOutputs) {
+          target.LinkAction.Outputs = { output };
+        }
       } else {
         usedTools.insert(ReprobuildToolId(linkLang));
         std::string flags;
@@ -1735,23 +2191,34 @@ void cmGlobalReprobuildGenerator::WriteProviderMetadata()
         target.LinkAction.ToolId = ReprobuildToolId(linkLang);
         target.LinkAction.Args = linkArgs;
         target.LinkAction.Inputs = linkObjects;
-        target.LinkAction.Outputs = { realOutput };
+        if (declareOutputs) {
+          target.LinkAction.Outputs = { realOutput };
+        }
         if (gt->HasImportLibrary(config)) {
           std::string const importOutput = ReprobuildRelativeTo(
             binaryDir,
             gt->GetFullPath(config, cmStateEnums::ImportLibraryArtifact, true));
+          std::string const importOutputConfig =
+            ReprobuildConfigPath(importOutput, config, multiConfig);
           if (!importOutput.empty()) {
-            ReprobuildAppendCleanFile(cleanFiles, binaryDir, importOutput);
-            ReprobuildAppendUnique(target.LinkAction.Outputs, importOutput);
+            ReprobuildAppendCleanFile(cleanFiles, binaryDir,
+                                      importOutputConfig);
+            if (declareOutputs) {
+              ReprobuildAppendUnique(target.LinkAction.Outputs,
+                                     importOutputConfig);
+            }
             sawImportLibraryOutput = true;
           }
         }
-        if (gt->HasLinkDependencyFile(config)) {
+        if (declareOutputs && gt->HasLinkDependencyFile(config)) {
           target.LinkAction.Depfile = lg->GetLinkDependencyFile(gt, config);
           ReprobuildAppendCleanFile(cleanFiles, binaryDir,
                                     target.LinkAction.Depfile);
           sawLinkDepfile = true;
         }
+      }
+      if (!declareOutputs) {
+        target.LinkAction.Cacheable = false;
       }
       target.HasLinkAction = true;
 
@@ -1762,15 +2229,22 @@ void cmGlobalReprobuildGenerator::WriteProviderMetadata()
           cmStrCat(gt->GetDirectory(config), "/", names.SharedObject));
         ReprobuildAction symlinkAction;
         symlinkAction.Id =
-          ReprobuildSafeId(cmStrCat("symlink-", gt->GetName()));
+          ReprobuildSafeId(cmStrCat("symlink-", gt->GetName(),
+                                    configSuffix));
         symlinkAction.Var = ReprobuildNimIdent("action", nextActionVar++,
                                                symlinkAction.Id);
         symlinkAction.ToolId = ReprobuildSymlinkToolId();
         symlinkAction.Args = { realOutput, soName, output };
         symlinkAction.Inputs = { realOutput };
-        symlinkAction.Outputs = { output };
+        if (declareOutputs) {
+          symlinkAction.Outputs = { output };
+        } else {
+          symlinkAction.Cacheable = false;
+        }
         if (soName != output && soName != realOutput) {
-          symlinkAction.Outputs.insert(symlinkAction.Outputs.begin(), soName);
+          if (declareOutputs) {
+            symlinkAction.Outputs.insert(symlinkAction.Outputs.begin(), soName);
+          }
           ReprobuildAppendCleanFile(cleanFiles, binaryDir, soName);
         }
         ReprobuildAppendCleanFile(cleanFiles, binaryDir, output);
@@ -1816,17 +2290,27 @@ void cmGlobalReprobuildGenerator::WriteProviderMetadata()
       std::vector<cmSourceFile const*> customCommands;
       gt->GetCustomCommands(customCommands, config);
       for (cmSourceFile const* sf : customCommands) {
-        cmCustomCommandGenerator ccg(*sf->GetCustomCommand(), config,
-                                     lg.get());
+        cmCustomCommandGenerator ccg(*sf->GetCustomCommand(), commandConfig,
+                                     lg.get(), false, config);
         for (std::string const& customOutput : ccg.GetOutputs()) {
           ReprobuildAppendCleanFile(cleanFiles,
-                                    lg->GetCurrentBinaryDirectory(),
-                                    customOutput);
+                                    binaryDir,
+                                    ReprobuildConfigPath(
+                                      ReprobuildOutputPath(
+                                        binaryDir,
+                                        lg->GetCurrentBinaryDirectory(),
+                                        customOutput),
+                                      config, multiConfig));
         }
         for (std::string const& byproduct : ccg.GetByproducts()) {
           ReprobuildAppendCleanFile(cleanFiles,
-                                    lg->GetCurrentBinaryDirectory(),
-                                    byproduct);
+                                    binaryDir,
+                                    ReprobuildConfigPath(
+                                      ReprobuildOutputPath(
+                                        binaryDir,
+                                        lg->GetCurrentBinaryDirectory(),
+                                        byproduct),
+                                      config, multiConfig));
         }
       }
       std::vector<cmCustomCommand> buildEventCommands =
@@ -1834,11 +2318,17 @@ void cmGlobalReprobuildGenerator::WriteProviderMetadata()
       cm::append(buildEventCommands, gt->GetPreLinkCommands());
       cm::append(buildEventCommands, gt->GetPostBuildCommands());
       for (cmCustomCommand const& cc : buildEventCommands) {
-        cmCustomCommandGenerator ccg(cc, config, lg.get());
+        cmCustomCommandGenerator ccg(cc, commandConfig, lg.get(), false,
+                                     config);
         for (std::string const& byproduct : ccg.GetByproducts()) {
           ReprobuildAppendCleanFile(cleanFiles,
-                                    lg->GetCurrentBinaryDirectory(),
-                                    byproduct);
+                                    binaryDir,
+                                    ReprobuildConfigPath(
+                                      ReprobuildOutputPath(
+                                        binaryDir,
+                                        lg->GetCurrentBinaryDirectory(),
+                                        byproduct),
+                                      config, multiConfig));
         }
       }
       buildTargets.push_back(std::move(target));
@@ -1849,6 +2339,7 @@ void cmGlobalReprobuildGenerator::WriteProviderMetadata()
            lg->GetMakefile()->GetProperty("ADDITIONAL_CLEAN_FILES"))) {
       ReprobuildAppendCleanFile(cleanFiles, lg->GetCurrentBinaryDirectory(),
                                 cleanFile);
+    }
     }
   }
 
@@ -1917,7 +2408,10 @@ void cmGlobalReprobuildGenerator::WriteProviderMetadata()
   for (ReprobuildTarget& target : buildTargets) {
     std::vector<std::string> deps;
     for (std::string const& depName : target.TargetDeps) {
-      auto const it = targetTerminals.find(depName);
+      std::string const depTargetName =
+        ReprobuildTargetName(depName, target.OutputConfig,
+                             target.CommandConfig, multiConfig);
+      auto const it = targetTerminals.find(depTargetName);
       if (it != targetTerminals.end()) {
         cm::append(deps, it->second);
       }
@@ -1969,7 +2463,6 @@ void cmGlobalReprobuildGenerator::WriteProviderMetadata()
     ReprobuildShellSingleQuote(cmSystemTools::GetCTestCommand());
   std::string const cpackCmd =
     ReprobuildShellSingleQuote(cmSystemTools::GetCPackCommand());
-  cmMakefile* rootMf = this->LocalGenerators.front()->GetMakefile();
   std::vector<std::string> helpTargets = { "all", "default", "clean" };
   auto addHelpTargetName = [&helpTargets](std::string const& name) {
     helpTargets.push_back(name);
@@ -2113,6 +2606,10 @@ void cmGlobalReprobuildGenerator::WriteProviderMetadata()
     return;
   }
 
+  std::set<std::string> allCleanFiles;
+  for (auto const& entry : cleanFilesByConfig) {
+    allCleanFiles.insert(entry.second.begin(), entry.second.end());
+  }
   std::string const cleanManifestFile = cmStrCat(providerDir, "/clean.manifest");
   cmsys::ofstream cleanManifest(cleanManifestFile.c_str());
   if (!cleanManifest) {
@@ -2122,8 +2619,27 @@ void cmGlobalReprobuildGenerator::WriteProviderMetadata()
                cleanManifestFile));
     return;
   }
-  for (std::string const& path : cleanFiles) {
+  for (std::string const& path : allCleanFiles) {
     cleanManifest << path << "\n";
+  }
+  std::map<std::string, std::string> cleanManifestByConfig;
+  if (multiConfig) {
+    for (auto const& entry : cleanFilesByConfig) {
+      std::string const configCleanManifestFile =
+        cmStrCat(providerDir, "/clean-", entry.first, ".manifest");
+      cmsys::ofstream configCleanManifest(configCleanManifestFile.c_str());
+      if (!configCleanManifest) {
+        this->GetCMakeInstance()->IssueMessage(
+          MessageType::FATAL_ERROR,
+          cmStrCat("Could not write Reprobuild clean manifest: ",
+                   configCleanManifestFile));
+        return;
+      }
+      for (std::string const& path : entry.second) {
+        configCleanManifest << path << "\n";
+      }
+      cleanManifestByConfig[entry.first] = configCleanManifestFile;
+    }
   }
 
   std::string const metadataFile = cmStrCat(providerDir, "/provider.meta");
@@ -2158,6 +2674,20 @@ void cmGlobalReprobuildGenerator::WriteProviderMetadata()
   metadata << "provider_root=" << providerDir << "\n";
   metadata << "wrapper_path=" << wrapperDir << "\n";
   metadata << "clean_manifest=" << cleanManifestFile << "\n";
+  if (multiConfig) {
+    metadata << "configurations=" << cmJoin(configs, ",") << "\n";
+    metadata << "default_build_type=" << this->DefaultFileConfig << "\n";
+    std::vector<std::string> defaultConfigs(this->DefaultConfigs.begin(),
+                                            this->DefaultConfigs.end());
+    metadata << "default_configs=" << cmJoin(defaultConfigs, ",") << "\n";
+    std::vector<std::string> crossConfigs(this->CrossConfigs.begin(),
+                                          this->CrossConfigs.end());
+    metadata << "cross_configs=" << cmJoin(crossConfigs, ",") << "\n";
+    for (auto const& entry : cleanManifestByConfig) {
+      metadata << "clean_manifest_" << entry.first << "=" << entry.second
+               << "\n";
+    }
+  }
   metadata << "default_target=all\n";
 
   std::vector<std::string> languages;
@@ -2219,7 +2749,8 @@ void cmGlobalReprobuildGenerator::WriteProviderMetadata()
                << ReprobuildEscape(action.DynamicDepsFile);
     }
     provider << ", cacheable = " << (action.Cacheable ? "true" : "false");
-    provider << ", commandStatsId = " << ReprobuildEscape(action.Id)
+    provider << ", commandStatsId = "
+             << ReprobuildEscape(ReprobuildCommandStatsId(action.Id))
              << ")\n";
   };
   for (ReprobuildTarget const& target : buildTargets) {
@@ -2277,18 +2808,188 @@ void cmGlobalReprobuildGenerator::WriteProviderMetadata()
       }
     }
   }
-  provider << "    let allTarget = aggregate(\"all\", targets = @[";
-  char const* targetSep = "";
-  for (ReprobuildTarget const& target : buildTargets) {
-    if (!target.IncludeInAll) {
-      continue;
+  if (multiConfig) {
+    using TargetConfigKey =
+      std::tuple<std::string, std::string, std::string>;
+    std::map<TargetConfigKey, std::string> targetVarsByConfig;
+    std::map<std::string, std::vector<ReprobuildTarget const*>>
+      nativeTargetsByBase;
+    std::vector<ReprobuildTarget const*> nativeAllTargets;
+    for (ReprobuildTarget const& target : buildTargets) {
+      if (!target.BaseName.empty()) {
+        targetVarsByConfig.emplace(
+          TargetConfigKey{ target.BaseName, target.OutputConfig,
+                           target.CommandConfig },
+          target.Var);
+        if (!target.IsCrossConfig) {
+          nativeTargetsByBase[target.BaseName].push_back(&target);
+        }
+      }
+      if (target.IncludeInAll && !target.IsCrossConfig) {
+        nativeAllTargets.push_back(&target);
+      }
     }
-    provider << targetSep << target.Var;
-    targetSep = ", ";
+    auto commandConfigTargetVar =
+      [&](std::string const& baseName, std::string const& outputConfig,
+          std::string const& commandConfig) -> std::string {
+      auto const it = targetVarsByConfig.find(
+        TargetConfigKey{ baseName, outputConfig, commandConfig });
+      if (it != targetVarsByConfig.end()) {
+        return it->second;
+      }
+      return "";
+    };
+
+    for (std::string const& config : configs) {
+      std::string const var =
+        ReprobuildNimIdent("target", nextTargetVar++,
+                           cmStrCat("all-", config));
+      provider << "    let " << var << " = aggregate("
+               << ReprobuildEscape(cmStrCat("all:", config))
+               << ", targets = @[";
+      char const* targetSep = "";
+      for (ReprobuildTarget const& target : buildTargets) {
+        if (!target.IncludeInAll || target.OutputConfig != config ||
+            target.IsCrossConfig) {
+          continue;
+        }
+        provider << targetSep << target.Var;
+        targetSep = ", ";
+      }
+      provider << "])\n";
+      provider << "    discard exportTarget("
+               << ReprobuildEscape(cmStrCat("default:", config)) << ", "
+               << var << ")\n";
+    }
+
+    for (auto const& entry : nativeTargetsByBase) {
+      if (!this->CrossConfigs.empty()) {
+        for (std::string const& commandConfig : configs) {
+          std::string const var =
+            ReprobuildNimIdent("target", nextTargetVar++,
+                               cmStrCat(entry.first, "-all-", commandConfig));
+          provider << "    let " << var << " = aggregate("
+                   << ReprobuildEscape(
+                        cmStrCat(entry.first, ":all:", commandConfig))
+                   << ", targets = @[";
+          char const* targetSep = "";
+          for (std::string const& outputConfig : this->CrossConfigs) {
+            std::string const targetVar =
+              commandConfigTargetVar(entry.first, outputConfig,
+                                     commandConfig);
+            if (targetVar.empty()) {
+              continue;
+            }
+            provider << targetSep << targetVar;
+            targetSep = ", ";
+          }
+          provider << "])\n";
+        }
+
+        std::string const var =
+          ReprobuildNimIdent("target", nextTargetVar++,
+                             cmStrCat(entry.first, "-all"));
+        provider << "    let " << var << " = aggregate("
+                 << ReprobuildEscape(cmStrCat(entry.first, ":all"))
+                 << ", targets = @[";
+        char const* targetSep = "";
+        for (std::string const& outputConfig : this->CrossConfigs) {
+          std::string const targetVar =
+            commandConfigTargetVar(entry.first, outputConfig,
+                                   this->DefaultFileConfig);
+          if (targetVar.empty()) {
+            continue;
+          }
+          provider << targetSep << targetVar;
+          targetSep = ", ";
+        }
+        provider << "])\n";
+        continue;
+      }
+
+      for (std::string const& commandConfig : configs) {
+        std::string const var =
+          ReprobuildNimIdent("target", nextTargetVar++,
+                             cmStrCat(entry.first, "-all-", commandConfig));
+        provider << "    let " << var << " = aggregate("
+                 << ReprobuildEscape(
+                      cmStrCat(entry.first, ":all:", commandConfig))
+                 << ", targets = @[";
+        char const* targetSep = "";
+        for (ReprobuildTarget const* target : entry.second) {
+          provider << targetSep << target->Var;
+          targetSep = ", ";
+        }
+        provider << "])\n";
+      }
+
+      std::string const var =
+        ReprobuildNimIdent("target", nextTargetVar++,
+                           cmStrCat(entry.first, "-all"));
+      provider << "    let " << var << " = aggregate("
+               << ReprobuildEscape(cmStrCat(entry.first, ":all"))
+               << ", targets = @[";
+      char const* targetSep = "";
+      for (ReprobuildTarget const* target : entry.second) {
+        provider << targetSep << target->Var;
+        targetSep = ", ";
+      }
+      provider << "])\n";
+    }
+    for (auto const& entry : nativeTargetsByBase) {
+      std::string const var =
+        ReprobuildNimIdent("target", nextTargetVar++,
+                           cmStrCat(entry.first, "-default"));
+      provider << "    let " << var << " = aggregate("
+               << ReprobuildEscape(entry.first) << ", targets = @[";
+      char const* targetSep = "";
+      for (std::string const& outputConfig : this->DefaultConfigs) {
+        std::string const targetVar =
+          commandConfigTargetVar(entry.first, outputConfig,
+                                 this->DefaultFileConfig);
+        if (targetVar.empty()) {
+          continue;
+        }
+        provider << targetSep << targetVar;
+        targetSep = ", ";
+      }
+      provider << "])\n";
+    }
+
+    provider << "    let allTarget = aggregate(\"all\", targets = @[";
+    char const* targetSep = "";
+    for (std::string const& config : this->DefaultConfigs) {
+      for (ReprobuildTarget const* target : nativeAllTargets) {
+        if (target->OutputConfig != config || target->BaseName.empty()) {
+          continue;
+        }
+        std::string const targetVar =
+          commandConfigTargetVar(target->BaseName, config,
+                                 this->DefaultFileConfig);
+        if (targetVar.empty()) {
+          continue;
+        }
+        provider << targetSep << targetVar;
+        targetSep = ", ";
+      }
+    }
+    provider << "])\n"
+             << "    discard exportTarget(\"default\", allTarget)\n"
+             << "    defaultTarget(allTarget)\n";
+  } else {
+    provider << "    let allTarget = aggregate(\"all\", targets = @[";
+    char const* targetSep = "";
+    for (ReprobuildTarget const& target : buildTargets) {
+      if (!target.IncludeInAll) {
+        continue;
+      }
+      provider << targetSep << target.Var;
+      targetSep = ", ";
+    }
+    provider << "])\n"
+             << "    discard exportTarget(\"default\", allTarget)\n"
+             << "    defaultTarget(allTarget)\n";
   }
-  provider << "])\n"
-           << "    discard exportTarget(\"default\", allTarget)\n"
-           << "    defaultTarget(allTarget)\n";
 
   std::string const compileCommandsFile =
     cmStrCat(binaryDir, "/compile_commands.json");

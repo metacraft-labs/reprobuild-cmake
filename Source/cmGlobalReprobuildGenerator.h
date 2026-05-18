@@ -5,6 +5,7 @@
 #include "cmConfigure.h" // IWYU pragma: keep
 
 #include <memory>
+#include <set>
 #include <string>
 #include <vector>
 
@@ -42,6 +43,20 @@ public:
                       bool optional) override;
 
   void Generate() override;
+  bool IsMultiConfig() const override;
+
+  bool InspectConfigTypeVariables() override;
+
+  std::string GetDefaultBuildConfig() const override;
+
+  std::set<std::string> const& GetDefaultConfigs() const override
+  {
+    return this->DefaultConfigs;
+  }
+
+  bool SupportsDefaultBuildType() const override { return true; }
+  bool SupportsCrossConfigs() const override { return true; }
+  bool SupportsDefaultConfigs() const override { return true; }
 
   bool CheckCxxModuleSupport(CxxModuleSupportQuery /*query*/) override
   {
@@ -57,6 +72,9 @@ public:
     BuildTryCompile isInTryCompile = BuildTryCompile::No) override;
 
 private:
-  bool ValidateConfiguration();
   void WriteProviderMetadata();
+
+  std::set<std::string> CrossConfigs;
+  std::set<std::string> DefaultConfigs;
+  std::string DefaultFileConfig;
 };
