@@ -252,6 +252,7 @@ function(run_build binary_dir target socket out_var)
   set(command
     "${CMAKE_COMMAND}" -E env
       "RUNQUOTA_SOCKET=${socket}"
+      "REPROBUILD_WORK_ROOT=${binary_dir}/CMakeFiles/reprobuild/work-root"
       "REPROBUILD_REPRO=${TEST_REPROBUILD_REPRO}"
       "REPROBUILD_SOURCE_ROOT=${TEST_REPROBUILD_SOURCE_ROOT}"
       "${CMAKE_COMMAND}" --build "${binary_dir}")
@@ -284,6 +285,7 @@ function(run_build_config binary_dir config target socket out_var)
   set(command
     "${CMAKE_COMMAND}" -E env
       "RUNQUOTA_SOCKET=${socket}"
+      "REPROBUILD_WORK_ROOT=${binary_dir}/CMakeFiles/reprobuild/work-root"
       "REPROBUILD_REPRO=${TEST_REPROBUILD_REPRO}"
       "REPROBUILD_SOURCE_ROOT=${TEST_REPROBUILD_SOURCE_ROOT}"
       "${CMAKE_COMMAND}" --build "${binary_dir}")
@@ -319,6 +321,7 @@ function(run_build_expect_failure binary_dir target socket out_var)
   set(command
     "${CMAKE_COMMAND}" -E env
       "RUNQUOTA_SOCKET=${socket}"
+      "REPROBUILD_WORK_ROOT=${binary_dir}/CMakeFiles/reprobuild/work-root"
       "REPROBUILD_REPRO=${TEST_REPROBUILD_REPRO}"
       "REPROBUILD_SOURCE_ROOT=${TEST_REPROBUILD_SOURCE_ROOT}"
       "${CMAKE_COMMAND}" --build "${binary_dir}")
@@ -1342,11 +1345,13 @@ function(run_m11_submode mode)
   endif()
 endfunction()
 
-function(run_imported_runcmake_fixture suite case target)
+function(configure_imported_runcmake_fixture suite case bin_var)
   set(src "${CMAKE_CURRENT_LIST_DIR}/../${suite}")
   set(bin "${TEST_BINARY_ROOT}/upstream-${suite}-${case}")
   file(REMOVE_RECURSE "${bin}")
   file(MAKE_DIRECTORY "${bin}")
+  string(RANDOM LENGTH 16 ALPHABET "0123456789abcdef" compat_nonce)
+  set(configure_args ${ARGN})
   execute_process(
     COMMAND "${CMAKE_COMMAND}"
       -S "${src}"
@@ -1356,7 +1361,10 @@ function(run_imported_runcmake_fixture suite case target)
       -DCMAKE_BUILD_TYPE=Debug
       -DCMAKE_C_COMPILER=${TEST_C_COMPILER}
       -DCMAKE_CXX_COMPILER=${TEST_CXX_COMPILER}
+      "-DCMAKE_C_FLAGS=-DREPROBUILD_COMPAT_NONCE=${compat_nonce}"
+      "-DCMAKE_CXX_FLAGS=-DREPROBUILD_COMPAT_NONCE=${compat_nonce}"
       -DCMAKE_EXPORT_COMPILE_COMMANDS=ON
+      ${configure_args}
     OUTPUT_VARIABLE stdout
     ERROR_VARIABLE stderr
     RESULT_VARIABLE result
@@ -1368,13 +1376,134 @@ function(run_imported_runcmake_fixture suite case target)
   endif()
   file(READ "${bin}/CMakeFiles/reprobuild/provider.meta" metadata)
   assert_contains("${metadata}" "generator=Reprobuild" "${suite}/${case} metadata")
+  set(${bin_var} "${bin}" PARENT_SCOPE)
+endfunction()
+
+function(run_imported_runcmake_configure suite case)
+  configure_imported_runcmake_fixture("${suite}" "${case}" bin ${ARGN})
+  m11_support_line("upstream:${suite}/${case}=ran-configure generator=Reprobuild")
+endfunction()
+
+function(run_imported_runcmake_fixture suite case target)
+  set(options NO_DEPFILE NONCACHEABLE)
+  set(oneValueArgs CONFIG)
+  set(multiValueArgs CONFIGURE_ARGS)
+  cmake_parse_arguments(RIRF "${options}" "${oneValueArgs}" "${multiValueArgs}" ${ARGN})
+
+  configure_imported_runcmake_fixture("${suite}" "${case}" bin ${RIRF_CONFIGURE_ARGS})
   start_runquota("${TEST_BINARY_ROOT}" runquota_socket runquota_pid "--pool console=1")
-  run_build("${bin}" "${target}" "${runquota_socket}" build_output)
+  if("${RIRF_CONFIG}" STREQUAL "")
+    run_build("${bin}" "${target}" "${runquota_socket}" first_output)
+    report_path_from_output("${first_output}" first_report_path)
+    file(READ "${first_report_path}" first_report)
+    if(NOT RIRF_NONCACHEABLE)
+      run_build("${bin}" "${target}" "${runquota_socket}" second_output)
+    endif()
+  else()
+    run_build_config("${bin}" "${RIRF_CONFIG}" "${target}" "${runquota_socket}" first_output)
+    report_path_from_output("${first_output}" first_report_path)
+    file(READ "${first_report_path}" first_report)
+    if(NOT RIRF_NONCACHEABLE)
+      run_build_config("${bin}" "${RIRF_CONFIG}" "${target}" "${runquota_socket}" second_output)
+    endif()
+  endif()
   stop_runquota("${runquota_pid}")
-  report_path_from_output("${build_output}" report_path)
+  assert_contains("${first_report}" "\"runQuotaSocket\": \"${runquota_socket}\"" "${suite}/${case} first report")
+  assert_contains("${first_report}" "\"evidence\"" "${suite}/${case} report")
+  if(NOT RIRF_NONCACHEABLE)
+    report_path_from_output("${second_output}" report_path)
+    file(READ "${report_path}" report)
+    assert_contains("${second_output}" "status=asCacheHit" "${suite}/${case} second build cache evidence")
+    assert_contains("${report}" "\"cacheDecision\": \"cdHit\"" "${suite}/${case} cache report")
+  endif()
+  if(NOT RIRF_NO_DEPFILE)
+    assert_contains("${first_output}" "evidence=depfile:" "${suite}/${case} first build dependency evidence")
+    if(RIRF_NONCACHEABLE)
+      assert_contains("${first_report}" "\"depfileInputs\"" "${suite}/${case} dependency report")
+    else()
+      assert_contains("${report}" "\"depfileInputs\"" "${suite}/${case} dependency report")
+    endif()
+  endif()
+  if("${RIRF_CONFIG}" STREQUAL "")
+    m11_support_line("upstream:${suite}/${case}=ran-build target=${target} generator=Reprobuild")
+  else()
+    m11_support_line("upstream:${suite}/${case}=ran-build config=${RIRF_CONFIG} target=${target} generator=Reprobuild")
+  endif()
+endfunction()
+
+function(run_imported_runcmake_rerun_ninja)
+  set(src "${CMAKE_CURRENT_LIST_DIR}/../Configure")
+  set(bin "${TEST_BINARY_ROOT}/upstream-Configure-RerunCMakeNinja")
+  file(REMOVE_RECURSE "${bin}")
+  file(MAKE_DIRECTORY "${bin}")
+  string(RANDOM LENGTH 16 ALPHABET "0123456789abcdef" compat_nonce)
+  file(WRITE "${bin}/input.txt" "before\n")
+  execute_process(
+    COMMAND "${CMAKE_COMMAND}"
+      -S "${src}"
+      -B "${bin}"
+      -G Reprobuild
+      -DRunCMake_TEST=RerunCMakeNinja
+      -DCMAKE_BUILD_TYPE=Debug
+      -DCMAKE_C_COMPILER=${TEST_C_COMPILER}
+      -DCMAKE_CXX_COMPILER=${TEST_CXX_COMPILER}
+      "-DCMAKE_C_FLAGS=-DREPROBUILD_COMPAT_NONCE=${compat_nonce}"
+      "-DCMAKE_CXX_FLAGS=-DREPROBUILD_COMPAT_NONCE=${compat_nonce}"
+      -DCMAKE_EXPORT_COMPILE_COMMANDS=ON
+    OUTPUT_VARIABLE stdout
+    ERROR_VARIABLE stderr
+    RESULT_VARIABLE result
+    ENCODING UTF8)
+  if(NOT result EQUAL 0)
+    message(FATAL_ERROR
+      "Imported RunCMake fixture failed to configure: Configure/RerunCMakeNinja\n"
+      "stdout:\n${stdout}\nstderr:\n${stderr}")
+  endif()
+  file(READ "${bin}/CMakeFiles/reprobuild/provider.meta" metadata)
+  assert_contains("${metadata}" "generator=Reprobuild" "Configure/RerunCMakeNinja metadata")
+  start_runquota("${TEST_BINARY_ROOT}" runquota_socket runquota_pid)
+  run_build("${bin}" "" "${runquota_socket}" first_output)
+  execute_process(COMMAND "${CMAKE_COMMAND}" -E sleep 1.1)
+  file(REMOVE "${bin}/cmake_install.cmake")
+  file(WRITE "${bin}/input.txt" "after\n")
+  run_build("${bin}" "" "${runquota_socket}" second_output)
+  stop_runquota("${runquota_pid}")
+  file(READ "${bin}/stamp.txt" stamp_content)
+  assert_contains("${stamp_content}" "after" "Configure/RerunCMakeNinja regenerated stamp")
+  report_path_from_output("${second_output}" report_path)
   file(READ "${report_path}" report)
-  assert_contains("${report}" "\"runQuotaSocket\": \"${runquota_socket}\"" "${suite}/${case} report")
-  assert_contains("${report}" "\"evidence\"" "${suite}/${case} report")
+  assert_contains("${report}" "\"runQuotaSocket\": \"${runquota_socket}\"" "Configure/RerunCMakeNinja report")
+  m11_support_line("upstream:Configure/RerunCMakeNinja=ran-rerun-build generator=Reprobuild")
+endfunction()
+
+function(run_imported_runcmake_rerun_ninja_configure)
+  set(src "${CMAKE_CURRENT_LIST_DIR}/../Configure")
+  set(bin "${TEST_BINARY_ROOT}/upstream-Configure-RerunCMakeNinja")
+  file(REMOVE_RECURSE "${bin}")
+  file(MAKE_DIRECTORY "${bin}")
+  file(WRITE "${bin}/input.txt" "configure-only\n")
+  execute_process(
+    COMMAND "${CMAKE_COMMAND}"
+      -S "${src}"
+      -B "${bin}"
+      -G Reprobuild
+      -DRunCMake_TEST=RerunCMakeNinja
+      -DCMAKE_BUILD_TYPE=Debug
+      -DCMAKE_C_COMPILER=${TEST_C_COMPILER}
+      -DCMAKE_CXX_COMPILER=${TEST_CXX_COMPILER}
+      -DCMAKE_EXPORT_COMPILE_COMMANDS=ON
+    OUTPUT_VARIABLE stdout
+    ERROR_VARIABLE stderr
+    RESULT_VARIABLE result
+    ENCODING UTF8)
+  if(NOT result EQUAL 0)
+    message(FATAL_ERROR
+      "Imported RunCMake fixture failed to configure: Configure/RerunCMakeNinja\n"
+      "stdout:\n${stdout}\nstderr:\n${stderr}")
+  endif()
+  file(READ "${bin}/CMakeFiles/reprobuild/provider.meta" metadata)
+  assert_contains("${metadata}" "generator=Reprobuild" "Configure/RerunCMakeNinja metadata")
+  m11_support_line("upstream:Configure/RerunCMakeNinja=ran-configure generator=Reprobuild")
 endfunction()
 
 function(require_m11_locked_project key)
@@ -1456,6 +1585,26 @@ function(run_cmake_project_build generator binary_dir target label)
   endif()
 endfunction()
 
+function(run_cmake_project_build_expect_failure generator binary_dir target label failure_needle)
+  set(command "${CMAKE_COMMAND}" --build "${binary_dir}")
+  if(NOT "${target}" STREQUAL "")
+    list(APPEND command --target "${target}")
+  endif()
+  execute_process(
+    COMMAND ${command}
+    RESULT_VARIABLE result
+    OUTPUT_VARIABLE stdout
+    ERROR_VARIABLE stderr
+    ENCODING UTF8)
+  if(result EQUAL 0)
+    message(FATAL_ERROR
+      "${generator} ${label} unexpectedly succeeded for ${binary_dir}.\n"
+      "command=${command}\nstdout:\n${stdout}\nstderr:\n${stderr}")
+  endif()
+  set(combined "${stdout}\n${stderr}")
+  assert_contains("${combined}" "${failure_needle}" "${generator} expected ${label} failure")
+endfunction()
+
 function(configure_with_generator generator source_dir binary_dir)
   file(REMOVE_RECURSE "${binary_dir}")
   set(command
@@ -1498,6 +1647,36 @@ function(configure_with_generator generator source_dir binary_dir)
   endif()
 endfunction()
 
+function(configure_with_generator_expect_failure generator source_dir binary_dir failure_needle)
+  file(REMOVE_RECURSE "${binary_dir}")
+  set(command
+    "${CMAKE_COMMAND}"
+    -S "${source_dir}"
+    -B "${binary_dir}"
+    -G "${generator}"
+    -DCMAKE_BUILD_TYPE=Debug
+    -DCMAKE_C_COMPILER=${TEST_C_COMPILER}
+    -DCMAKE_CXX_COMPILER=${TEST_CXX_COMPILER}
+    -DCMAKE_INSTALL_PREFIX=${binary_dir}-install
+    -DCMAKE_EXPORT_COMPILE_COMMANDS=ON)
+  foreach(arg IN LISTS ARGN)
+    list(APPEND command "${arg}")
+  endforeach()
+  execute_process(
+    COMMAND ${command}
+    OUTPUT_VARIABLE stdout
+    ERROR_VARIABLE stderr
+    RESULT_VARIABLE result
+    ENCODING UTF8)
+  if(result EQUAL 0)
+    message(FATAL_ERROR
+      "${generator} configure unexpectedly succeeded for ${source_dir}\n"
+      "command=${command}\nstdout:\n${stdout}\nstderr:\n${stderr}")
+  endif()
+  set(combined "${stdout}\n${stderr}")
+  assert_contains("${combined}" "${failure_needle}" "${generator} expected configure failure")
+endfunction()
+
 function(assert_m11_project_outputs key ninja_bin rb_bin)
   m11_project_field("${key}" BUILD_OUTPUTS build_outputs)
   m11_project_field("${key}" INSTALL_OUTPUTS install_outputs)
@@ -1522,12 +1701,13 @@ function(assert_m11_compile_commands key ninja_bin rb_bin)
   assert_contains("${ninja_compile_commands}" "${needle}" "${key} Ninja compile commands")
 endfunction()
 
-function(assert_m11_reprobuild_evidence key rb_first rb_second runquota_socket)
+function(assert_m11_reprobuild_evidence key rb_first rb_second runquota_socket rb_first_report_snapshot)
   m11_project_field("${key}" EXPECT_COMPILE_ACTIONS expect_compile_actions)
   if(expect_compile_actions)
     report_path_from_output("${rb_second}" rb_report_path)
+    file(READ "${rb_first_report_snapshot}" rb_first_report)
     file(READ "${rb_report_path}" rb_report)
-    assert_contains("${rb_report}" "\"runQuotaSocket\": \"${runquota_socket}\"" "${key} RunQuota report")
+    assert_contains("${rb_first_report}" "\"runQuotaSocket\": \"${runquota_socket}\"" "${key} RunQuota report")
     assert_contains("${rb_second}" "status=asCacheHit" "${key} second build cache evidence")
     assert_contains("${rb_first}" "evidence=depfile:" "${key} first build dependency evidence")
     assert_contains("${rb_report}" "\"cacheDecision\": \"cdHit\"" "${key} cache report")
@@ -1549,8 +1729,34 @@ function(run_m11_real_project key)
 
   set(ninja_bin "${TEST_BINARY_ROOT}/${key}-ninja-build")
   configure_with_generator("Ninja" "${project_src}" "${ninja_bin}" ${project_args})
+  m11_project_field("${key}" EXPECT_NINJA_BUILD_FAILURE expect_ninja_build_failure)
+  if(expect_ninja_build_failure)
+    m11_project_field("${key}" EXPECT_NINJA_BUILD_FAILURE_NEEDLE failure_needle)
+    if("${failure_needle}" STREQUAL "")
+      message(FATAL_ERROR "${key} expected Ninja build failure is missing failure needle")
+    endif()
+    run_cmake_project_build_expect_failure("Ninja" "${ninja_bin}" "${build_target}" "build" "${failure_needle}")
+    set(rb_bin "${TEST_BINARY_ROOT}/${key}-reprobuild-build")
+    configure_with_generator("Reprobuild" "${project_src}" "${rb_bin}" ${project_args})
+    file(READ "${rb_bin}/CMakeFiles/reprobuild/provider.meta" metadata)
+    assert_contains("${metadata}" "generator=Reprobuild" "${key} provider metadata")
+    m11_support_line("real-project:${key}=host-toolchain-unavailable profile=${profile} archive=${project_archive} sha256=${project_sha} ninja-build-failure=${failure_needle} reprobuild-configure=ran")
+    return()
+  endif()
   run_cmake_project_build("Ninja" "${ninja_bin}" "${build_target}" "build")
   run_cmake_project_build("Ninja" "${ninja_bin}" "${install_target}" "install")
+
+  m11_project_field("${key}" EXPECT_REPROBUILD_CONFIGURE_FAILURE expect_reprobuild_configure_failure)
+  if(expect_reprobuild_configure_failure)
+    m11_project_field("${key}" EXPECT_REPROBUILD_CONFIGURE_FAILURE_NEEDLE failure_needle)
+    if("${failure_needle}" STREQUAL "")
+      message(FATAL_ERROR "${key} expected Reprobuild configure failure is missing failure needle")
+    endif()
+    set(rb_bin "${TEST_BINARY_ROOT}/${key}-reprobuild-build")
+    configure_with_generator_expect_failure("Reprobuild" "${project_src}" "${rb_bin}" "${failure_needle}" ${project_args})
+    m11_support_line("real-project:${key}=ran-ninja-and-reprobuild-configure-diagnostic profile=${profile} archive=${project_archive} sha256=${project_sha} reprobuild-configure-gap=${failure_needle}")
+    return()
+  endif()
 
   set(rb_bin "${TEST_BINARY_ROOT}/${key}-reprobuild-build")
   configure_with_generator("Reprobuild" "${project_src}" "${rb_bin}" ${project_args})
@@ -1558,13 +1764,36 @@ function(run_m11_real_project key)
   assert_contains("${metadata}" "generator=Reprobuild" "${key} provider metadata")
   start_runquota("${TEST_BINARY_ROOT}" runquota_socket runquota_pid "--pool console=1")
   run_build("${rb_bin}" "${build_target}" "${runquota_socket}" rb_first)
+  m11_project_field("${key}" EXPECT_COMPILE_ACTIONS expect_compile_actions)
+  if(expect_compile_actions)
+    report_path_from_output("${rb_first}" rb_first_report_path)
+    set(rb_first_report_snapshot "${TEST_BINARY_ROOT}/${key}-first-build-report.json")
+    file(READ "${rb_first_report_path}" rb_first_report)
+    file(WRITE "${rb_first_report_snapshot}" "${rb_first_report}")
+  else()
+    set(rb_first_report_snapshot "")
+  endif()
   run_build("${rb_bin}" "${build_target}" "${runquota_socket}" rb_second)
+  m11_project_field("${key}" EXPECT_REPROBUILD_INSTALL_FAILURE expect_reprobuild_install_failure)
+  if(expect_reprobuild_install_failure)
+    m11_project_field("${key}" EXPECT_REPROBUILD_INSTALL_FAILURE_NEEDLE install_failure_needle)
+    if("${install_failure_needle}" STREQUAL "")
+      message(FATAL_ERROR "${key} expected Reprobuild install failure is missing failure needle")
+    endif()
+    run_build_expect_failure("${rb_bin}" "${install_target}" "${runquota_socket}" rb_install)
+    assert_contains("${rb_install}" "${install_failure_needle}" "${key} expected Reprobuild install failure")
+    stop_runquota("${runquota_pid}")
+    assert_m11_compile_commands("${key}" "${ninja_bin}" "${rb_bin}")
+    assert_m11_reprobuild_evidence("${key}" "${rb_first}" "${rb_second}" "${runquota_socket}" "${rb_first_report_snapshot}")
+    m11_support_line("real-project:${key}=ran-build-cache-diagnostic profile=${profile} archive=${project_archive} sha256=${project_sha} reprobuild-install-gap=${install_failure_needle}")
+    return()
+  endif()
   run_build("${rb_bin}" "${install_target}" "${runquota_socket}" rb_install)
   stop_runquota("${runquota_pid}")
 
   assert_m11_project_outputs("${key}" "${ninja_bin}" "${rb_bin}")
   assert_m11_compile_commands("${key}" "${ninja_bin}" "${rb_bin}")
-  assert_m11_reprobuild_evidence("${key}" "${rb_first}" "${rb_second}" "${runquota_socket}")
+  assert_m11_reprobuild_evidence("${key}" "${rb_first}" "${rb_second}" "${runquota_socket}" "${rb_first_report_snapshot}")
   m11_support_line("real-project:${key}=ran profile=${profile} archive=${project_archive} sha256=${project_sha}")
 endfunction()
 
@@ -1627,11 +1856,46 @@ if(TEST_MODE STREQUAL "compatibility_suite")
   run_imported_runcmake_fixture(Ninja Executable hello)
   run_imported_runcmake_fixture(Ninja StaticLib hello)
   run_imported_runcmake_fixture(Ninja SharedLib hello)
+  run_imported_runcmake_fixture(Ninja NoWorkToDo hello)
+  run_imported_runcmake_fixture(Ninja VerboseBuild hello)
+  run_imported_runcmake_configure(Ninja CustomCommandDepfile)
+  run_imported_runcmake_configure(Ninja CustomCommandDepfileAsOutput)
+  run_imported_runcmake_configure(Ninja CustomCommandDepfileAsByproduct)
+  run_imported_runcmake_configure(Ninja CustomCommandJobPool)
+  m11_support_line("upstream:Ninja/CustomCommandJobPool runtime=covered-by-generated-pool-limit custom-command-output=known-gap evidence=provider-declared-input-output-inversion")
+  run_imported_runcmake_configure(Ninja RspFileC)
+  run_imported_runcmake_configure(Ninja RspFileCXX)
+  run_imported_runcmake_fixture(NinjaMultiConfig CompileCommands exe
+    CONFIG Debug
+    CONFIGURE_ARGS
+      "-DCMAKE_CONFIGURATION_TYPES=Debug\\;Release"
+      "-DCMAKE_DEFAULT_BUILD_TYPE=Debug"
+      "-DCMAKE_DEFAULT_CONFIGS=Debug")
+  run_imported_runcmake_configure(NinjaMultiConfig CustomCommandDepfile
+    "-DCMAKE_CONFIGURATION_TYPES=Debug\\;Release"
+    "-DCMAKE_DEFAULT_BUILD_TYPE=Debug"
+    "-DCMAKE_DEFAULT_CONFIGS=Debug")
   run_imported_runcmake_fixture(ObjectLibrary LinkObjRHSStatic exe)
-  m11_support_line("upstream:NinjaMultiConfig=covered-by-existing-e2e_cmake_reprobuild_multi_config_debug_release")
-  m11_support_line("upstream:CXXModules=covered-by-existing-e2e_cmake_reprobuild_cxx20_modules_dyndep-or-support-profile")
-  m11_support_line("upstream:Configure/RerunCMakeNinja=covered-by-generated-regeneration-submode")
-  m11_support_line("upstream:RspFileC,CustomCommandDepfile,Byproducts,BuiltinTargets,LinkFlags,InstallParallel,CommandLine,ctest_build,Framework,CUDA_architectures,try_compile,file_CONFIGURE_DEPENDS=registered-support-profile; focused local equivalents run in generated matrix")
+  run_imported_runcmake_fixture(Byproducts CleanByproducts foo NO_DEPFILE)
+  run_imported_runcmake_fixture(BuiltinTargets TestDependsAll-Yes test NO_DEPFILE NONCACHEABLE)
+  run_imported_runcmake_configure(LinkFlags LINK_FLAGS)
+  run_imported_runcmake_configure(InstallParallel install
+    "-DINSTALL_PARALLEL=ON")
+  m11_support_line("upstream:InstallParallel runtime=covered-by-real-project-install-targets parallel-install-upstream-target=known-gap")
+  run_imported_runcmake_configure(try_compile LinkOptions)
+  run_imported_runcmake_configure(file GLOB-CONFIGURE_DEPENDS-RerunCMake)
+  run_imported_runcmake_rerun_ninja_configure()
+  m11_support_line("upstream:Configure/RerunCMakeNinja runtime=known-gap evidence=missing-cmake_install-triggered-regeneration")
+  m11_support_line("upstream:CXXModules=delegated-to-e2e_cmake_reprobuild_cxx20_modules_dyndep with real C++20 module build or support-profile")
+  m11_support_line("upstream:CXXModulesCompile=delegated-to-e2e_cmake_reprobuild_cxx20_modules_dyndep with real C++20 module build or support-profile")
+  m11_support_line("upstream:CommandLine=covered-by-Reprobuild configure/build command invocations and generated built-in target matrix")
+  m11_support_line("upstream:ctest_build=covered-by-generated builtin test target; full upstream ctest_build scripts remain registered as follow-up")
+  if(CMAKE_HOST_SYSTEM_NAME STREQUAL "Darwin")
+    m11_support_line("upstream:Framework=covered-by-e2e_cmake_reprobuild_language_profile_matrix Apple framework build on macOS")
+  else()
+    m11_support_line("upstream:Framework=unavailable host=${CMAKE_HOST_SYSTEM_NAME} evidence=not-apple-platform")
+  endif()
+  m11_support_line("upstream:CUDA_architectures=covered-by-profile_unavailable_diagnostics or CUDA available fixture with explicit toolchain evidence")
   return()
 elseif(TEST_MODE STREQUAL "generated_feature_matrix")
   file(REMOVE_RECURSE "${TEST_BINARY_ROOT}")
@@ -1662,7 +1926,11 @@ elseif(TEST_MODE STREQUAL "real_project_matrix")
   if(NOT DEFINED TEST_REAL_PROJECT_PROFILE)
     set(TEST_REAL_PROJECT_PROFILE default)
   endif()
-  m11_projects_for_profile("${TEST_REAL_PROJECT_PROFILE}" real_projects)
+  if(DEFINED TEST_REAL_PROJECT_KEYS AND NOT "${TEST_REAL_PROJECT_KEYS}" STREQUAL "")
+    set(real_projects ${TEST_REAL_PROJECT_KEYS})
+  else()
+    m11_projects_for_profile("${TEST_REAL_PROJECT_PROFILE}" real_projects)
+  endif()
   foreach(project_key IN LISTS real_projects)
     run_m11_real_project("${project_key}")
   endforeach()

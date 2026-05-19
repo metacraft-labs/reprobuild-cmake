@@ -4,13 +4,19 @@ set(M11_REAL_PROJECT_DEFAULT_PROJECTS
   nlohmann_json
   fmt)
 set(M11_REAL_PROJECT_MEDIUM_PROJECTS
-  libuv)
+  libuv
+  abseil_cpp
+  libgit2)
 set(M11_REAL_PROJECT_NIGHTLY_PROJECTS
   libuv
+  abseil_cpp
+  libgit2
+  protobuf
   CMake)
 set(M11_REAL_PROJECT_ALL_PROJECTS
   ${M11_REAL_PROJECT_DEFAULT_PROJECTS}
   ${M11_REAL_PROJECT_MEDIUM_PROJECTS}
+  protobuf
   CMake)
 
 set(M11_PROJECT_zlib_NAME "zlib")
@@ -87,6 +93,84 @@ set(M11_PROJECT_libuv_COMPILE_COMMAND_NEEDLE "src/unix")
 set(M11_PROJECT_libuv_INSTALL_OUTPUTS
   "include/uv.h")
 set(M11_PROJECT_libuv_EXPECT_COMPILE_ACTIONS TRUE)
+
+set(M11_PROJECT_libgit2_NAME "libgit2")
+set(M11_PROJECT_libgit2_VERSION "1.8.4")
+set(M11_PROJECT_libgit2_PROFILE "moderate-default-c")
+set(M11_PROJECT_libgit2_URL
+  "https://github.com/libgit2/libgit2/archive/refs/tags/v1.8.4.tar.gz")
+set(M11_PROJECT_libgit2_SHA256
+  "49d0fc50ab931816f6bfc1ac68f8d74b760450eebdb5374e803ee36550f26774")
+set(M11_PROJECT_libgit2_SOURCE_SUBDIR "libgit2-1.8.4")
+set(M11_PROJECT_libgit2_CONFIGURE_ARGS
+  "-DCMAKE_C_FLAGS=-Dfdopen=fdopen"
+  "-DBUILD_TESTS=OFF"
+  "-DBUILD_CLI=OFF"
+  "-DBUILD_EXAMPLES=OFF"
+  "-DBUILD_FUZZERS=OFF"
+  "-DUSE_SSH=OFF"
+  "-DUSE_HTTPS=OFF"
+  "-DUSE_ICONV=OFF"
+  "-DUSE_BUNDLED_ZLIB=ON"
+  "-DREGEX_BACKEND=builtin")
+set(M11_PROJECT_libgit2_BUILD_TARGET "all")
+set(M11_PROJECT_libgit2_INSTALL_TARGET "install")
+set(M11_PROJECT_libgit2_COMPILE_COMMAND_NEEDLE "src/libgit2")
+set(M11_PROJECT_libgit2_INSTALL_OUTPUTS
+  "include/git2.h")
+set(M11_PROJECT_libgit2_EXPECT_COMPILE_ACTIONS TRUE)
+set(M11_PROJECT_libgit2_EXPECT_REPROBUILD_CONFIGURE_FAILURE TRUE)
+set(M11_PROJECT_libgit2_EXPECT_REPROBUILD_CONFIGURE_FAILURE_NEEDLE
+  "requires normal target 'libgit2package'")
+
+set(M11_PROJECT_abseil_cpp_NAME "abseil-cpp")
+set(M11_PROJECT_abseil_cpp_VERSION "20240116.2")
+set(M11_PROJECT_abseil_cpp_PROFILE "medium-explicit-cxx-graph")
+set(M11_PROJECT_abseil_cpp_URL
+  "https://github.com/abseil/abseil-cpp/archive/refs/tags/20240116.2.tar.gz")
+set(M11_PROJECT_abseil_cpp_SHA256
+  "733726b8c3a6d39a4120d7e45ea8b41a434cdacde401cba500f14236c49b39dc")
+set(M11_PROJECT_abseil_cpp_SOURCE_SUBDIR "abseil-cpp-20240116.2")
+set(M11_PROJECT_abseil_cpp_CONFIGURE_ARGS
+  "-DCMAKE_CXX_STANDARD=17"
+  "-DABSL_ENABLE_INSTALL=ON"
+  "-DABSL_PROPAGATE_CXX_STD=ON"
+  "-DABSL_BUILD_TESTING=OFF"
+  "-DBUILD_TESTING=OFF")
+set(M11_PROJECT_abseil_cpp_BUILD_TARGET "all")
+set(M11_PROJECT_abseil_cpp_INSTALL_TARGET "install")
+set(M11_PROJECT_abseil_cpp_COMPILE_COMMAND_NEEDLE "absl")
+set(M11_PROJECT_abseil_cpp_INSTALL_OUTPUTS
+  "include/absl/base/config.h"
+  "lib/cmake/absl/abslConfig.cmake")
+set(M11_PROJECT_abseil_cpp_EXPECT_COMPILE_ACTIONS TRUE)
+set(M11_PROJECT_abseil_cpp_EXPECT_NINJA_BUILD_FAILURE TRUE)
+set(M11_PROJECT_abseil_cpp_EXPECT_NINJA_BUILD_FAILURE_NEEDLE
+  "unsupported option '-msse4.1' for target 'arm64-apple-darwin'")
+
+set(M11_PROJECT_protobuf_NAME "protobuf")
+set(M11_PROJECT_protobuf_VERSION "3.21.12")
+set(M11_PROJECT_protobuf_PROFILE "large-nightly-generated-sources")
+set(M11_PROJECT_protobuf_URL
+  "https://github.com/protocolbuffers/protobuf/releases/download/v21.12/protobuf-cpp-3.21.12.tar.gz")
+set(M11_PROJECT_protobuf_SHA256
+  "4eab9b524aa5913c6fffb20b2a8abf5ef7f95a80bc0701f3a6dbb4c607f73460")
+set(M11_PROJECT_protobuf_SOURCE_SUBDIR "protobuf-3.21.12")
+set(M11_PROJECT_protobuf_CONFIGURE_ARGS
+  "-Dprotobuf_BUILD_TESTS=OFF"
+  "-Dprotobuf_BUILD_CONFORMANCE=OFF"
+  "-Dprotobuf_BUILD_EXAMPLES=OFF"
+  "-Dprotobuf_WITH_ZLIB=OFF")
+set(M11_PROJECT_protobuf_BUILD_TARGET "all")
+set(M11_PROJECT_protobuf_INSTALL_TARGET "install")
+set(M11_PROJECT_protobuf_COMPILE_COMMAND_NEEDLE "google/protobuf")
+set(M11_PROJECT_protobuf_INSTALL_OUTPUTS
+  "include/google/protobuf/message.h"
+  "lib/cmake/protobuf/protobuf-config.cmake")
+set(M11_PROJECT_protobuf_EXPECT_COMPILE_ACTIONS TRUE)
+set(M11_PROJECT_protobuf_EXPECT_REPROBUILD_INSTALL_FAILURE TRUE)
+set(M11_PROJECT_protobuf_EXPECT_REPROBUILD_INSTALL_FAILURE_NEEDLE
+  "action: install status=asFailed")
 
 set(M11_PROJECT_CMake_NAME "CMake")
 set(M11_PROJECT_CMake_VERSION "3.30.5")
