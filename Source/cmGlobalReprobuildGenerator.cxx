@@ -1085,13 +1085,21 @@ void cmGlobalReprobuildGenerator::EnableLanguage(
   }
 
   for (std::string const& lang : languages) {
+    // Windows: `RC` is auto-enabled by Windows-MSVC.cmake / Windows-GNU.cmake
+    // whenever C or CXX is enabled. The Reprobuild generator doesn't produce
+    // metadata for resource files itself, but allowing RC through here lets
+    // any project that calls `project(foo C)` succeed on Windows. Resource
+    // files (.rc) won't reach the per-source whitelist below unless the
+    // project explicitly adds them to a target; until that path needs
+    // metadata support, leaving RC out of the source-language whitelist is
+    // fine.
     if (lang != "NONE" && lang != "C" && lang != "CXX" &&
         lang != "Fortran" && lang != "CUDA" && lang != "ISPC" &&
-        lang != "Swift" && lang != "ASM") {
+        lang != "Swift" && lang != "ASM" && lang != "RC") {
       mf->IssueMessage(
         MessageType::FATAL_ERROR,
         cmStrCat("The Reprobuild generator supports only the C, CXX, "
-                 "Fortran, CUDA, ISPC, Swift, and ASM languages; language '",
+                 "Fortran, CUDA, ISPC, Swift, ASM, and RC languages; language '",
                  lang, "' is not supported."));
       cmSystemTools::SetFatalErrorOccurred();
       return;
