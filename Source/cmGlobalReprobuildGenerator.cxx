@@ -1057,6 +1057,47 @@ cmGlobalReprobuildGenerator::cmGlobalReprobuildGenerator(cmake* cm)
 
 cmGlobalReprobuildGenerator::~cmGlobalReprobuildGenerator() = default;
 
+bool cmGlobalReprobuildGenerator::FindMakeProgram(cmMakefile* mf)
+{
+  // The Reprobuild generator emits provider metadata that the `repro` CLI
+  // (the "reprobuild" build tool) consumes. The parent class
+  // cmGlobalUnixMakefileGenerator3 inherits FindMakeProgramFile =
+  // "CMakeUnixFindMake.cmake", which searches for gmake/make/smake. That
+  // search yields nothing on Windows and is semantically wrong for this
+  // generator on every platform. Instead, resolve `repro` itself as the make
+  // program. Order of resolution:
+  //   1. CMAKE_MAKE_PROGRAM already set by the caller (e.g. -D on cmdline)
+  //   2. $REPROBUILD_REPRO env var (set by the develop wrapper)
+  //   3. `repro` (or `repro.exe` on Windows) on PATH
+  if (mf->GetDefinition("CMAKE_MAKE_PROGRAM").IsOff()) {
+    std::string makeProgram;
+    if (cm::optional<std::string> reproEnv =
+          cmSystemTools::GetEnvVar("REPROBUILD_REPRO")) {
+      if (!reproEnv->empty() && cmSystemTools::FileExists(*reproEnv, true)) {
+        makeProgram = *reproEnv;
+      }
+    }
+    if (makeProgram.empty()) {
+#ifdef _WIN32
+      // Windows: FindProgram already tries the .exe extension automatically,
+      // but be explicit so a bare-name lookup behaves the same as the env-var
+      // path above.
+      makeProgram = cmSystemTools::FindProgram("repro.exe");
+      if (makeProgram.empty()) {
+        makeProgram = cmSystemTools::FindProgram("repro");
+      }
+#else
+      makeProgram = cmSystemTools::FindProgram("repro");
+#endif
+    }
+    if (!makeProgram.empty()) {
+      mf->AddCacheDefinition("CMAKE_MAKE_PROGRAM", makeProgram,
+                             "Reprobuild CLI", cmStateEnums::FILEPATH);
+    }
+  }
+  return this->cmGlobalGenerator::FindMakeProgram(mf);
+}
+
 std::unique_ptr<cmGlobalGeneratorFactory>
 cmGlobalReprobuildGenerator::NewFactory()
 {

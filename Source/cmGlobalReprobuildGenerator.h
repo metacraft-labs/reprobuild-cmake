@@ -42,6 +42,13 @@ public:
   void EnableLanguage(std::vector<std::string> const& languages, cmMakefile* mf,
                       bool optional) override;
 
+  // Override the base UnixMakefileGenerator3 search (which looks for
+  // gmake/make/smake). Reprobuild is the build tool that consumes this
+  // generator's metadata, so we set CMAKE_MAKE_PROGRAM to the `repro` CLI.
+  // This is also what makes the generator usable on Windows, where the
+  // gmake/make/smake search yields nothing.
+  bool FindMakeProgram(cmMakefile* mf) override;
+
   void Generate() override;
   bool IsMultiConfig() const override;
 
