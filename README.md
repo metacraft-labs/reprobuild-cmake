@@ -28,6 +28,9 @@ Expected benefits:
 - CMake targets become visible to Reprobuild's hot-code-reloading pipeline:
   source -> object -> link relationships, compiler flags, debug-info policy,
   and object artifacts can feed HCR patch generation.
+- CMake can query `repro capabilities` during generation to discover the
+  installed Reprobuild provider and HCR support without hard-coding a
+  CMake-specific probe.
 - CMake can run inside Reprobuild development environments, using compilers,
   linkers, SDKs, and helper tools provided by Reprobuild/Nix profiles.
 
@@ -196,17 +199,23 @@ groups:
 
 The first HCR integration should be opt-in. A likely shape is:
 
+- The generator queries `repro capabilities` and uses that build-system-neutral
+  capability document to decide whether the installed Reprobuild supports the
+  requested annotations and HCR profile.
 - A CMake cache variable such as `CMAKE_REPROBUILD_HCR=ON`.
 - A target property for HCR eligibility and per-target overrides.
 - Compiler flag injection for a supported profile: debug info, patchable
   function entries, no incompatible LTO, and bounded inlining policy.
-- Preservation of source -> object -> link metadata for Reprobuild's HCR
+- Preservation of source -> object -> link annotations for Reprobuild's HCR
   coordinator.
 - A post-link metadata edge that extracts linkgraph facts needed for patch
   generation.
 
 The Reprobuild generator should not claim universal HCR. It should expose enough
-metadata for Reprobuild to validate support profile by support profile.
+candidate annotations for Reprobuild to validate support profile by support
+profile. Reprobuild remains the authority for which actions actually rebuilt,
+which outputs changed, and whether to reload, restart, or reject a running
+target.
 
 ## Development Environment Direction
 
