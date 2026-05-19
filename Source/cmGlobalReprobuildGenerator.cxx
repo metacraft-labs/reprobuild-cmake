@@ -312,6 +312,79 @@ bool ReprobuildWriteWrapper(std::string const& path,
   return cmSystemTools::SetPermissions(path.c_str(), 0755).IsSuccess();
 }
 
+std::string ReprobuildParentPath(std::string const& path)
+{
+  std::string::size_type slash = path.find_last_of("/\\");
+  if (slash == std::string::npos) {
+    return std::string();
+  }
+  return path.substr(0, slash);
+}
+
+std::string ReprobuildBaseName(std::string const& path)
+{
+  std::string::size_type slash = path.find_last_of("/\\");
+  if (slash == std::string::npos) {
+    return path;
+  }
+  return path.substr(slash + 1);
+}
+
+std::string ReprobuildNixStorePath(std::string const& path)
+{
+  std::string const normalized = cmSystemTools::ToNormalizedPathOnDisk(path);
+  std::string const prefix = "/nix/store/";
+  if (normalized.rfind(prefix, 0) != 0) {
+    return std::string();
+  }
+  std::string::size_type slash = normalized.find('/', prefix.size());
+  if (slash == std::string::npos) {
+    return normalized;
+  }
+  return normalized.substr(0, slash);
+}
+
+bool ReprobuildWriteToolProfile(std::string const& wrapperPath,
+                                std::string const& executable,
+                                std::string const& portabilityMode,
+                                bool canRunExecutableDirectly)
+{
+  std::string const profilePath = wrapperPath + ".repro-tool-profile";
+  cmsys::ofstream profile(profilePath.c_str());
+  if (!profile) {
+    return false;
+  }
+  std::string const executablePath =
+    executable.empty() ? wrapperPath
+                       : cmSystemTools::ToNormalizedPathOnDisk(executable);
+  std::string const storePath = ReprobuildNixStorePath(executablePath);
+  bool const portable = portabilityMode == "nix" && !storePath.empty();
+  std::string const installMethod = portable ? "nix" : "path";
+  std::string const binDir = ReprobuildParentPath(
+    canRunExecutableDirectly ? executablePath : wrapperPath);
+  std::string const declared =
+    !storePath.empty() && executablePath.rfind(storePath + "/", 0) == 0
+    ? executablePath.substr(storePath.size() + 1)
+    : ReprobuildBaseName(executablePath);
+  profile << "reprobuild-tool-profile-v1\n";
+  profile << "installMethod=" << installMethod << "\n";
+  profile << "packageId=" << (portable ? storePath : executablePath) << "\n";
+  profile << "nixSelector=" << (portable ? cmStrCat("store:", storePath) : "")
+          << "\n";
+  profile << "declaredExecutablePath=" << declared << "\n";
+  profile << "selectedStorePath=" << (portable ? storePath : "") << "\n";
+  profile << "lockIdentity=" << (portable ? storePath : executablePath) << "\n";
+  profile << "realizationBoundary=" << (portable ? storePath : "") << "\n";
+  profile << "pathSearchList=" << binDir << "\n";
+  profile << "resolvedExecutablePath="
+          << (canRunExecutableDirectly ? executablePath : wrapperPath) << "\n";
+  profile << "adapterStrength=" << (portable ? "strong" : "weak") << "\n";
+  profile << "cachePortability=" << (portable ? "portable" : "local-only")
+          << "\n";
+  profile.close();
+  return true;
+}
+
 bool ReprobuildWriteLaunchedWrapper(std::string const& path,
                                     std::vector<std::string> const& launcher,
                                     std::string const& executable)
@@ -1165,6 +1238,11 @@ void cmGlobalReprobuildGenerator::WriteProviderMetadata()
   std::map<std::string, std::set<std::string>> cleanFilesByConfig;
   std::set<std::string> usedLanguages;
   std::set<std::string> usedTools;
+  std::string const toolPortabilityMode =
+    this->LocalGenerators.empty()
+    ? std::string()
+    : this->LocalGenerators.front()->GetMakefile()->GetSafeDefinition(
+        "REPROBUILD_CMAKE_TOOL_PORTABILITY");
   bool sawImportLibraryOutput = false;
   bool sawLinkDepfile = false;
   bool sawSymlinkOutput = false;
@@ -3387,30 +3465,41 @@ void cmGlobalReprobuildGenerator::WriteProviderMetadata()
                  " while writing Reprobuild provider."));
       return;
     }
-    if (!ReprobuildWriteWrapper(cmStrCat(wrapperDir, "/", ReprobuildToolId(lang)),
-                                compiler)) {
+    std::string const wrapperPath =
+      cmStrCat(wrapperDir, "/", ReprobuildToolId(lang));
+    if (!ReprobuildWriteWrapper(wrapperPath, compiler) ||
+        !ReprobuildWriteToolProfile(wrapperPath, compiler, toolPortabilityMode,
+                                    true)) {
       this->GetCMakeInstance()->IssueMessage(
         MessageType::FATAL_ERROR,
         cmStrCat("Could not write Reprobuild compiler wrapper for ", lang));
       return;
     }
   }
-  if (usedTools.count(ReprobuildArchiveToolId()) &&
-      !ReprobuildWriteArchiveWrapper(
-        cmStrCat(wrapperDir, "/", ReprobuildArchiveToolId()))) {
-    this->GetCMakeInstance()->IssueMessage(
-      MessageType::FATAL_ERROR,
-      "Could not write Reprobuild archiver wrapper.");
-    return;
+  if (usedTools.count(ReprobuildArchiveToolId())) {
+    std::string const wrapperPath =
+      cmStrCat(wrapperDir, "/", ReprobuildArchiveToolId());
+    if (!ReprobuildWriteArchiveWrapper(wrapperPath) ||
+        !ReprobuildWriteToolProfile(wrapperPath, wrapperPath,
+                                    toolPortabilityMode, false)) {
+      this->GetCMakeInstance()->IssueMessage(
+        MessageType::FATAL_ERROR,
+        "Could not write Reprobuild archiver wrapper.");
+      return;
+    }
   }
-  if (usedTools.count(ReprobuildSymlinkToolId()) &&
-      !ReprobuildWriteSymlinkWrapper(
-        cmStrCat(wrapperDir, "/", ReprobuildSymlinkToolId()),
-        cmSystemTools::GetCMakeCommand())) {
-    this->GetCMakeInstance()->IssueMessage(
-      MessageType::FATAL_ERROR,
-      "Could not write Reprobuild symlink wrapper.");
-    return;
+  if (usedTools.count(ReprobuildSymlinkToolId())) {
+    std::string const wrapperPath =
+      cmStrCat(wrapperDir, "/", ReprobuildSymlinkToolId());
+    std::string const cmakeCommand = cmSystemTools::GetCMakeCommand();
+    if (!ReprobuildWriteSymlinkWrapper(wrapperPath, cmakeCommand) ||
+        !ReprobuildWriteToolProfile(wrapperPath, cmakeCommand,
+                                    toolPortabilityMode, false)) {
+      this->GetCMakeInstance()->IssueMessage(
+        MessageType::FATAL_ERROR,
+        "Could not write Reprobuild symlink wrapper.");
+      return;
+    }
   }
 
   std::set<std::string> allCleanFiles;
