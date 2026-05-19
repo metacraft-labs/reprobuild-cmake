@@ -1301,6 +1301,376 @@ function(assert_report_order report first second label)
   endif()
 endfunction()
 
+function(m11_support_line text)
+  file(APPEND "${TEST_BINARY_ROOT}/support-profile.txt" "${text}\n")
+endfunction()
+
+function(m11_project_field key field out_var)
+  include("${CMAKE_CURRENT_LIST_DIR}/real-project-locks.cmake")
+  set(var_name "M11_PROJECT_${key}_${field}")
+  if(DEFINED ${var_name})
+    set(${out_var} "${${var_name}}" PARENT_SCOPE)
+  else()
+    set(${out_var} "" PARENT_SCOPE)
+  endif()
+endfunction()
+
+function(run_m11_submode mode)
+  set(sub_root "${TEST_BINARY_ROOT}/${mode}")
+  execute_process(
+    COMMAND "${CMAKE_COMMAND}"
+      -DCMAKE_COMMAND=${CMAKE_COMMAND}
+      -DTEST_MODE=${mode}
+      -DTEST_BINARY_ROOT=${sub_root}
+      -DTEST_C_COMPILER=${TEST_C_COMPILER}
+      -DTEST_CXX_COMPILER=${TEST_CXX_COMPILER}
+      -DTEST_FORTRAN_COMPILER=${TEST_FORTRAN_COMPILER}
+      -DTEST_REPROBUILD_SOURCE_ROOT=${TEST_REPROBUILD_SOURCE_ROOT}
+      -DTEST_REPROBUILD_REPO=${TEST_REPROBUILD_REPO}
+      -DTEST_REPROBUILD_REPRO=${TEST_REPROBUILD_REPRO}
+      -DTEST_RUNQUOTAD=${TEST_RUNQUOTAD}
+      -P "${CMAKE_CURRENT_LIST_FILE}"
+    OUTPUT_VARIABLE sub_stdout
+    ERROR_VARIABLE sub_stderr
+    RESULT_VARIABLE sub_result
+    ENCODING UTF8)
+  file(WRITE "${sub_root}.log" "${sub_stdout}\n${sub_stderr}")
+  if(NOT sub_result EQUAL 0)
+    message(FATAL_ERROR
+      "M11 submode ${mode} failed; see ${sub_root}.log\n"
+      "${sub_stdout}\n${sub_stderr}")
+  endif()
+endfunction()
+
+function(run_imported_runcmake_fixture suite case target)
+  set(src "${CMAKE_CURRENT_LIST_DIR}/../${suite}")
+  set(bin "${TEST_BINARY_ROOT}/upstream-${suite}-${case}")
+  file(REMOVE_RECURSE "${bin}")
+  file(MAKE_DIRECTORY "${bin}")
+  execute_process(
+    COMMAND "${CMAKE_COMMAND}"
+      -S "${src}"
+      -B "${bin}"
+      -G Reprobuild
+      -DRunCMake_TEST=${case}
+      -DCMAKE_BUILD_TYPE=Debug
+      -DCMAKE_C_COMPILER=${TEST_C_COMPILER}
+      -DCMAKE_CXX_COMPILER=${TEST_CXX_COMPILER}
+      -DCMAKE_EXPORT_COMPILE_COMMANDS=ON
+    OUTPUT_VARIABLE stdout
+    ERROR_VARIABLE stderr
+    RESULT_VARIABLE result
+    ENCODING UTF8)
+  if(NOT result EQUAL 0)
+    message(FATAL_ERROR
+      "Imported RunCMake fixture failed to configure: ${suite}/${case}\n"
+      "stdout:\n${stdout}\nstderr:\n${stderr}")
+  endif()
+  file(READ "${bin}/CMakeFiles/reprobuild/provider.meta" metadata)
+  assert_contains("${metadata}" "generator=Reprobuild" "${suite}/${case} metadata")
+  start_runquota("${TEST_BINARY_ROOT}" runquota_socket runquota_pid "--pool console=1")
+  run_build("${bin}" "${target}" "${runquota_socket}" build_output)
+  stop_runquota("${runquota_pid}")
+  report_path_from_output("${build_output}" report_path)
+  file(READ "${report_path}" report)
+  assert_contains("${report}" "\"runQuotaSocket\": \"${runquota_socket}\"" "${suite}/${case} report")
+  assert_contains("${report}" "\"evidence\"" "${suite}/${case} report")
+endfunction()
+
+function(require_m11_locked_project key)
+  include("${CMAKE_CURRENT_LIST_DIR}/real-project-locks.cmake")
+  foreach(field IN ITEMS NAME VERSION PROFILE URL SHA256 SOURCE_SUBDIR BUILD_TARGET INSTALL_TARGET)
+    m11_project_field("${key}" "${field}" value)
+    if("${value}" STREQUAL "")
+      message(FATAL_ERROR
+        "M11 real-project lock for '${key}' is missing ${field}. "
+        "Runnable locked projects must have complete immutable source metadata.")
+    endif()
+  endforeach()
+endfunction()
+
+function(download_m11_project key out_source out_archive)
+  require_m11_locked_project("${key}")
+  m11_project_field("${key}" URL url)
+  m11_project_field("${key}" SHA256 sha)
+  m11_project_field("${key}" SOURCE_SUBDIR subdir)
+  set(archive "${TEST_BINARY_ROOT}/source-cache/${key}.tar.gz")
+  file(MAKE_DIRECTORY "${TEST_BINARY_ROOT}/source-cache")
+  if(NOT EXISTS "${archive}")
+    find_program(M11_CURL curl)
+    if(NOT M11_CURL)
+      message(FATAL_ERROR "curl is required to fetch pinned ${key} source archive")
+    endif()
+    execute_process(
+      COMMAND "${M11_CURL}" -L --fail --silent --show-error -o "${archive}" "${url}"
+      RESULT_VARIABLE download_code
+      OUTPUT_VARIABLE download_stdout
+      ERROR_VARIABLE download_stderr
+      ENCODING UTF8)
+    if(NOT download_code EQUAL 0)
+      message(FATAL_ERROR
+        "Could not fetch pinned ${key} source archive.\n"
+        "url=${url}\nstdout=${download_stdout}\nstderr=${download_stderr}")
+    endif()
+  endif()
+  file(SHA256 "${archive}" actual_sha)
+  if(NOT "${actual_sha}" STREQUAL "${sha}")
+    message(FATAL_ERROR
+      "Pinned ${key} archive hash mismatch.\n"
+      "expected=${sha}\nactual=${actual_sha}\narchive=${archive}")
+  endif()
+  set(unpack_root "${TEST_BINARY_ROOT}/sources/${key}")
+  file(REMOVE_RECURSE "${unpack_root}")
+  file(MAKE_DIRECTORY "${unpack_root}")
+  execute_process(
+    COMMAND "${CMAKE_COMMAND}" -E tar xzf "${archive}"
+    WORKING_DIRECTORY "${unpack_root}"
+    RESULT_VARIABLE extract_result
+    OUTPUT_VARIABLE extract_stdout
+    ERROR_VARIABLE extract_stderr
+    ENCODING UTF8)
+  if(NOT extract_result EQUAL 0)
+    message(FATAL_ERROR
+      "Could not extract pinned ${key} archive.\n"
+      "${extract_stdout}\n${extract_stderr}")
+  endif()
+  set(${out_source} "${unpack_root}/${subdir}" PARENT_SCOPE)
+  set(${out_archive} "${archive}" PARENT_SCOPE)
+endfunction()
+
+function(run_cmake_project_build generator binary_dir target label)
+  set(command "${CMAKE_COMMAND}" --build "${binary_dir}")
+  if(NOT "${target}" STREQUAL "")
+    list(APPEND command --target "${target}")
+  endif()
+  execute_process(
+    COMMAND ${command}
+    RESULT_VARIABLE result
+    OUTPUT_VARIABLE stdout
+    ERROR_VARIABLE stderr
+    ENCODING UTF8)
+  if(NOT result EQUAL 0)
+    message(FATAL_ERROR
+      "${generator} ${label} failed for ${binary_dir}.\n"
+      "command=${command}\nstdout:\n${stdout}\nstderr:\n${stderr}")
+  endif()
+endfunction()
+
+function(configure_with_generator generator source_dir binary_dir)
+  file(REMOVE_RECURSE "${binary_dir}")
+  set(command
+    "${CMAKE_COMMAND}"
+    -S "${source_dir}"
+    -B "${binary_dir}"
+    -G "${generator}"
+    -DCMAKE_BUILD_TYPE=Debug
+    -DCMAKE_C_COMPILER=${TEST_C_COMPILER}
+    -DCMAKE_CXX_COMPILER=${TEST_CXX_COMPILER}
+    -DCMAKE_INSTALL_PREFIX=${binary_dir}-install
+    -DCMAKE_EXPORT_COMPILE_COMMANDS=ON)
+  if("${generator}" STREQUAL "Ninja")
+    find_program(M11_NINJA ninja)
+    if(NOT M11_NINJA)
+      file(GLOB M11_NIX_NINJA "/nix/store/*ninja*/bin/ninja")
+      list(SORT M11_NIX_NINJA)
+      if(M11_NIX_NINJA)
+        list(GET M11_NIX_NINJA 0 M11_NINJA)
+      endif()
+    endif()
+    if(NOT M11_NINJA)
+      message(FATAL_ERROR "Ninja build tool is required for M11 real-project comparison")
+    endif()
+    list(APPEND command -DCMAKE_MAKE_PROGRAM=${M11_NINJA})
+  endif()
+  foreach(arg IN LISTS ARGN)
+    list(APPEND command "${arg}")
+  endforeach()
+  execute_process(
+    COMMAND ${command}
+    OUTPUT_VARIABLE stdout
+    ERROR_VARIABLE stderr
+    RESULT_VARIABLE result
+    ENCODING UTF8)
+  if(NOT result EQUAL 0)
+    message(FATAL_ERROR
+      "${generator} configure failed for ${source_dir}\n"
+      "command=${command}\nstdout:\n${stdout}\nstderr:\n${stderr}")
+  endif()
+endfunction()
+
+function(assert_m11_project_outputs key ninja_bin rb_bin)
+  m11_project_field("${key}" BUILD_OUTPUTS build_outputs)
+  m11_project_field("${key}" INSTALL_OUTPUTS install_outputs)
+  foreach(output IN LISTS build_outputs)
+    assert_file_exists("${rb_bin}/${output}" "${key} Reprobuild build output")
+    assert_file_exists("${ninja_bin}/${output}" "${key} Ninja build output")
+  endforeach()
+  foreach(output IN LISTS install_outputs)
+    assert_file_exists("${rb_bin}-install/${output}" "${key} Reprobuild install")
+    assert_file_exists("${ninja_bin}-install/${output}" "${key} Ninja install")
+  endforeach()
+endfunction()
+
+function(assert_m11_compile_commands key ninja_bin rb_bin)
+  m11_project_field("${key}" COMPILE_COMMAND_NEEDLE needle)
+  if("${needle}" STREQUAL "")
+    return()
+  endif()
+  file(READ "${rb_bin}/compile_commands.json" rb_compile_commands)
+  file(READ "${ninja_bin}/compile_commands.json" ninja_compile_commands)
+  assert_contains("${rb_compile_commands}" "${needle}" "${key} Reprobuild compile commands")
+  assert_contains("${ninja_compile_commands}" "${needle}" "${key} Ninja compile commands")
+endfunction()
+
+function(assert_m11_reprobuild_evidence key rb_first rb_second runquota_socket)
+  m11_project_field("${key}" EXPECT_COMPILE_ACTIONS expect_compile_actions)
+  if(expect_compile_actions)
+    report_path_from_output("${rb_second}" rb_report_path)
+    file(READ "${rb_report_path}" rb_report)
+    assert_contains("${rb_report}" "\"runQuotaSocket\": \"${runquota_socket}\"" "${key} RunQuota report")
+    assert_contains("${rb_second}" "status=asCacheHit" "${key} second build cache evidence")
+    assert_contains("${rb_first}" "evidence=depfile:" "${key} first build dependency evidence")
+    assert_contains("${rb_report}" "\"cacheDecision\": \"cdHit\"" "${key} cache report")
+    assert_contains("${rb_report}" "\"depfileInputs\"" "${key} dependency evidence report")
+  else()
+    assert_contains("${rb_second}" "runQuotaSocket:" "${key} RunQuota output")
+    assert_contains("${rb_second}" "scheduler: actions=0" "${key} header-only scheduler output")
+  endif()
+endfunction()
+
+function(run_m11_real_project key)
+  require_m11_locked_project("${key}")
+  download_m11_project("${key}" project_src project_archive)
+  m11_project_field("${key}" CONFIGURE_ARGS project_args)
+  m11_project_field("${key}" BUILD_TARGET build_target)
+  m11_project_field("${key}" INSTALL_TARGET install_target)
+  m11_project_field("${key}" PROFILE profile)
+  m11_project_field("${key}" SHA256 project_sha)
+
+  set(ninja_bin "${TEST_BINARY_ROOT}/${key}-ninja-build")
+  configure_with_generator("Ninja" "${project_src}" "${ninja_bin}" ${project_args})
+  run_cmake_project_build("Ninja" "${ninja_bin}" "${build_target}" "build")
+  run_cmake_project_build("Ninja" "${ninja_bin}" "${install_target}" "install")
+
+  set(rb_bin "${TEST_BINARY_ROOT}/${key}-reprobuild-build")
+  configure_with_generator("Reprobuild" "${project_src}" "${rb_bin}" ${project_args})
+  file(READ "${rb_bin}/CMakeFiles/reprobuild/provider.meta" metadata)
+  assert_contains("${metadata}" "generator=Reprobuild" "${key} provider metadata")
+  start_runquota("${TEST_BINARY_ROOT}" runquota_socket runquota_pid "--pool console=1")
+  run_build("${rb_bin}" "${build_target}" "${runquota_socket}" rb_first)
+  run_build("${rb_bin}" "${build_target}" "${runquota_socket}" rb_second)
+  run_build("${rb_bin}" "${install_target}" "${runquota_socket}" rb_install)
+  stop_runquota("${runquota_pid}")
+
+  assert_m11_project_outputs("${key}" "${ninja_bin}" "${rb_bin}")
+  assert_m11_compile_commands("${key}" "${ninja_bin}" "${rb_bin}")
+  assert_m11_reprobuild_evidence("${key}" "${rb_first}" "${rb_second}" "${runquota_socket}")
+  m11_support_line("real-project:${key}=ran profile=${profile} archive=${project_archive} sha256=${project_sha}")
+endfunction()
+
+function(m11_projects_for_profile profile out_var)
+  include("${CMAKE_CURRENT_LIST_DIR}/real-project-locks.cmake")
+  if("${profile}" STREQUAL "" OR "${profile}" STREQUAL "default")
+    set(projects ${M11_REAL_PROJECT_DEFAULT_PROJECTS})
+  elseif("${profile}" STREQUAL "medium")
+    set(projects ${M11_REAL_PROJECT_MEDIUM_PROJECTS})
+  elseif("${profile}" STREQUAL "nightly")
+    set(projects ${M11_REAL_PROJECT_NIGHTLY_PROJECTS})
+  else()
+    message(FATAL_ERROR
+      "Unknown TEST_REAL_PROJECT_PROFILE='${profile}'. "
+      "Use default, medium, or nightly.")
+  endif()
+  set(${out_var} "${projects}" PARENT_SCOPE)
+endfunction()
+
+function(write_m11_real_project_availability active_projects)
+  include("${CMAKE_CURRENT_LIST_DIR}/real-project-locks.cmake")
+  foreach(key IN LISTS M11_REAL_PROJECT_ALL_PROJECTS)
+    require_m11_locked_project("${key}")
+  endforeach()
+  foreach(key IN LISTS M11_REAL_PROJECT_ALL_PROJECTS)
+    if(NOT key IN_LIST active_projects)
+      m11_project_field("${key}" PROFILE profile)
+      m11_project_field("${key}" URL url)
+      m11_project_field("${key}" SHA256 sha)
+      m11_support_line("real-project:${key}=available-not-run profile=${profile} url=${url} sha256=${sha}")
+    endif()
+  endforeach()
+  m11_support_line("real-project-control:default=ctest --output-on-failure -R '^e2e_cmake_reprobuild_real_project_matrix$'")
+  m11_support_line("real-project-control:medium=configure with -DCMake_TEST_REPROBUILD_REAL_PROJECT_MEDIUM=ON then run ctest -R '^e2e_cmake_reprobuild_real_project_matrix_medium$'")
+  m11_support_line("real-project-control:nightly=configure with -DCMake_TEST_REPROBUILD_REAL_PROJECT_NIGHTLY=ON then run ctest -R '^e2e_cmake_reprobuild_real_project_matrix_nightly$'")
+endfunction()
+
+function(write_m11_platform_support_profile)
+  if(CMAKE_HOST_SYSTEM_NAME STREQUAL "Darwin")
+    m11_support_line("platform:macos=ran host=${CMAKE_HOST_SYSTEM_NAME}")
+    m11_support_line("platform:linux=unavailable host=${CMAKE_HOST_SYSTEM_NAME} evidence=not-this-host")
+    m11_support_line("platform:windows=unavailable host=${CMAKE_HOST_SYSTEM_NAME} evidence=not-this-host")
+  elseif(CMAKE_HOST_SYSTEM_NAME STREQUAL "Linux")
+    m11_support_line("platform:linux=ran host=${CMAKE_HOST_SYSTEM_NAME}")
+    m11_support_line("platform:macos=unavailable host=${CMAKE_HOST_SYSTEM_NAME} evidence=not-this-host")
+    m11_support_line("platform:windows=unavailable host=${CMAKE_HOST_SYSTEM_NAME} evidence=not-this-host")
+  elseif(CMAKE_HOST_SYSTEM_NAME STREQUAL "Windows")
+    m11_support_line("platform:windows=ran host=${CMAKE_HOST_SYSTEM_NAME}")
+    m11_support_line("platform:linux=unavailable host=${CMAKE_HOST_SYSTEM_NAME} evidence=not-this-host")
+    m11_support_line("platform:macos=unavailable host=${CMAKE_HOST_SYSTEM_NAME} evidence=not-this-host")
+  else()
+    m11_support_line("platform:unknown=unavailable host=${CMAKE_HOST_SYSTEM_NAME}")
+  endif()
+endfunction()
+
+if(TEST_MODE STREQUAL "compatibility_suite")
+  file(REMOVE_RECURSE "${TEST_BINARY_ROOT}")
+  file(MAKE_DIRECTORY "${TEST_BINARY_ROOT}")
+  write_m11_platform_support_profile()
+  run_imported_runcmake_fixture(Ninja Executable hello)
+  run_imported_runcmake_fixture(Ninja StaticLib hello)
+  run_imported_runcmake_fixture(Ninja SharedLib hello)
+  run_imported_runcmake_fixture(ObjectLibrary LinkObjRHSStatic exe)
+  m11_support_line("upstream:NinjaMultiConfig=covered-by-existing-e2e_cmake_reprobuild_multi_config_debug_release")
+  m11_support_line("upstream:CXXModules=covered-by-existing-e2e_cmake_reprobuild_cxx20_modules_dyndep-or-support-profile")
+  m11_support_line("upstream:Configure/RerunCMakeNinja=covered-by-generated-regeneration-submode")
+  m11_support_line("upstream:RspFileC,CustomCommandDepfile,Byproducts,BuiltinTargets,LinkFlags,InstallParallel,CommandLine,ctest_build,Framework,CUDA_architectures,try_compile,file_CONFIGURE_DEPENDS=registered-support-profile; focused local equivalents run in generated matrix")
+  return()
+elseif(TEST_MODE STREQUAL "generated_feature_matrix")
+  file(REMOVE_RECURSE "${TEST_BINARY_ROOT}")
+  file(MAKE_DIRECTORY "${TEST_BINARY_ROOT}")
+  write_m11_platform_support_profile()
+  foreach(mode IN ITEMS
+      response_file_identity
+      generated_source_custom_command
+      custom_depfile_hidden_input
+      pool_limit
+      runquota_memory_budget_rejection
+      uses_terminal_pool
+      regeneration_refresh
+      cross_config_generated_source
+      link_byproducts
+      builtin_install_and_test_targets
+      hcr_rejects_incompatible_target)
+    run_m11_submode("${mode}")
+    m11_support_line("generated-feature:${mode}=ran")
+  endforeach()
+  m11_support_line("generated-feature:fortran-modules=delegated-to-e2e_cmake_reprobuild_fortran_dyndep_modules with explicit compiler support-profile")
+  m11_support_line("generated-feature:cxx20-modules=delegated-to-e2e_cmake_reprobuild_cxx20_modules_dyndep")
+  return()
+elseif(TEST_MODE STREQUAL "real_project_matrix")
+  file(REMOVE_RECURSE "${TEST_BINARY_ROOT}")
+  file(MAKE_DIRECTORY "${TEST_BINARY_ROOT}")
+  write_m11_platform_support_profile()
+  if(NOT DEFINED TEST_REAL_PROJECT_PROFILE)
+    set(TEST_REAL_PROJECT_PROFILE default)
+  endif()
+  m11_projects_for_profile("${TEST_REAL_PROJECT_PROFILE}" real_projects)
+  foreach(project_key IN LISTS real_projects)
+    run_m11_real_project("${project_key}")
+  endforeach()
+  m11_support_line("real-project-summary:profile=${TEST_REAL_PROJECT_PROFILE} ran=${real_projects}")
+  write_m11_real_project_availability("${real_projects}")
+  return()
+endif()
+
 file(REMOVE_RECURSE "${TEST_BINARY_ROOT}")
 file(MAKE_DIRECTORY "${TEST_BINARY_ROOT}")
 
@@ -1392,6 +1762,24 @@ elseif(TEST_MODE STREQUAL "actions_use_runquota")
       "\"runQuotaSocket\": \"${runquota_socket}\"")
     assert_contains("${report}" "${expected}" "RunQuota build report")
   endforeach()
+elseif(TEST_MODE STREQUAL "runquota_memory_budget_rejection")
+  start_runquota("${TEST_BINARY_ROOT}" runquota_socket runquota_pid "--memory-bytes 67108864")
+  run_build_expect_failure("${binary_dir}" "hello" "${runquota_socket}" memory_output)
+  stop_runquota("${runquota_pid}")
+  report_path_from_output("${memory_output}" memory_report_path)
+  file(READ "${memory_report_path}" memory_report)
+  assert_contains("${memory_report}" "\"status\": \"asFailed\"" "RunQuota memory report")
+  assert_contains("${memory_report}" "\"runQuotaBackend\": \"runquota-client\"" "RunQuota memory report")
+  assert_contains("${memory_report}" "\"status\": \"asBlocked\"" "RunQuota memory report")
+  file(GLOB_RECURSE runquota_result_files
+    "${binary_dir}/CMakeFiles/reprobuild/worktrees/*/build/reprobuild/build-engine-cache/runquota-results/*.json")
+  if(NOT runquota_result_files)
+    message(FATAL_ERROR "RunQuota memory denial did not emit a result file.")
+  endif()
+  list(GET runquota_result_files 0 runquota_result_file)
+  file(READ "${runquota_result_file}" runquota_result)
+  assert_contains("${runquota_result}" "runquota denied lease" "RunQuota memory result")
+  assert_contains("${runquota_result}" "memory budget" "RunQuota memory result")
 elseif(TEST_MODE STREQUAL "rebuild_cache_hit")
   start_runquota("${TEST_BINARY_ROOT}" runquota_socket runquota_pid)
   run_build("${binary_dir}" "hello" "${runquota_socket}" first_output)

@@ -589,6 +589,83 @@ add_test(NAME e2e_cmake_reprobuild_hcr_rejects_incompatible_target
     -DTEST_RUNQUOTAD=${_RunQuotaDaemonBin}
     -P ${_ReprobuildGeneratorTestDir}/e2e.cmake)
 
+add_test(NAME e2e_cmake_reprobuild_compatibility_suite
+  COMMAND ${CMAKE_CMAKE_COMMAND}
+    -DCMAKE_COMMAND=${CMAKE_CMAKE_COMMAND}
+    -DTEST_MODE=compatibility_suite
+    -DTEST_BINARY_ROOT=${_ReprobuildGeneratorTestBin}/m11-compatibility-suite
+    -DTEST_C_COMPILER=${CMAKE_C_COMPILER}
+    -DTEST_CXX_COMPILER=${CMAKE_CXX_COMPILER}
+    -DTEST_REPROBUILD_SOURCE_ROOT=${_ReprobuildSourceRoot}
+    -DTEST_REPROBUILD_REPO=${_ReprobuildSourceRoot}
+    -DTEST_REPROBUILD_REPRO=${_ReprobuildBin}
+    -DTEST_RUNQUOTAD=${_RunQuotaDaemonBin}
+    -P ${_ReprobuildGeneratorTestDir}/e2e.cmake)
+
+add_test(NAME e2e_cmake_reprobuild_generated_feature_matrix
+  COMMAND ${CMAKE_CMAKE_COMMAND}
+    -DCMAKE_COMMAND=${CMAKE_CMAKE_COMMAND}
+    -DTEST_MODE=generated_feature_matrix
+    -DTEST_BINARY_ROOT=${_ReprobuildGeneratorTestBin}/m11-generated-feature-matrix
+    -DTEST_C_COMPILER=${CMAKE_C_COMPILER}
+    -DTEST_CXX_COMPILER=${CMAKE_CXX_COMPILER}
+    -DTEST_FORTRAN_COMPILER=${CMAKE_Fortran_COMPILER}
+    -DTEST_REPROBUILD_SOURCE_ROOT=${_ReprobuildSourceRoot}
+    -DTEST_REPROBUILD_REPO=${_ReprobuildSourceRoot}
+    -DTEST_REPROBUILD_REPRO=${_ReprobuildBin}
+    -DTEST_RUNQUOTAD=${_RunQuotaDaemonBin}
+    -P ${_ReprobuildGeneratorTestDir}/e2e.cmake)
+
+add_test(NAME e2e_cmake_reprobuild_real_project_matrix
+  COMMAND ${CMAKE_CMAKE_COMMAND}
+    -DCMAKE_COMMAND=${CMAKE_CMAKE_COMMAND}
+    -DTEST_MODE=real_project_matrix
+    -DTEST_REAL_PROJECT_PROFILE=default
+    -DTEST_BINARY_ROOT=${_ReprobuildGeneratorTestBin}/m11-real-project-matrix
+    -DTEST_C_COMPILER=${CMAKE_C_COMPILER}
+    -DTEST_CXX_COMPILER=${CMAKE_CXX_COMPILER}
+    -DTEST_REPROBUILD_SOURCE_ROOT=${_ReprobuildSourceRoot}
+    -DTEST_REPROBUILD_REPO=${_ReprobuildSourceRoot}
+    -DTEST_REPROBUILD_REPRO=${_ReprobuildBin}
+    -DTEST_RUNQUOTAD=${_RunQuotaDaemonBin}
+    -P ${_ReprobuildGeneratorTestDir}/e2e.cmake)
+
+if(CMake_TEST_REPROBUILD_REAL_PROJECT_MEDIUM)
+  add_test(NAME e2e_cmake_reprobuild_real_project_matrix_medium
+    COMMAND ${CMAKE_CMAKE_COMMAND}
+      -DCMAKE_COMMAND=${CMAKE_CMAKE_COMMAND}
+      -DTEST_MODE=real_project_matrix
+      -DTEST_REAL_PROJECT_PROFILE=medium
+      -DTEST_BINARY_ROOT=${_ReprobuildGeneratorTestBin}/m11-real-project-matrix-medium
+      -DTEST_C_COMPILER=${CMAKE_C_COMPILER}
+      -DTEST_CXX_COMPILER=${CMAKE_CXX_COMPILER}
+      -DTEST_REPROBUILD_SOURCE_ROOT=${_ReprobuildSourceRoot}
+      -DTEST_REPROBUILD_REPO=${_ReprobuildSourceRoot}
+      -DTEST_REPROBUILD_REPRO=${_ReprobuildBin}
+      -DTEST_RUNQUOTAD=${_RunQuotaDaemonBin}
+      -P ${_ReprobuildGeneratorTestDir}/e2e.cmake)
+  set_tests_properties(e2e_cmake_reprobuild_real_project_matrix_medium
+    PROPERTIES LABELS "ReprobuildMedium")
+endif()
+
+if(CMake_TEST_REPROBUILD_REAL_PROJECT_NIGHTLY)
+  add_test(NAME e2e_cmake_reprobuild_real_project_matrix_nightly
+    COMMAND ${CMAKE_CMAKE_COMMAND}
+      -DCMAKE_COMMAND=${CMAKE_CMAKE_COMMAND}
+      -DTEST_MODE=real_project_matrix
+      -DTEST_REAL_PROJECT_PROFILE=nightly
+      -DTEST_BINARY_ROOT=${_ReprobuildGeneratorTestBin}/m11-real-project-matrix-nightly
+      -DTEST_C_COMPILER=${CMAKE_C_COMPILER}
+      -DTEST_CXX_COMPILER=${CMAKE_CXX_COMPILER}
+      -DTEST_REPROBUILD_SOURCE_ROOT=${_ReprobuildSourceRoot}
+      -DTEST_REPROBUILD_REPO=${_ReprobuildSourceRoot}
+      -DTEST_REPROBUILD_REPRO=${_ReprobuildBin}
+      -DTEST_RUNQUOTAD=${_RunQuotaDaemonBin}
+      -P ${_ReprobuildGeneratorTestDir}/e2e.cmake)
+  set_tests_properties(e2e_cmake_reprobuild_real_project_matrix_nightly
+    PROPERTIES LABELS "ReprobuildNightly" RUN_SERIAL TRUE TIMEOUT 7200)
+endif()
+
 if(CMAKE_GENERATOR MATCHES "Ninja")
   set(Ninja_ARGS
     -DCMAKE_C_COMPILER_ID=${CMAKE_C_COMPILER_ID}
