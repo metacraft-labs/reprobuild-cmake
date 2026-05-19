@@ -858,6 +858,14 @@ struct ReprobuildAction
   bool Cacheable = true;
 };
 
+struct ReprobuildHcrObject
+{
+  std::string Source;
+  std::string Object;
+  std::string CompileAction;
+  std::string Language;
+};
+
 struct ReprobuildTarget
 {
   std::string BaseName;
@@ -875,10 +883,16 @@ struct ReprobuildTarget
   ReprobuildAction UtilityAction;
   std::vector<std::string> ObjectOutputs;
   std::vector<std::string> TargetDeps;
+  std::vector<ReprobuildHcrObject> HcrObjects;
+  std::string HcrProfile;
+  std::string HcrLinkOutput;
+  std::string HcrLinkGraph;
+  std::string HcrLinkGraphAction;
   bool IsUtility = false;
   bool HasLinkAction = false;
   bool IncludeInAll = true;
   bool IsCrossConfig = false;
+  bool HcrEnabled = false;
 };
 
 struct ReprobuildPool
@@ -976,6 +990,64 @@ bool ReprobuildListSubsetWithAll(std::set<std::string> const& all,
   }
   return true;
 }
+
+bool ReprobuildStringHasFlag(std::vector<std::string> const& args,
+                             std::string const& flag)
+{
+  return std::find(args.begin(), args.end(), flag) != args.end();
+}
+
+bool ReprobuildContainsLtoFlag(std::vector<std::string> const& args)
+{
+  for (std::string const& arg : args) {
+    if (arg == "-flto" || cmHasLiteralPrefix(arg, "-flto=") ||
+        arg == "-fuse-linker-plugin" || arg == "/GL") {
+      return true;
+    }
+  }
+  return false;
+}
+
+bool ReprobuildContainsNoDebugFlag(std::vector<std::string> const& args)
+{
+  for (std::string const& arg : args) {
+    if (arg == "-g0" || arg == "/DEBUG:NONE") {
+      return true;
+    }
+  }
+  return false;
+}
+
+bool ReprobuildCompilerSupportsHcr(std::string const& compilerId)
+{
+  return compilerId == "GNU" || compilerId == "Clang" ||
+    compilerId == "AppleClang";
+}
+
+bool ReprobuildTargetHcrEnabled(cmGeneratorTarget const* gt,
+                                cmMakefile const* mf)
+{
+  if (cmValue prop = gt->GetProperty("REPROBUILD_HCR")) {
+    return cmIsOn(*prop);
+  }
+  return mf->IsOn("CMAKE_REPROBUILD_HCR");
+}
+
+void ReprobuildAppendHcrCompilePolicy(std::vector<std::string>& args)
+{
+  if (!ReprobuildStringHasFlag(args, "-g")) {
+    args.push_back("-g");
+  }
+  if (!ReprobuildStringHasFlag(args, "-fpatchable-function-entry=2,0")) {
+    args.push_back("-fpatchable-function-entry=2,0");
+  }
+  if (!ReprobuildStringHasFlag(args, "-fno-inline")) {
+    args.push_back("-fno-inline");
+  }
+  if (!ReprobuildStringHasFlag(args, "-fno-optimize-sibling-calls")) {
+    args.push_back("-fno-optimize-sibling-calls");
+  }
+}
 }
 
 cmGlobalReprobuildGenerator::cmGlobalReprobuildGenerator(cmake* cm)
@@ -1015,11 +1087,11 @@ void cmGlobalReprobuildGenerator::EnableLanguage(
   for (std::string const& lang : languages) {
     if (lang != "NONE" && lang != "C" && lang != "CXX" &&
         lang != "Fortran" && lang != "CUDA" && lang != "ISPC" &&
-        lang != "Swift") {
+        lang != "Swift" && lang != "ASM") {
       mf->IssueMessage(
         MessageType::FATAL_ERROR,
         cmStrCat("The Reprobuild generator supports only the C, CXX, "
-                 "Fortran, CUDA, ISPC, and Swift languages; language '",
+                 "Fortran, CUDA, ISPC, Swift, and ASM languages; language '",
                  lang, "' is not supported."));
       cmSystemTools::SetFatalErrorOccurred();
       return;
@@ -1254,6 +1326,13 @@ void cmGlobalReprobuildGenerator::WriteProviderMetadata()
   bool sawAppleBundle = false;
   bool const multiConfig = this->IsMultiConfig();
   cmMakefile* rootMf = this->LocalGenerators.front()->GetMakefile();
+  if (!this->GetCMakeInstance()->GetState()->GetCacheEntryValue(
+        "CMAKE_REPROBUILD_HCR")) {
+    rootMf->AddCacheDefinition(
+      "CMAKE_REPROBUILD_HCR", "OFF",
+      "Enable Reprobuild hot-code-reload metadata and support profile flags.",
+      cmStateEnums::BOOL);
+  }
   std::vector<std::string> configs;
   if (multiConfig) {
     configs = rootMf->GetGeneratorConfigs(cmMakefile::ExcludeEmptyConfig);
@@ -1594,6 +1673,30 @@ void cmGlobalReprobuildGenerator::WriteProviderMetadata()
       target.Var = ReprobuildNimIdent("target", nextTargetVar++, target.Name);
       target.IncludeInAll = !configPair.IsCrossConfig &&
         !gt->GetPropertyAsBool("EXCLUDE_FROM_ALL");
+      target.HcrEnabled = ReprobuildTargetHcrEnabled(gt, lg->GetMakefile());
+      if (target.HcrEnabled) {
+        target.HcrProfile = "clang-gcc-debug-patchable-no-lto-v1";
+        if (type == cmStateEnums::STATIC_LIBRARY ||
+            type == cmStateEnums::OBJECT_LIBRARY) {
+          this->GetCMakeInstance()->IssueMessage(
+            MessageType::FATAL_ERROR,
+            cmStrCat("Reprobuild HCR profile unavailable for target '",
+                     gt->GetName(),
+                     "': HCR requires an executable, shared library, or "
+                     "module library link target, not ",
+                     cmState::GetTargetTypeName(type), "."));
+          return;
+        }
+        if (gt->GetPropertyAsBool("INTERPROCEDURAL_OPTIMIZATION")) {
+          this->GetCMakeInstance()->IssueMessage(
+            MessageType::FATAL_ERROR,
+            cmStrCat("Reprobuild HCR profile unavailable for target '",
+                     gt->GetName(),
+                     "': interprocedural optimization/LTO is incompatible "
+                     "with HCR object-to-link metadata."));
+          return;
+        }
+      }
       if (!configPair.IsCrossConfig) {
         for (auto const& utility : gt->GetUtilities()) {
           target.TargetDeps.push_back(utility.Value.first);
@@ -1980,6 +2083,16 @@ void cmGlobalReprobuildGenerator::WriteProviderMetadata()
         if (lang == "Swift") {
           continue;
         }
+        if (target.HcrEnabled && lang != "C" && lang != "CXX") {
+          this->GetCMakeInstance()->IssueMessage(
+            MessageType::FATAL_ERROR,
+            cmStrCat("Reprobuild HCR profile unavailable for target '",
+                     gt->GetName(), "': source '", source->GetFullPath(),
+                     "' uses language '", lang,
+                     "'; the current HCR support profile accepts only C "
+                     "and CXX object sources."));
+          return;
+        }
         if (lang != "C" && lang != "CXX" && lang != "Fortran" &&
             lang != "CUDA" && lang != "ISPC") {
           this->GetCMakeInstance()->IssueMessage(
@@ -2104,6 +2217,39 @@ void cmGlobalReprobuildGenerator::WriteProviderMetadata()
             pchOptions = gt->GetPchUseCompileOptions(config, lang);
           }
           ReprobuildAppendOptionList(args, pchOptions);
+        }
+
+        if (target.HcrEnabled) {
+          std::string const compilerId =
+            mf->GetSafeDefinition(cmStrCat("CMAKE_", lang, "_COMPILER_ID"));
+          if (!ReprobuildCompilerSupportsHcr(compilerId)) {
+            this->GetCMakeInstance()->IssueMessage(
+              MessageType::FATAL_ERROR,
+              cmStrCat("Reprobuild HCR profile unavailable for target '",
+                       gt->GetName(), "': compiler id '", compilerId,
+                       "' does not support the current debug-info and "
+                       "patchable-function-entry HCR profile."));
+            return;
+          }
+          if (ReprobuildContainsNoDebugFlag(args)) {
+            this->GetCMakeInstance()->IssueMessage(
+              MessageType::FATAL_ERROR,
+              cmStrCat("Reprobuild HCR profile unavailable for target '",
+                       gt->GetName(),
+                       "': debug information was explicitly disabled by "
+                       "compile flags."));
+            return;
+          }
+          if (ReprobuildContainsLtoFlag(args)) {
+            this->GetCMakeInstance()->IssueMessage(
+              MessageType::FATAL_ERROR,
+              cmStrCat("Reprobuild HCR profile unavailable for target '",
+                       gt->GetName(),
+                       "': LTO flags are incompatible with HCR affected "
+                       "object lookup."));
+            return;
+          }
+          ReprobuildAppendHcrCompilePolicy(args);
         }
 
         if (lang == "Fortran") {
@@ -2374,6 +2520,10 @@ void cmGlobalReprobuildGenerator::WriteProviderMetadata()
           action.Args = { cmStrCat("@", action.ResponseFile) };
           action.Inputs.push_back(action.ResponseFile);
           ReprobuildAppendCleanFile(cleanFiles, binaryDir, action.ResponseFile);
+        }
+        if (target.HcrEnabled && (lang == "C" || lang == "CXX")) {
+          target.HcrObjects.push_back(ReprobuildHcrObject{
+            sourcePath, objRel, action.Id, lang });
         }
         target.CompileActions.push_back(std::move(action));
       }
@@ -3050,6 +3200,15 @@ void cmGlobalReprobuildGenerator::WriteProviderMetadata()
         linkArgs.push_back(realOutput);
         cm::append(linkArgs, linkObjects);
         ReprobuildAppendParsed(linkArgs, linkLibs);
+        if (target.HcrEnabled && ReprobuildContainsLtoFlag(linkArgs)) {
+          this->GetCMakeInstance()->IssueMessage(
+            MessageType::FATAL_ERROR,
+            cmStrCat("Reprobuild HCR profile unavailable for target '",
+                     gt->GetName(),
+                     "': link flags request LTO/linker-plugin behavior, "
+                     "which is incompatible with HCR linkgraph evidence."));
+          return;
+        }
         target.LinkAction.ToolId = ReprobuildToolId(linkLang);
         target.LinkAction.Args = linkArgs;
         target.LinkAction.Inputs = linkObjects;
@@ -3137,6 +3296,77 @@ void cmGlobalReprobuildGenerator::WriteProviderMetadata()
         usedTools.insert(symlinkAction.ToolId);
         sawSymlinkOutput = true;
         target.SymlinkActions.push_back(std::move(symlinkAction));
+      }
+
+      if (target.HcrEnabled) {
+        if (target.HcrObjects.empty()) {
+          this->GetCMakeInstance()->IssueMessage(
+            MessageType::FATAL_ERROR,
+            cmStrCat("Reprobuild HCR profile unavailable for target '",
+                     gt->GetName(),
+                     "': no C or CXX object compile actions were available "
+                     "for affected object lookup."));
+          return;
+        }
+        ReprobuildAction linkGraph;
+        linkGraph.Id =
+          ReprobuildSafeId(cmStrCat("hcr-linkgraph-", gt->GetName(),
+                                    configSuffix));
+        linkGraph.Var =
+          ReprobuildNimIdent("action", nextActionVar++, linkGraph.Id);
+        linkGraph.ToolId =
+          ReprobuildSafeId(cmStrCat("reprobuild-cmake-", linkGraph.Var));
+        linkGraph.Inputs = { realOutput };
+        linkGraph.Cacheable = false;
+        std::string const linkGraphRel =
+          cmStrCat("CMakeFiles/reprobuild/hcr/", linkGraph.Var,
+                   ".linkgraph");
+        if (declareOutputs) {
+          linkGraph.Outputs = { linkGraphRel };
+        }
+        std::vector<std::string> lines;
+        lines.push_back(cmStrCat("out=", ReprobuildShellSingleQuote(linkGraphRel),
+                                 "; bin=", ReprobuildShellSingleQuote(realOutput),
+                                 "; mkdir -p \"$(dirname \"$out\")\"; "
+                                 "tmp=\"$out.tmp\"; "
+                                 "{ printf '%s\\n' "
+                                 "'schema_id=reprobuild.hcr.linkgraph-evidence.v1'; "
+                                 "printf 'target=%s\\n' ",
+                                 ReprobuildShellSingleQuote(target.Name),
+                                 "; printf 'binary=%s\\n' \"$bin\"; "
+                                 "if command -v file >/dev/null 2>&1; then "
+                                 "printf '%s\\n' 'file_begin'; file \"$bin\"; "
+                                 "printf '%s\\n' 'file_end'; fi; "
+                                 "if command -v nm >/dev/null 2>&1; then "
+                                 "printf '%s\\n' 'symbols_begin'; "
+                                 "nm -an \"$bin\" 2>&1 | head -200; "
+                                 "printf '%s\\n' 'symbols_end'; fi; "
+                                 "if command -v otool >/dev/null 2>&1; then "
+                                 "printf '%s\\n' 'load_commands_begin'; "
+                                 "otool -l \"$bin\" 2>&1 | head -400; "
+                                 "printf '%s\\n' 'load_commands_end'; "
+                                 "elif command -v readelf >/dev/null 2>&1; then "
+                                 "printf '%s\\n' 'elf_symbols_begin'; "
+                                 "readelf -Ws \"$bin\" 2>&1 | head -400; "
+                                 "printf '%s\\n' 'elf_symbols_end'; fi; "
+                                 "} > \"$tmp\"; test -s \"$tmp\"; "
+                                 "mv \"$tmp\" \"$out\""));
+        std::string const wrapperPath =
+          cmStrCat(wrapperDir, "/", linkGraph.ToolId);
+        if (!ReprobuildWriteCommandScript(wrapperPath, binaryDir, lines)) {
+          this->GetCMakeInstance()->IssueMessage(
+            MessageType::FATAL_ERROR,
+            cmStrCat("Could not write Reprobuild HCR linkgraph wrapper: ",
+                     wrapperPath));
+          return;
+        }
+        usedTools.insert(linkGraph.ToolId);
+        target.HcrLinkOutput = realOutput;
+        target.HcrLinkGraph = linkGraphRel;
+        target.HcrLinkGraphAction = linkGraph.Id;
+        ReprobuildAppendCleanFile(cleanFiles, binaryDir, linkGraphRel);
+        target.PostBuildActions.insert(target.PostBuildActions.begin(),
+                                       std::move(linkGraph));
       }
 
       std::string finalDep = target.LinkAction.Id;
@@ -3608,10 +3838,76 @@ void cmGlobalReprobuildGenerator::WriteProviderMetadata()
   this->GetEnabledLanguages(languages);
   metadata << "enabled_languages=" << cmJoin(languages, ",") << "\n";
   std::vector<std::string> targetNames;
+  std::vector<std::string> hcrTargetNames;
   for (ReprobuildTarget const& target : buildTargets) {
     targetNames.push_back(target.Name);
+    if (target.HcrEnabled) {
+      hcrTargetNames.push_back(target.Name);
+    }
   }
   metadata << "targets=all,default," << cmJoin(targetNames, ",") << "\n";
+  metadata << "m10_hcr_targets="
+           << (hcrTargetNames.empty() ? "not_enabled" : "generated")
+           << "\n";
+  metadata << "hcr_targets=" << cmJoin(hcrTargetNames, ",") << "\n";
+  std::string const hcrMetadataFile = cmStrCat(providerDir, "/hcr.metadata.json");
+  metadata << "hcr_metadata=" << hcrMetadataFile << "\n";
+
+  cmsys::ofstream hcrMetadata(hcrMetadataFile.c_str());
+  if (!hcrMetadata) {
+    this->GetCMakeInstance()->IssueMessage(
+      MessageType::FATAL_ERROR,
+      cmStrCat("Could not write Reprobuild HCR metadata: ",
+               hcrMetadataFile));
+    return;
+  }
+  hcrMetadata << "{\n"
+              << "  \"schemaId\": \"reprobuild.cmake.hcr.metadata.v1\",\n"
+              << "  \"binaryDir\": " << ReprobuildJsonEscape(binaryDir)
+              << ",\n"
+              << "  \"sourceDir\": "
+              << ReprobuildJsonEscape(this->GetCMakeInstance()->GetHomeDirectory())
+              << ",\n"
+              << "  \"targets\": [";
+  char const* hcrTargetSep = "";
+  for (ReprobuildTarget const& target : buildTargets) {
+    if (!target.HcrEnabled) {
+      continue;
+    }
+    hcrMetadata << hcrTargetSep << "\n    {\n"
+                << "      \"name\": " << ReprobuildJsonEscape(target.Name)
+                << ",\n"
+                << "      \"profile\": "
+                << ReprobuildJsonEscape(target.HcrProfile) << ",\n"
+                << "      \"linkAction\": "
+                << ReprobuildJsonEscape(target.LinkAction.Id) << ",\n"
+                << "      \"linkOutput\": "
+                << ReprobuildJsonEscape(target.HcrLinkOutput) << ",\n"
+                << "      \"linkGraphAction\": "
+                << ReprobuildJsonEscape(target.HcrLinkGraphAction) << ",\n"
+                << "      \"linkGraph\": "
+                << ReprobuildJsonEscape(target.HcrLinkGraph) << ",\n"
+                << "      \"objects\": [";
+    char const* hcrObjectSep = "";
+    for (ReprobuildHcrObject const& object : target.HcrObjects) {
+      hcrMetadata << hcrObjectSep << "\n        {\n"
+                  << "          \"source\": "
+                  << ReprobuildJsonEscape(object.Source) << ",\n"
+                  << "          \"object\": "
+                  << ReprobuildJsonEscape(object.Object) << ",\n"
+                  << "          \"compileAction\": "
+                  << ReprobuildJsonEscape(object.CompileAction) << ",\n"
+                  << "          \"language\": "
+                  << ReprobuildJsonEscape(object.Language) << "\n"
+                  << "        }";
+      hcrObjectSep = ",";
+    }
+    hcrMetadata << "\n      ]\n"
+                << "    }";
+    hcrTargetSep = ",";
+  }
+  hcrMetadata << "\n  ]\n"
+              << "}\n";
 
   std::string const providerFile = cmStrCat(binaryDir, "/reprobuild.nim");
   cmsys::ofstream provider(providerFile.c_str());

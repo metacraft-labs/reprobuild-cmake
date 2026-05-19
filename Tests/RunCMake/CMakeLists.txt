@@ -555,6 +555,39 @@ add_test(NAME e2e_cmake_reprobuild_language_byproduct_metadata
     -DTEST_REPROBUILD_REPRO=${_ReprobuildBin}
     -DTEST_RUNQUOTAD=${_RunQuotaDaemonBin}
     -P ${_ReprobuildGeneratorTestDir}/e2e.cmake)
+add_test(NAME e2e_cmake_reprobuild_hcr_c_fixture
+  COMMAND ${CMAKE_CMAKE_COMMAND}
+    -DCMAKE_COMMAND=${CMAKE_CMAKE_COMMAND}
+    -DTEST_MODE=hcr_c_fixture
+    -DTEST_BINARY_ROOT=${_ReprobuildGeneratorTestBin}/hcr-c-fixture
+    -DTEST_C_COMPILER=${CMAKE_C_COMPILER}
+    -DTEST_REPROBUILD_SOURCE_ROOT=${_ReprobuildSourceRoot}
+    -DTEST_REPROBUILD_REPO=${_ReprobuildSourceRoot}
+    -DTEST_REPROBUILD_REPRO=${_ReprobuildBin}
+    -DTEST_RUNQUOTAD=${_RunQuotaDaemonBin}
+    -P ${_ReprobuildGeneratorTestDir}/e2e.cmake)
+add_test(NAME e2e_cmake_reprobuild_hcr_affected_object_lookup
+  COMMAND ${CMAKE_CMAKE_COMMAND}
+    -DCMAKE_COMMAND=${CMAKE_CMAKE_COMMAND}
+    -DTEST_MODE=hcr_affected_object_lookup
+    -DTEST_BINARY_ROOT=${_ReprobuildGeneratorTestBin}/hcr-affected-object-lookup
+    -DTEST_C_COMPILER=${CMAKE_C_COMPILER}
+    -DTEST_REPROBUILD_SOURCE_ROOT=${_ReprobuildSourceRoot}
+    -DTEST_REPROBUILD_REPO=${_ReprobuildSourceRoot}
+    -DTEST_REPROBUILD_REPRO=${_ReprobuildBin}
+    -DTEST_RUNQUOTAD=${_RunQuotaDaemonBin}
+    -P ${_ReprobuildGeneratorTestDir}/e2e.cmake)
+add_test(NAME e2e_cmake_reprobuild_hcr_rejects_incompatible_target
+  COMMAND ${CMAKE_CMAKE_COMMAND}
+    -DCMAKE_COMMAND=${CMAKE_CMAKE_COMMAND}
+    -DTEST_MODE=hcr_rejects_incompatible_target
+    -DTEST_BINARY_ROOT=${_ReprobuildGeneratorTestBin}/hcr-rejects-incompatible-target
+    -DTEST_C_COMPILER=${CMAKE_C_COMPILER}
+    -DTEST_REPROBUILD_SOURCE_ROOT=${_ReprobuildSourceRoot}
+    -DTEST_REPROBUILD_REPO=${_ReprobuildSourceRoot}
+    -DTEST_REPROBUILD_REPRO=${_ReprobuildBin}
+    -DTEST_RUNQUOTAD=${_RunQuotaDaemonBin}
+    -P ${_ReprobuildGeneratorTestDir}/e2e.cmake)
 
 if(CMAKE_GENERATOR MATCHES "Ninja")
   set(Ninja_ARGS

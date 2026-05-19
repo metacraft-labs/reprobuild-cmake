@@ -363,6 +363,186 @@ function(assert_not_contains text unexpected label)
   endif()
 endfunction()
 
+function(write_hcr_project source_dir project_name)
+  file(REMOVE_RECURSE "${source_dir}")
+  file(MAKE_DIRECTORY "${source_dir}")
+  file(WRITE "${source_dir}/CMakeLists.txt"
+    "cmake_minimum_required(VERSION 3.20)\n"
+    "project(${project_name} C)\n"
+    "add_executable(hcrapp main.c helper.c)\n"
+    "set_property(TARGET hcrapp PROPERTY REPROBUILD_HCR ON)\n"
+    "target_compile_options(hcrapp PRIVATE -Wall)\n"
+    "add_executable(plain plain.c)\n"
+    "set_property(TARGET plain PROPERTY REPROBUILD_HCR OFF)\n"
+    "add_executable(globalhcr global.c)\n")
+  file(WRITE "${source_dir}/helper.c"
+    "int hcr_helper(int value) { return value + 2; }\n")
+  file(WRITE "${source_dir}/main.c"
+    "int hcr_helper(int value);\n"
+    "int main(void) { return hcr_helper(40) == 42 ? 0 : 1; }\n")
+  file(WRITE "${source_dir}/plain.c"
+    "int main(void) { return 0; }\n")
+  file(WRITE "${source_dir}/global.c"
+    "int main(void) { return 0; }\n")
+endfunction()
+
+function(write_hcr_reject_project source_dir project_name case_name)
+  file(REMOVE_RECURSE "${source_dir}")
+  file(MAKE_DIRECTORY "${source_dir}")
+  file(WRITE "${source_dir}/main.c" "int main(void) { return 0; }\n")
+  file(WRITE "${source_dir}/helper.c" "int hcr_helper(void) { return 1; }\n")
+
+  if(case_name STREQUAL "compile-flto")
+    file(WRITE "${source_dir}/CMakeLists.txt"
+      "cmake_minimum_required(VERSION 3.20)\n"
+      "project(${project_name} C)\n"
+      "add_executable(badhcr main.c)\n"
+      "set_property(TARGET badhcr PROPERTY REPROBUILD_HCR ON)\n"
+      "target_compile_options(badhcr PRIVATE -flto)\n")
+  elseif(case_name STREQUAL "link-lto")
+    file(WRITE "${source_dir}/CMakeLists.txt"
+      "cmake_minimum_required(VERSION 3.20)\n"
+      "project(${project_name} C)\n"
+      "add_executable(badhcr main.c)\n"
+      "set_property(TARGET badhcr PROPERTY REPROBUILD_HCR ON)\n"
+      "target_link_options(badhcr PRIVATE -fuse-linker-plugin)\n")
+  elseif(case_name STREQUAL "no-debug")
+    file(WRITE "${source_dir}/CMakeLists.txt"
+      "cmake_minimum_required(VERSION 3.20)\n"
+      "project(${project_name} C)\n"
+      "add_executable(badhcr main.c)\n"
+      "set_property(TARGET badhcr PROPERTY REPROBUILD_HCR ON)\n"
+      "target_compile_options(badhcr PRIVATE -g0)\n")
+  elseif(case_name STREQUAL "ipo")
+    file(WRITE "${source_dir}/CMakeLists.txt"
+      "cmake_minimum_required(VERSION 3.20)\n"
+      "project(${project_name} C)\n"
+      "add_executable(badhcr main.c)\n"
+      "set_property(TARGET badhcr PROPERTY REPROBUILD_HCR ON)\n"
+      "set_property(TARGET badhcr PROPERTY INTERPROCEDURAL_OPTIMIZATION ON)\n")
+  elseif(case_name STREQUAL "static-library")
+    file(WRITE "${source_dir}/CMakeLists.txt"
+      "cmake_minimum_required(VERSION 3.20)\n"
+      "project(${project_name} C)\n"
+      "add_library(badhcr STATIC helper.c)\n"
+      "set_property(TARGET badhcr PROPERTY REPROBUILD_HCR ON)\n")
+  elseif(case_name STREQUAL "object-library")
+    file(WRITE "${source_dir}/CMakeLists.txt"
+      "cmake_minimum_required(VERSION 3.20)\n"
+      "project(${project_name} C)\n"
+      "add_library(badhcr OBJECT helper.c)\n"
+      "set_property(TARGET badhcr PROPERTY REPROBUILD_HCR ON)\n")
+  elseif(case_name STREQUAL "asm-source")
+    file(WRITE "${source_dir}/CMakeLists.txt"
+      "cmake_minimum_required(VERSION 3.20)\n"
+      "project(${project_name} C ASM)\n"
+      "add_executable(badhcr main.c hcr_entry.S)\n"
+      "set_source_files_properties(hcr_entry.S PROPERTIES LANGUAGE ASM)\n"
+      "set_property(TARGET badhcr PROPERTY REPROBUILD_HCR ON)\n")
+    if(APPLE)
+      file(WRITE "${source_dir}/hcr_entry.S"
+        ".globl _hcr_asm_entry\n"
+        "_hcr_asm_entry:\n"
+        "  ret\n")
+    else()
+      file(WRITE "${source_dir}/hcr_entry.S"
+        ".globl hcr_asm_entry\n"
+        "hcr_asm_entry:\n"
+        "  ret\n")
+    endif()
+  else()
+    message(FATAL_ERROR "Unknown HCR reject case: ${case_name}")
+  endif()
+endfunction()
+
+function(assert_rejected_hcr_target_not_reloadable binary_dir case_name)
+  set(provider_dir "${binary_dir}/CMakeFiles/reprobuild")
+  if(EXISTS "${provider_dir}/hcr.metadata.json")
+    message(FATAL_ERROR
+      "Rejected HCR case '${case_name}' still produced HCR metadata: "
+      "${provider_dir}/hcr.metadata.json")
+  endif()
+  if(EXISTS "${provider_dir}/provider.meta")
+    file(READ "${provider_dir}/provider.meta" rejected_provider_metadata)
+    assert_not_contains("${rejected_provider_metadata}" "m10_hcr_targets=generated"
+      "rejected HCR provider metadata for ${case_name}")
+    assert_not_contains("${rejected_provider_metadata}" "hcr_targets=badhcr"
+      "rejected HCR provider metadata for ${case_name}")
+  endif()
+  if(EXISTS "${binary_dir}/reprobuild.nim")
+    file(READ "${binary_dir}/reprobuild.nim" rejected_provider)
+    assert_not_contains("${rejected_provider}" "hcr-linkgraph-badhcr"
+      "rejected HCR provider for ${case_name}")
+    assert_not_contains("${rejected_provider}" "target(\"badhcr\""
+      "rejected HCR provider for ${case_name}")
+  endif()
+endfunction()
+
+function(run_hcr_reject_case case_name expected_error)
+  set(reject_source_dir "${TEST_BINARY_ROOT}/${case_name}-src")
+  set(reject_binary_dir "${TEST_BINARY_ROOT}/${case_name}-build")
+  write_hcr_reject_project("${reject_source_dir}" ReprobuildHcrReject
+    "${case_name}")
+  run_configure("${reject_source_dir}" "${reject_binary_dir}" FALSE
+    "${expected_error}")
+  assert_rejected_hcr_target_not_reloadable("${reject_binary_dir}" "${case_name}")
+endfunction()
+
+function(run_hcr_metadata_reader binary_dir mode source_path out_var)
+  foreach(var IN ITEMS TEST_REPROBUILD_SOURCE_ROOT)
+    if(NOT DEFINED ${var} OR "${${var}}" STREQUAL "")
+      message(FATAL_ERROR "${var} is required for M10 HCR metadata reader gates")
+    endif()
+  endforeach()
+  find_program(NIM_EXECUTABLE nim)
+  if(NOT NIM_EXECUTABLE)
+    message(FATAL_ERROR "nim is required for M10 HCR metadata reader gates")
+  endif()
+  set(reader_dir "${binary_dir}/CMakeFiles/reprobuild/hcr-reader")
+  file(MAKE_DIRECTORY "${reader_dir}")
+  set(reader "${reader_dir}/reader.nim")
+  file(WRITE "${reader}"
+    "import std/os\n"
+    "import repro_hcr_linkgraph/cmake_metadata\n"
+    "let buildDir = paramStr(1)\n"
+    "let mode = paramStr(2)\n"
+    "let metadata = readCMakeHcrMetadataForBuildDir(buildDir)\n"
+    "requireHcrTargets(metadata)\n"
+    "if mode == \"validate\":\n"
+    "  for target in metadata.targets:\n"
+    "    echo \"target=\", target.name, \" profile=\", target.profile, \" objects=\", target.objects.len\n"
+    "    echo \"linkgraph=\", target.linkGraph, \" action=\", target.linkGraphAction\n"
+    "elif mode == \"affected\":\n"
+    "  let source = paramStr(3)\n"
+    "  let affected = affectedObjectsForSource(metadata, source)\n"
+    "  if affected.len == 0:\n"
+    "    quit \"no affected objects for \" & source, 2\n"
+    "  for relation in affected:\n"
+    "    echo \"affected=\", relation.source, \" object=\", relation.objectPath, \" compile=\", relation.compileAction, \" link=\", relation.linkAction, \" linkgraph=\", relation.linkGraph\n"
+    "else:\n"
+    "  quit \"unknown mode: \" & mode, 3\n")
+  execute_process(
+    COMMAND "${NIM_EXECUTABLE}" c -r
+      --verbosity:0
+      --hints:off
+      "--nimcache:${reader_dir}/nimcache"
+      "--path:${TEST_REPROBUILD_SOURCE_ROOT}/libs/repro_hcr_linkgraph/src"
+      "--out:${reader_dir}/reader"
+      "${reader}"
+      "${binary_dir}" "${mode}" "${source_path}"
+    OUTPUT_VARIABLE stdout
+    ERROR_VARIABLE stderr
+    RESULT_VARIABLE result
+    ENCODING UTF8)
+  set(output "${stdout}\n${stderr}")
+  if(NOT result EQUAL 0)
+    message(FATAL_ERROR
+      "HCR metadata reader failed.\n"
+      "Output:\n${output}")
+  endif()
+  set(${out_var} "${output}" PARENT_SCOPE)
+endfunction()
+
 function(write_depfile_project source_dir project_name)
   file(REMOVE_RECURSE "${source_dir}")
   file(MAKE_DIRECTORY "${source_dir}/include")
@@ -2147,6 +2327,105 @@ elseif(TEST_MODE STREQUAL "language_byproduct_metadata")
   if(NOT "${ispc_compiler}" STREQUAL "")
     run_ispc_available_fixture("ispc-byproducts" "${ispc_compiler}")
   endif()
+elseif(TEST_MODE STREQUAL "hcr_c_fixture")
+  set(hcr_source_dir "${TEST_BINARY_ROOT}/hcr-src")
+  set(hcr_binary_dir "${TEST_BINARY_ROOT}/hcr-build")
+  write_hcr_project("${hcr_source_dir}" ReprobuildHcrFixture)
+  run_configure("${hcr_source_dir}" "${hcr_binary_dir}" TRUE ""
+    "-DCMAKE_REPROBUILD_HCR=OFF")
+
+  file(READ "${hcr_binary_dir}/CMakeFiles/reprobuild/provider.meta" hcr_metadata)
+  assert_contains("${hcr_metadata}" "m10_hcr_targets=generated" "HCR provider metadata")
+  assert_contains("${hcr_metadata}" "hcr_targets=hcrapp" "HCR provider metadata")
+  assert_not_contains("${hcr_metadata}" "hcr_targets=plain" "HCR provider metadata")
+  assert_not_contains("${hcr_metadata}" "hcr_targets=globalhcr" "HCR provider metadata")
+  file(READ "${hcr_binary_dir}/compile_commands.json" hcr_compile_commands)
+  foreach(expected IN ITEMS
+      "-g"
+      "-fpatchable-function-entry=2,0"
+      "-fno-inline"
+      "-fno-optimize-sibling-calls"
+      "${hcr_source_dir}/main.c"
+      "${hcr_source_dir}/helper.c")
+    assert_contains("${hcr_compile_commands}" "${expected}" "HCR compile commands")
+  endforeach()
+  file(READ "${hcr_binary_dir}/reprobuild.nim" hcr_provider)
+  assert_contains("${hcr_provider}" "hcr-linkgraph-hcrapp" "HCR generated provider")
+  assert_contains("${hcr_provider}" "CMakeFiles/reprobuild/hcr/" "HCR generated provider")
+
+  run_hcr_metadata_reader("${hcr_binary_dir}" "validate" "" reader_output)
+  assert_contains("${reader_output}" "target=hcrapp" "HCR metadata reader")
+  assert_contains("${reader_output}" "profile=clang-gcc-debug-patchable-no-lto-v1" "HCR metadata reader")
+
+  start_runquota("${TEST_BINARY_ROOT}" runquota_socket runquota_pid)
+  run_build("${hcr_binary_dir}" "hcrapp" "${runquota_socket}" hcr_output)
+  stop_runquota("${runquota_pid}")
+  assert_contains("${hcr_output}" "hcr-linkgraph-hcrapp status=asSucceeded launched=true" "HCR build output")
+  execute_process(COMMAND "${hcr_binary_dir}/hcrapp" RESULT_VARIABLE hcr_result)
+  if(NOT hcr_result EQUAL 0)
+    message(FATAL_ERROR "HCR executable failed with ${hcr_result}")
+  endif()
+  file(GLOB hcr_linkgraphs "${hcr_binary_dir}/CMakeFiles/reprobuild/hcr/*.linkgraph")
+  list(LENGTH hcr_linkgraphs hcr_linkgraph_count)
+  if(NOT hcr_linkgraph_count EQUAL 1)
+    message(FATAL_ERROR "Expected one HCR linkgraph evidence file, found ${hcr_linkgraph_count}: ${hcr_linkgraphs}")
+  endif()
+  list(GET hcr_linkgraphs 0 hcr_linkgraph)
+  file(READ "${hcr_linkgraph}" hcr_linkgraph_text)
+  assert_contains("${hcr_linkgraph_text}" "schema_id=reprobuild.hcr.linkgraph-evidence.v1" "HCR linkgraph evidence")
+  assert_contains("${hcr_linkgraph_text}" "symbols_begin" "HCR linkgraph evidence")
+
+  set(global_hcr_binary_dir "${TEST_BINARY_ROOT}/hcr-global-build")
+  run_configure("${hcr_source_dir}" "${global_hcr_binary_dir}" TRUE ""
+    "-DCMAKE_REPROBUILD_HCR=ON")
+  file(READ "${global_hcr_binary_dir}/CMakeFiles/reprobuild/provider.meta" global_hcr_metadata)
+  assert_contains("${global_hcr_metadata}" "m10_hcr_targets=generated" "global HCR provider metadata")
+  assert_contains("${global_hcr_metadata}" "hcrapp" "global HCR provider metadata")
+  assert_contains("${global_hcr_metadata}" "globalhcr" "global HCR provider metadata")
+  assert_not_contains("${global_hcr_metadata}" "hcr_targets=plain" "global HCR provider metadata")
+elseif(TEST_MODE STREQUAL "hcr_affected_object_lookup")
+  set(hcr_source_dir "${TEST_BINARY_ROOT}/hcr-affected-src")
+  set(hcr_binary_dir "${TEST_BINARY_ROOT}/hcr-affected-build")
+  write_hcr_project("${hcr_source_dir}" ReprobuildHcrAffected)
+  run_configure("${hcr_source_dir}" "${hcr_binary_dir}" TRUE "")
+  run_hcr_metadata_reader("${hcr_binary_dir}" "affected" "${hcr_source_dir}/helper.c" affected_before)
+  assert_contains("${affected_before}" "affected=${hcr_source_dir}/helper.c" "HCR affected lookup")
+  assert_contains("${affected_before}" "helper.c.o" "HCR affected lookup")
+  assert_contains("${affected_before}" "link=link-hcrapp" "HCR affected lookup")
+  assert_contains("${affected_before}" "linkgraph=CMakeFiles/reprobuild/hcr/" "HCR affected lookup")
+
+  start_runquota("${TEST_BINARY_ROOT}" runquota_socket runquota_pid)
+  run_build("${hcr_binary_dir}" "hcrapp" "${runquota_socket}" hcr_first_output)
+  file(WRITE "${hcr_source_dir}/helper.c"
+    "int hcr_helper(int value) { return value + 2; }\n"
+    "int hcr_m10_changed_symbol(void) { return 10; }\n")
+  run_build("${hcr_binary_dir}" "hcrapp" "${runquota_socket}" hcr_second_output)
+  stop_runquota("${runquota_pid}")
+  assert_contains("${hcr_second_output}" "helper.c.o status=asSucceeded launched=true" "HCR incremental output")
+  assert_contains("${hcr_second_output}" "action: link-hcrapp status=asSucceeded launched=true" "HCR incremental output")
+  assert_contains("${hcr_second_output}" "hcr-linkgraph-hcrapp status=asSucceeded launched=true" "HCR incremental output")
+  assert_not_contains("${hcr_second_output}" "main.c.o status=asSucceeded launched=true" "HCR incremental output")
+  run_hcr_metadata_reader("${hcr_binary_dir}" "affected" "${hcr_source_dir}/helper.c" affected_after)
+  assert_contains("${affected_after}" "compile=compile-hcrapp" "HCR affected lookup after edit")
+  file(GLOB hcr_linkgraphs "${hcr_binary_dir}/CMakeFiles/reprobuild/hcr/*.linkgraph")
+  list(GET hcr_linkgraphs 0 hcr_linkgraph)
+  file(READ "${hcr_linkgraph}" hcr_linkgraph_text)
+  assert_contains("${hcr_linkgraph_text}" "_hcr_m10_changed_symbol" "HCR linkgraph after edit")
+elseif(TEST_MODE STREQUAL "hcr_rejects_incompatible_target")
+  run_hcr_reject_case("compile-flto"
+    "affected object lookup")
+  run_hcr_reject_case("link-lto"
+    "LTO/linker-plugin behavior")
+  run_hcr_reject_case("no-debug"
+    "disabled by compile flags")
+  run_hcr_reject_case("ipo"
+    "object-to-link metadata")
+  run_hcr_reject_case("static-library"
+    "STATIC_LIBRARY")
+  run_hcr_reject_case("object-library"
+    "OBJECT_LIBRARY")
+  run_hcr_reject_case("asm-source"
+    "uses language 'ASM'")
 else()
   message(FATAL_ERROR "Unknown TEST_MODE: ${TEST_MODE}")
 endif()
