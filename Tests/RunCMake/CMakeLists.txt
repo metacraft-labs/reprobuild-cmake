@@ -439,6 +439,17 @@ add_test(NAME e2e_cmake_reprobuild_regeneration_refresh
     -DTEST_REPROBUILD_REPRO=${_ReprobuildBin}
     -DTEST_RUNQUOTAD=${_RunQuotaDaemonBin}
     -P ${_ReprobuildGeneratorTestDir}/e2e.cmake)
+add_test(NAME e2e_cmake_reprobuild_regeneration_direct_mode
+  COMMAND ${CMAKE_CMAKE_COMMAND}
+    -DCMAKE_COMMAND=${CMAKE_CMAKE_COMMAND}
+    -DTEST_MODE=regeneration_direct_mode
+    -DTEST_BINARY_ROOT=${_ReprobuildGeneratorTestBin}/regeneration-direct-mode
+    -DTEST_C_COMPILER=${CMAKE_C_COMPILER}
+    -DTEST_REPROBUILD_SOURCE_ROOT=${_ReprobuildSourceRoot}
+    -DTEST_REPROBUILD_REPO=${_ReprobuildSourceRoot}
+    -DTEST_REPROBUILD_REPRO=${_ReprobuildBin}
+    -DTEST_RUNQUOTAD=${_RunQuotaDaemonBin}
+    -P ${_ReprobuildGeneratorTestDir}/e2e.cmake)
 add_test(NAME e2e_cmake_reprobuild_fortran_dyndep_modules
   COMMAND ${CMAKE_CMAKE_COMMAND}
     -DCMAKE_COMMAND=${CMAKE_CMAKE_COMMAND}

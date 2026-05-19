@@ -121,6 +121,11 @@ function(check_provider_metadata binary_dir source_dir)
       "m3_action_state=generated"
       "source_dir=${source_dir}"
       "binary_dir=${binary_dir}"
+      "cmake_regeneration=enabled"
+      "cmake_regeneration_suppressed=false"
+      "cmake_regeneration_check_file=CMakeFiles/Makefile.cmake"
+      "cmake_regeneration_provider_file=${binary_dir}/reprobuild.nim"
+      "cmake_regeneration_provider_state=${provider_dir}/provider.last"
       "default_target=all"
       "targets=all,default,hello")
     string(FIND "${metadata}" "${expected}" found)
@@ -269,6 +274,38 @@ function(run_build binary_dir target socket out_var)
   if(NOT result EQUAL 0)
     message(FATAL_ERROR
       "Reprobuild build failed.\n"
+      "Command: ${command}\n"
+      "Output:\n${output}")
+  endif()
+  set(${out_var} "${output}" PARENT_SCOPE)
+endfunction()
+
+function(run_direct_repro_build binary_dir target socket out_var)
+  foreach(var IN ITEMS TEST_REPROBUILD_REPRO TEST_REPROBUILD_SOURCE_ROOT)
+    if(NOT DEFINED ${var} OR "${${var}}" STREQUAL "")
+      message(FATAL_ERROR "${var} is required for direct Reprobuild build gates")
+    endif()
+  endforeach()
+  require_tool("${TEST_REPROBUILD_REPRO}" "repro")
+  set(command
+    "${CMAKE_COMMAND}" -E env
+      "RUNQUOTA_SOCKET=${socket}"
+      "REPROBUILD_WORK_ROOT=${binary_dir}/CMakeFiles/reprobuild/work-root"
+      "REPROBUILD_SOURCE_ROOT=${TEST_REPROBUILD_SOURCE_ROOT}"
+      "${TEST_REPROBUILD_REPRO}" build
+      "${binary_dir}#${target}"
+      --tool-provisioning=path
+      "--work-root=${binary_dir}/CMakeFiles/reprobuild")
+  execute_process(
+    COMMAND ${command}
+    OUTPUT_VARIABLE stdout
+    ERROR_VARIABLE stderr
+    RESULT_VARIABLE result
+    ENCODING UTF8)
+  set(output "${stdout}\n${stderr}")
+  if(NOT result EQUAL 0)
+    message(FATAL_ERROR
+      "Direct Reprobuild build failed.\n"
       "Command: ${command}\n"
       "Output:\n${output}")
   endif()
@@ -2628,14 +2665,24 @@ elseif(TEST_MODE STREQUAL "regeneration_refresh")
   run_configure("${regen_source_dir}" "${regen_binary_dir}" TRUE "")
   start_runquota("${TEST_BINARY_ROOT}" runquota_socket runquota_pid)
   run_build("${regen_binary_dir}" "regenapp" "${runquota_socket}" regen_first)
+  assert_contains("${regen_first}" "cmakeRegenerationAction: __repro_cmake_regenerate status=asSucceeded launched=true" "initial regeneration edge")
   execute_process(COMMAND "${regen_binary_dir}/regenapp" RESULT_VARIABLE regen_first_result)
   if(NOT regen_first_result EQUAL 1)
     stop_runquota("${runquota_pid}")
     message(FATAL_ERROR "Expected first regenapp exit 1, got ${regen_first_result}")
   endif()
+  run_build("${regen_binary_dir}" "regenapp" "${runquota_socket}" regen_noop)
+  assert_contains("${regen_noop}" "cmakeRegenerationAction: __repro_cmake_regenerate status=asCacheHit launched=false cache=cdHit" "no-op regeneration edge")
+  report_path_from_output("${regen_noop}" regen_noop_report_path)
+  file(READ "${regen_noop_report_path}" regen_noop_report)
+  assert_contains("${regen_noop_report}" "\"cmakeRegenerationActions\"" "no-op regeneration report")
+  assert_contains("${regen_noop_report}" "\"id\": \"__repro_cmake_regenerate\"" "no-op regeneration report")
+  assert_contains("${regen_noop_report}" "\"cacheDecision\": \"cdHit\"" "no-op regeneration report")
   execute_process(COMMAND "${CMAKE_COMMAND}" -E sleep 1.1)
   write_regeneration_project("${regen_source_dir}" ReprobuildRegen 2)
   run_build("${regen_binary_dir}" "regenapp" "${runquota_socket}" regen_second)
+  assert_contains("${regen_second}" "cmakeRegenerationAction: __repro_cmake_regenerate status=asSucceeded launched=true" "dirty regeneration edge")
+  assert_contains("${regen_second}" "cmakeRegeneration: complete providerChanged=true" "dirty regeneration helper")
   execute_process(COMMAND "${regen_binary_dir}/regenapp" RESULT_VARIABLE regen_second_result)
   if(NOT regen_second_result EQUAL 2)
     stop_runquota("${runquota_pid}")
@@ -2660,6 +2707,26 @@ elseif(TEST_MODE STREQUAL "regeneration_refresh")
   assert_contains("${glob_provider}" "extra.c" "glob regeneration provider")
   assert_contains("${regen_second}" "main.c.o status=asSucceeded launched=true" "regeneration build output")
   assert_contains("${glob_second}" "extra.c.o status=asSucceeded launched=true" "glob regeneration build output")
+elseif(TEST_MODE STREQUAL "regeneration_direct_mode")
+  set(direct_source_dir "${TEST_BINARY_ROOT}/direct-regen-src")
+  set(direct_binary_dir "${TEST_BINARY_ROOT}/direct-regen-build")
+  file(REMOVE_RECURSE "${direct_source_dir}")
+  write_regeneration_project("${direct_source_dir}" ReprobuildDirectRegen 3)
+  run_configure("${direct_source_dir}" "${direct_binary_dir}" TRUE "")
+  start_runquota("${TEST_BINARY_ROOT}" runquota_socket runquota_pid)
+  run_direct_repro_build("${direct_binary_dir}" "regenapp" "${runquota_socket}" direct_first)
+  assert_contains("${direct_first}" "cmakeRegenerationAction: __repro_cmake_regenerate status=asSucceeded launched=true" "direct initial regeneration edge")
+  run_direct_repro_build("${direct_binary_dir}" "regenapp" "${runquota_socket}" direct_noop)
+  assert_contains("${direct_noop}" "cmakeRegenerationAction: __repro_cmake_regenerate status=asCacheHit launched=false cache=cdHit" "direct no-op regeneration edge")
+  execute_process(COMMAND "${CMAKE_COMMAND}" -E sleep 1.1)
+  write_regeneration_project("${direct_source_dir}" ReprobuildDirectRegen 4)
+  run_direct_repro_build("${direct_binary_dir}" "regenapp" "${runquota_socket}" direct_dirty)
+  stop_runquota("${runquota_pid}")
+  assert_contains("${direct_dirty}" "cmakeRegenerationAction: __repro_cmake_regenerate status=asSucceeded launched=true" "direct dirty regeneration edge")
+  execute_process(COMMAND "${direct_binary_dir}/regenapp" RESULT_VARIABLE direct_result)
+  if(NOT direct_result EQUAL 4)
+    message(FATAL_ERROR "Expected direct-regenerated regenapp exit 4, got ${direct_result}")
+  endif()
 elseif(TEST_MODE STREQUAL "fortran_dyndep_modules")
   resolve_fortran_compiler(fortran_compiler)
   if("${fortran_compiler}" STREQUAL "")

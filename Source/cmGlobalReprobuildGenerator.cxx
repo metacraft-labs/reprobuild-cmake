@@ -3867,6 +3867,19 @@ void cmGlobalReprobuildGenerator::WriteProviderMetadata()
   metadata << "provider_root=" << providerDir << "\n";
   metadata << "wrapper_path=" << wrapperDir << "\n";
   metadata << "clean_manifest=" << cleanManifestFile << "\n";
+  metadata << "cmake_regeneration=enabled\n";
+  metadata << "cmake_regeneration_suppressed="
+           << (this->GlobalSettingIsOn("CMAKE_SUPPRESS_REGENERATION") ? "true"
+                                                                       : "false")
+           << "\n";
+  metadata << "cmake_command=" << cmSystemTools::GetCMakeCommand() << "\n";
+  metadata << "cmake_regeneration_check_file=CMakeFiles/Makefile.cmake\n";
+  metadata << "cmake_regeneration_glob_verify="
+           << cmStrCat(binaryDir, "/CMakeFiles/VerifyGlobs.cmake") << "\n";
+  metadata << "cmake_regeneration_provider_file="
+           << cmStrCat(binaryDir, "/reprobuild.nim") << "\n";
+  metadata << "cmake_regeneration_provider_state="
+           << cmStrCat(providerDir, "/provider.last") << "\n";
   if (multiConfig) {
     metadata << "configurations=" << cmJoin(configs, ",") << "\n";
     metadata << "default_build_type=" << this->DefaultFileConfig << "\n";
