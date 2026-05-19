@@ -28,6 +28,7 @@
 #include "cmGeneratorExpression.h"
 #include "cmGeneratorFileSet.h"
 #include "cmGeneratorTarget.h"
+#include "cmLinkLineDeviceComputer.h"
 #include "cmLinkLineComputer.h"
 #include "cmLocalGenerator.h"
 #include "cmLocalReprobuildGenerator.h"
@@ -255,11 +256,20 @@ std::string ReprobuildCompilerVar(std::string const& lang)
 
 std::string ReprobuildToolId(std::string const& lang)
 {
+  if (lang == "CUDA") {
+    return "reprobuild-cmake-cuda";
+  }
   if (lang == "CXX") {
     return "reprobuild-cmake-cxx";
   }
   if (lang == "Fortran") {
     return "reprobuild-cmake-fortran";
+  }
+  if (lang == "ISPC") {
+    return "reprobuild-cmake-ispc";
+  }
+  if (lang == "Swift") {
+    return "reprobuild-cmake-swift";
   }
   return "reprobuild-cmake-cc";
 }
@@ -383,9 +393,13 @@ bool ReprobuildCompilerUsesMakeDepfile(cmMakefile const* mf,
   if (lang == "Fortran") {
     return true;
   }
+  if (lang == "ISPC") {
+    return mf->GetDefinition("CMAKE_ISPC_DEPENDS_USE_COMPILER").IsOn();
+  }
   std::string const id =
     mf->GetSafeDefinition(cmStrCat("CMAKE_", lang, "_COMPILER_ID"));
-  return id == "GNU" || id == "Clang" || id == "AppleClang";
+  return id == "GNU" || id == "Clang" || id == "AppleClang" ||
+    id == "NVIDIA";
 }
 
 bool ReprobuildCompilerIsMsvc(cmMakefile const* mf, std::string const& lang)
@@ -441,6 +455,139 @@ void ReprobuildAppendOptionList(std::vector<std::string>& args,
       args.push_back(option);
     }
   }
+}
+
+std::string ReprobuildOutputPath(std::string const& binaryDir,
+                                 std::string const& baseDir,
+                                 std::string const& path);
+std::string ReprobuildConfigFullPath(std::string const& binaryDir,
+                                     std::string const& fullPath,
+                                     std::string const& config,
+                                     bool multiConfig);
+
+std::string ReprobuildSwiftCompileModeName(cmSwiftCompileMode mode)
+{
+  switch (mode) {
+    case cmSwiftCompileMode::Unknown:
+      return "unknown";
+    case cmSwiftCompileMode::Wholemodule:
+      return "wholemodule";
+    case cmSwiftCompileMode::Incremental:
+      return "incremental";
+    case cmSwiftCompileMode::Singlefile:
+      return "singlefile";
+  }
+  return "unknown";
+}
+
+void ReprobuildAppendCommonCompileArgs(std::vector<std::string>& args,
+                                       cmLocalGenerator* lg,
+                                       cmGeneratorTarget* gt,
+                                       std::string const& config,
+                                       std::string const& lang)
+{
+  std::string flags;
+  lg->GetTargetCompileFlags(gt, config, lang, flags, "");
+  ReprobuildAppendParsed(args, flags);
+
+  std::vector<std::string> definitions;
+  gt->GetCompileDefinitions(definitions, config, lang);
+  for (std::string const& def : definitions) {
+    args.push_back(cmStrCat("-D", def));
+  }
+
+  std::vector<std::string> includes;
+  lg->GetIncludeDirectories(includes, gt, lang, config);
+  for (std::string const& include : includes) {
+    args.push_back(cmStrCat("-I", include));
+  }
+}
+
+std::string ReprobuildSwiftOutputMapPath(std::string const& binaryDir,
+                                         cmGeneratorTarget* gt,
+                                         std::string const& config,
+                                         bool multiConfig)
+{
+  std::string const suffix = config.empty() ? std::string() : cmStrCat("/", config);
+  return ReprobuildConfigFullPath(
+    binaryDir,
+    cmStrCat(gt->GetSupportDirectory(), suffix, "/output-file-map.json"),
+    config, multiConfig);
+}
+
+std::string ReprobuildSwiftDepsPath(std::string const& binaryDir,
+                                    cmGeneratorTarget* gt,
+                                    cmSourceFile const* source,
+                                    std::string const& objectRel)
+{
+  if (source) {
+    if (cmValue value = source->GetProperty("Swift_DEPENDENCIES_FILE")) {
+      return ReprobuildOutputPath(binaryDir, gt->Makefile->GetCurrentBinaryDirectory(), *value);
+    }
+  }
+  return cmStrCat(objectRel, ".swiftdeps");
+}
+
+std::string ReprobuildSwiftDiagnosticsPath(std::string const& binaryDir,
+                                           cmGeneratorTarget* gt,
+                                           cmSourceFile const* source,
+                                           std::string const& objectRel)
+{
+  if (source) {
+    if (cmValue value = source->GetProperty("Swift_DIAGNOSTICS_FILE")) {
+      return ReprobuildOutputPath(binaryDir, gt->Makefile->GetCurrentBinaryDirectory(), *value);
+    }
+  }
+  return cmStrCat(objectRel, ".dia");
+}
+
+bool ReprobuildWriteSwiftOutputMap(
+  std::string const& path, std::string const& binaryDir,
+  cmGeneratorTarget* gt,
+  std::vector<cmSourceFile const*> const& swiftSources,
+  std::vector<std::string> const& objectRels, std::string const& config)
+{
+  cmSystemTools::MakeDirectory(cmSystemTools::GetFilenamePath(path));
+  cmsys::ofstream out(path.c_str());
+  if (!out) {
+    return false;
+  }
+  std::string targetDepsPath;
+  if (cmValue value = gt->GetProperty("Swift_DEPENDENCIES_FILE")) {
+    targetDepsPath =
+      ReprobuildOutputPath(binaryDir, gt->Makefile->GetCurrentBinaryDirectory(), *value);
+  } else {
+    std::string const suffix = config.empty() ? std::string() : cmStrCat("/", config);
+    targetDepsPath = ReprobuildRelativeTo(
+      binaryDir,
+      cmStrCat(gt->GetSupportDirectory(), suffix, "/", gt->GetName(),
+               ".swiftdeps"));
+  }
+  out << "{\n"
+      << "  \"\": {\n"
+      << "    \"swift-dependencies\": "
+      << ReprobuildJsonEscape(targetDepsPath) << "\n"
+      << "  }";
+  for (std::size_t i = 0; i < swiftSources.size(); ++i) {
+    std::string const& objectRel = objectRels[i];
+    std::string const depRel = cmStrCat(objectRel, ".d");
+    out << ",\n  " << ReprobuildJsonEscape(swiftSources[i]->GetFullPath())
+        << ": {\n"
+        << "    \"object\": " << ReprobuildJsonEscape(objectRel) << ",\n"
+        << "    \"dependencies\": " << ReprobuildJsonEscape(depRel)
+        << ",\n"
+        << "    \"swift-dependencies\": "
+        << ReprobuildJsonEscape(ReprobuildSwiftDepsPath(
+             binaryDir, gt, swiftSources[i], objectRel))
+        << ",\n"
+        << "    \"diagnostics\": "
+        << ReprobuildJsonEscape(ReprobuildSwiftDiagnosticsPath(
+             binaryDir, gt, swiftSources[i], objectRel))
+        << "\n"
+        << "  }";
+  }
+  out << "\n}\n";
+  return true;
 }
 
 std::vector<std::string> ReprobuildEvaluateCleanFiles(cmLocalGenerator* lg,
@@ -794,14 +941,69 @@ void cmGlobalReprobuildGenerator::EnableLanguage(
 
   for (std::string const& lang : languages) {
     if (lang != "NONE" && lang != "C" && lang != "CXX" &&
-        lang != "Fortran") {
+        lang != "Fortran" && lang != "CUDA" && lang != "ISPC" &&
+        lang != "Swift") {
       mf->IssueMessage(
         MessageType::FATAL_ERROR,
-        cmStrCat("The Reprobuild generator M6 slice supports only the C, "
-                 "CXX, and Fortran languages; language '",
+        cmStrCat("The Reprobuild generator supports only the C, CXX, "
+                 "Fortran, CUDA, ISPC, and Swift languages; language '",
                  lang, "' is not supported."));
       cmSystemTools::SetFatalErrorOccurred();
       return;
+    }
+    if (lang == "CUDA") {
+      if (mf->GetSafeDefinition("CMAKE_REPROBUILD_CUDA_PROFILE") ==
+          "ClangFatbinary") {
+        std::string const compiler =
+          mf->GetSafeDefinition("CMAKE_CUDA_COMPILER");
+        if (compiler.empty() ||
+            cmSystemTools::GetFilenameName(compiler).find("clang") ==
+              std::string::npos) {
+          mf->IssueMessage(MessageType::FATAL_ERROR,
+                           "Reprobuild profile unavailable: Clang CUDA "
+                           "fatbinary and registration-stub profile requires "
+                           "an explicit Clang CUDA compiler.");
+          cmSystemTools::SetFatalErrorOccurred();
+          return;
+        }
+      }
+      std::string compiler = mf->GetSafeDefinition("CMAKE_CUDA_COMPILER");
+      if (compiler.empty()) {
+        compiler = cmSystemTools::FindProgram("nvcc");
+      }
+      if (compiler.empty()) {
+        mf->IssueMessage(MessageType::FATAL_ERROR,
+                         "Reprobuild profile unavailable: CUDA compiler "
+                         "and device-link toolchain were not found.");
+        cmSystemTools::SetFatalErrorOccurred();
+        return;
+      }
+    }
+    if (lang == "ISPC") {
+      std::string compiler = mf->GetSafeDefinition("CMAKE_ISPC_COMPILER");
+      if (compiler.empty()) {
+        compiler = cmSystemTools::FindProgram("ispc");
+      }
+      if (compiler.empty()) {
+        mf->IssueMessage(MessageType::FATAL_ERROR,
+                         "Reprobuild profile unavailable: ISPC compiler "
+                         "was not found.");
+        cmSystemTools::SetFatalErrorOccurred();
+        return;
+      }
+    }
+    if (lang == "Swift") {
+      std::string compiler = mf->GetSafeDefinition("CMAKE_Swift_COMPILER");
+      if (compiler.empty()) {
+        compiler = cmSystemTools::FindProgram("swiftc");
+      }
+      if (compiler.empty()) {
+        mf->IssueMessage(MessageType::FATAL_ERROR,
+                         "Reprobuild profile unavailable: Swift compiler "
+                         "was not found.");
+        cmSystemTools::SetFatalErrorOccurred();
+        return;
+      }
     }
   }
 
@@ -966,6 +1168,12 @@ void cmGlobalReprobuildGenerator::WriteProviderMetadata()
   bool sawImportLibraryOutput = false;
   bool sawLinkDepfile = false;
   bool sawSymlinkOutput = false;
+  bool sawCudaDeviceLink = false;
+  bool sawCudaClangFatbinary = false;
+  bool sawISPCMultiOutput = false;
+  bool sawSwiftOutputMap = false;
+  bool sawSwiftSplit = false;
+  bool sawAppleBundle = false;
   bool const multiConfig = this->IsMultiConfig();
   cmMakefile* rootMf = this->LocalGenerators.front()->GetMakefile();
   std::vector<std::string> configs;
@@ -1272,16 +1480,30 @@ void cmGlobalReprobuildGenerator::WriteProviderMetadata()
         continue;
       }
 
-      if (gt->IsAppBundleOnApple() || gt->IsFrameworkOnApple() ||
-          gt->IsCFBundleOnApple() || gt->IsArchivedAIXSharedLibrary()) {
+      if (!lg->GetMakefile()->IsOn("APPLE") &&
+          (gt->GetPropertyAsBool("MACOSX_BUNDLE") ||
+           gt->GetPropertyAsBool("FRAMEWORK") ||
+           gt->GetPropertyAsBool("BUNDLE"))) {
         this->GetCMakeInstance()->IssueMessage(
           MessageType::FATAL_ERROR,
-          cmStrCat("The Reprobuild generator M4 slice does not support bundle, "
-                   "framework, or archived AIX shared-library targets yet; "
-                   "target '",
-                   gt->GetName(), "' has unsupported type ",
-                   cmState::GetTargetTypeName(type), "."));
+          cmStrCat("Reprobuild profile unavailable: Apple bundle, framework, "
+                   "or CFBundle target '",
+                   gt->GetName(), "' requires an Apple platform."));
         return;
+      }
+
+      if (gt->IsAppBundleOnApple() || gt->IsFrameworkOnApple() ||
+          gt->IsCFBundleOnApple() || gt->IsArchivedAIXSharedLibrary()) {
+        if (gt->IsArchivedAIXSharedLibrary()) {
+          this->GetCMakeInstance()->IssueMessage(
+            MessageType::FATAL_ERROR,
+            cmStrCat("Reprobuild profile unavailable: archived AIX shared "
+                     "libraries are not supported by the current target "
+                     "profile; target '",
+                     gt->GetName(), "' has type ",
+                     cmState::GetTargetTypeName(type), "."));
+          return;
+        }
       }
 
       ReprobuildTarget target;
@@ -1415,6 +1637,72 @@ void cmGlobalReprobuildGenerator::WriteProviderMetadata()
         ++customIndex;
       }
 
+      if (gt->IsBundleOnApple()) {
+        sawAppleBundle = true;
+        std::vector<cmSourceFile const*> macContentSources;
+        std::vector<cmSourceFile const*> headerSources;
+        gt->GetHeaderSources(headerSources, config);
+        cm::append(macContentSources, headerSources);
+        std::vector<cmSourceFile const*> extraSources;
+        gt->GetExtraSources(extraSources, config);
+        cm::append(macContentSources, extraSources);
+        unsigned int macContentIndex = 0;
+        for (cmSourceFile const* macSource : macContentSources) {
+          cmGeneratorTarget::SourceFileFlags flags =
+            gt->GetTargetSourceFileFlags(macSource);
+          if (flags.Type == cmGeneratorTarget::SourceFileTypeNormal ||
+              flags.MacFolder == nullptr || *flags.MacFolder == '\0') {
+            continue;
+          }
+          std::string const macDir = cmStrCat(
+            gt->GetMacContentDirectory(
+              config, cmStateEnums::RuntimeBinaryArtifact),
+            "/", flags.MacFolder);
+          std::string const outputFull =
+            cmStrCat(macDir, "/",
+                     cmSystemTools::GetFilenameName(macSource->GetFullPath()));
+          std::string const outputRel =
+            ReprobuildConfigFullPath(binaryDir, outputFull, config,
+                                     multiConfig);
+          ReprobuildAction content;
+          content.Id =
+            ReprobuildSafeId(cmStrCat("bundle-content-", gt->GetName(), "-",
+                                      macContentIndex++, configSuffix));
+          content.Var =
+            ReprobuildNimIdent("action", nextActionVar++, content.Id);
+          content.ToolId =
+            ReprobuildSafeId(cmStrCat("reprobuild-cmake-", content.Var));
+          content.Inputs = { macSource->GetFullPath() };
+          content.Cacheable = declareOutputs;
+          if (declareOutputs) {
+            content.Outputs = { outputRel };
+          }
+          std::vector<std::string> lines;
+          lines.push_back(cmStrCat(
+            ReprobuildShellSingleQuote(cmSystemTools::GetCMakeCommand()),
+            " -E make_directory ", ReprobuildShellSingleQuote(macDir)));
+          lines.push_back(cmStrCat(
+            ReprobuildShellSingleQuote(cmSystemTools::GetCMakeCommand()),
+            cmSystemTools::FileIsDirectory(macSource->GetFullPath())
+              ? " -E copy_directory "
+              : " -E copy ",
+            ReprobuildShellSingleQuote(macSource->GetFullPath()), " ",
+            ReprobuildShellSingleQuote(outputFull)));
+          std::string const wrapperPath =
+            cmStrCat(wrapperDir, "/", content.ToolId);
+          if (!ReprobuildWriteCommandScript(wrapperPath, binaryDir, lines)) {
+            this->GetCMakeInstance()->IssueMessage(
+              MessageType::FATAL_ERROR,
+              cmStrCat("Could not write Reprobuild bundle content wrapper: ",
+                       wrapperPath));
+            return;
+          }
+          usedTools.insert(content.ToolId);
+          ReprobuildAppendCleanFile(cleanFiles, binaryDir, outputRel);
+          target.CustomActions.push_back(std::move(content));
+        }
+      }
+
       std::vector<cmSourceFile const*> sources;
       gt->GetObjectSources(sources, config);
       if (sources.empty()) {
@@ -1427,7 +1715,11 @@ void cmGlobalReprobuildGenerator::WriteProviderMetadata()
       }
 
       std::map<std::string, std::string> pchActionIds;
+      bool targetHasCudaSources = false;
       for (cmSourceFile const* source : sources) {
+        if (source->GetLanguage() == "CUDA") {
+          targetHasCudaSources = true;
+        }
         if (!source->IsPchSource()) {
           continue;
         }
@@ -1447,13 +1739,175 @@ void cmGlobalReprobuildGenerator::WriteProviderMetadata()
       std::map<std::string, std::map<std::string, cmSourceFile const*>>
         dyndepCxxModuleSources;
       std::vector<std::string> linkObjects;
+      std::vector<cmSourceFile const*> swiftSources;
+      std::vector<std::string> swiftObjectRels;
       for (cmSourceFile const* source : sources) {
-        std::string const lang = source->GetLanguage();
-        if (lang != "C" && lang != "CXX" && lang != "Fortran") {
+        if (source->GetLanguage() != "Swift") {
+          continue;
+        }
+        std::string const objFull =
+          cmStrCat(gt->GetObjectDirectory(config), gt->GetObjectName(source));
+        std::string const objRel =
+          ReprobuildConfigFullPath(binaryDir, objFull, config, multiConfig);
+        swiftSources.push_back(source);
+        swiftObjectRels.push_back(objRel);
+        linkObjects.push_back(objRel);
+        ReprobuildAppendCleanFile(cleanFiles, binaryDir, objRel);
+        ReprobuildAppendCleanFile(cleanFiles, binaryDir, cmStrCat(objRel, ".d"));
+        ReprobuildAppendCleanFile(
+          cleanFiles, binaryDir,
+          ReprobuildSwiftDepsPath(binaryDir, gt, source, objRel));
+        ReprobuildAppendCleanFile(
+          cleanFiles, binaryDir,
+          ReprobuildSwiftDiagnosticsPath(binaryDir, gt, source, objRel));
+        cmSystemTools::MakeDirectory(
+          cmSystemTools::GetFilenamePath(cmStrCat(binaryDir, "/", objRel)));
+      }
+      if (!swiftSources.empty()) {
+        cmMakefile const* mf = lg->GetMakefile();
+        usedLanguages.insert("Swift");
+        std::vector<std::string> swiftArgs;
+        ReprobuildAppendCommonCompileArgs(swiftArgs, lg.get(), gt, config,
+                                          "Swift");
+        if (gt->GetType() != cmStateEnums::EXECUTABLE) {
+          swiftArgs.push_back("-parse-as-library");
+        }
+        swiftArgs.push_back("-module-name");
+        swiftArgs.push_back(gt->GetSwiftModuleName());
+        cm::optional<cmSwiftCompileMode> swiftMode =
+          lg->GetSwiftCompileMode(gt, config);
+        bool const splitSwift = swiftMode.has_value();
+        if (swiftMode) {
+          std::string const mode = ReprobuildSwiftCompileModeName(*swiftMode);
+          if (mode == "wholemodule") {
+            swiftArgs.push_back("-whole-module-optimization");
+          } else if (mode == "incremental") {
+            swiftArgs.push_back("-incremental");
+          } else if (mode == "singlefile") {
+            swiftArgs.push_back("-driver-use-frontend-path");
+            swiftArgs.push_back(mf->GetSafeDefinition("CMAKE_Swift_COMPILER"));
+          }
+        }
+        std::string const ofmRel =
+          ReprobuildSwiftOutputMapPath(binaryDir, gt, config, multiConfig);
+        std::string const ofmFull = cmStrCat(binaryDir, "/", ofmRel);
+        if (!ReprobuildWriteSwiftOutputMap(ofmFull, binaryDir, gt,
+                                           swiftSources, swiftObjectRels,
+                                           config)) {
           this->GetCMakeInstance()->IssueMessage(
             MessageType::FATAL_ERROR,
-            cmStrCat("The Reprobuild generator M6 slice supports only C, "
-                     "CXX, and Fortran object sources; source '",
+            cmStrCat("Could not write Reprobuild Swift output map: ",
+                     ofmFull));
+          return;
+        }
+        sawSwiftOutputMap = true;
+        ReprobuildAppendCleanFile(cleanFiles, binaryDir, ofmRel);
+        swiftArgs.push_back("-output-file-map");
+        swiftArgs.push_back(ofmRel);
+        swiftArgs.push_back("-emit-dependencies");
+        swiftArgs.push_back("-serialize-diagnostics");
+        swiftArgs.push_back("-c");
+        for (cmSourceFile const* swiftSource : swiftSources) {
+          swiftArgs.push_back(swiftSource->GetFullPath());
+        }
+
+        bool const emitModuleSeparately =
+          splitSwift &&
+          gt->GetProperty("Swift_SEPARATE_MODULE_EMISSION").IsOn();
+        std::string const swiftModuleRel =
+          ReprobuildConfigFullPath(binaryDir, gt->GetSwiftModulePath(config),
+                                   config, multiConfig);
+        if (!swiftModuleRel.empty()) {
+          ReprobuildAppendCleanFile(cleanFiles, binaryDir, swiftModuleRel);
+        }
+        std::string emitModuleActionId;
+        if (emitModuleSeparately && !swiftModuleRel.empty()) {
+          sawSwiftSplit = true;
+          ReprobuildAction emitModule;
+          emitModule.Id =
+            ReprobuildSafeId(cmStrCat("emit-module-", gt->GetName(),
+                                      configSuffix));
+          emitModule.Var =
+            ReprobuildNimIdent("action", nextActionVar++, emitModule.Id);
+          emitModule.ToolId = ReprobuildToolId("Swift");
+          usedTools.insert(emitModule.ToolId);
+          emitModule.Args = swiftArgs;
+          emitModule.Args.insert(emitModule.Args.begin(), "-emit-module");
+          emitModule.Args.push_back("-emit-module-path");
+          emitModule.Args.push_back(swiftModuleRel);
+          for (cmSourceFile const* swiftSource : swiftSources) {
+            emitModule.Inputs.push_back(swiftSource->GetFullPath());
+          }
+          emitModule.Inputs.push_back(ofmRel);
+          if (declareOutputs) {
+            emitModule.Outputs = { swiftModuleRel };
+          } else {
+            emitModule.Cacheable = false;
+          }
+          emitModule.CompileDirectory = binaryDir;
+          emitModule.CompileFile = swiftSources.front()->GetFullPath();
+          emitModule.CompileCommand =
+            cmStrCat(mf->GetSafeDefinition(ReprobuildCompilerVar("Swift")),
+                     " ", cmJoin(emitModule.Args, " "));
+          emitModuleActionId = emitModule.Id;
+          target.CustomActions.push_back(std::move(emitModule));
+        } else if (!swiftModuleRel.empty()) {
+          swiftArgs.push_back("-emit-module");
+          swiftArgs.push_back("-emit-module-path");
+          swiftArgs.push_back(swiftModuleRel);
+        }
+
+        ReprobuildAction swiftCompile;
+        swiftCompile.Id =
+          ReprobuildSafeId(cmStrCat("compile-", gt->GetName(), "-Swift",
+                                    configSuffix));
+        swiftCompile.Var =
+          ReprobuildNimIdent("action", nextActionVar++, swiftCompile.Id);
+        swiftCompile.ToolId = ReprobuildToolId("Swift");
+        usedTools.insert(swiftCompile.ToolId);
+        swiftCompile.Args = swiftArgs;
+        for (cmSourceFile const* swiftSource : swiftSources) {
+          swiftCompile.Inputs.push_back(swiftSource->GetFullPath());
+        }
+        swiftCompile.Inputs.push_back(ofmRel);
+        if (!emitModuleActionId.empty()) {
+          swiftCompile.Deps.push_back(emitModuleActionId);
+        }
+        if (declareOutputs) {
+          swiftCompile.Outputs = swiftObjectRels;
+          for (std::size_t i = 0; i < swiftSources.size(); ++i) {
+            swiftCompile.Outputs.push_back(cmStrCat(swiftObjectRels[i], ".d"));
+            swiftCompile.Outputs.push_back(ReprobuildSwiftDepsPath(
+              binaryDir, gt, swiftSources[i], swiftObjectRels[i]));
+            swiftCompile.Outputs.push_back(ReprobuildSwiftDiagnosticsPath(
+              binaryDir, gt, swiftSources[i], swiftObjectRels[i]));
+          }
+          if (!emitModuleSeparately && !swiftModuleRel.empty()) {
+            swiftCompile.Outputs.push_back(swiftModuleRel);
+          }
+        } else {
+          swiftCompile.Cacheable = false;
+        }
+        swiftCompile.Pool =
+          ReprobuildPoolProperty(gt, nullptr, "JOB_POOL_COMPILE", "");
+        swiftCompile.CompileDirectory = binaryDir;
+        swiftCompile.CompileFile = swiftSources.front()->GetFullPath();
+        swiftCompile.CompileCommand =
+          cmStrCat(mf->GetSafeDefinition(ReprobuildCompilerVar("Swift")), " ",
+                   cmJoin(swiftCompile.Args, " "));
+        target.CompileActions.push_back(std::move(swiftCompile));
+      }
+      for (cmSourceFile const* source : sources) {
+        std::string const lang = source->GetLanguage();
+        if (lang == "Swift") {
+          continue;
+        }
+        if (lang != "C" && lang != "CXX" && lang != "Fortran" &&
+            lang != "CUDA" && lang != "ISPC") {
+          this->GetCMakeInstance()->IssueMessage(
+            MessageType::FATAL_ERROR,
+            cmStrCat("The Reprobuild generator supports only C, CXX, "
+                     "Fortran, CUDA, ISPC, and Swift object sources; source '",
                      source->GetFullPath(), "' uses language '", lang, "'."));
           return;
         }
@@ -1489,6 +1943,40 @@ void cmGlobalReprobuildGenerator::WriteProviderMetadata()
         }
         ReprobuildAppendCleanFile(cleanFiles, binaryDir, objRel);
         ReprobuildAppendCleanFile(cleanFiles, binaryDir, depRel);
+        std::vector<std::string> languageByproducts;
+        if (lang == "ISPC") {
+          std::string ispcSource =
+            cmSystemTools::GetFilenameWithoutLastExtension(
+              gt->GetObjectName(source));
+          ispcSource =
+            cmSystemTools::GetFilenameWithoutLastExtension(ispcSource);
+          std::string headerDir = gt->GetObjectDirectory(config);
+          if (cmValue prop = gt->GetProperty("ISPC_HEADER_DIRECTORY")) {
+            headerDir = cmStrCat(lg->GetCurrentBinaryDirectory(), "/", *prop);
+          }
+          std::string const headerSuffix =
+            gt->GetSafeProperty("ISPC_HEADER_SUFFIX");
+          std::string const headerRel = ReprobuildConfigFullPath(
+            binaryDir, cmStrCat(headerDir, "/", ispcSource, headerSuffix),
+            config, multiConfig);
+          languageByproducts.push_back(headerRel);
+          ReprobuildAppendCleanFile(cleanFiles, binaryDir, headerRel);
+          std::vector<std::string> suffixes =
+            detail::ComputeISPCObjectSuffixes(gt);
+          std::vector<std::string> extraObjects =
+            detail::ComputeISPCExtraObjects(gt->GetObjectName(source),
+                                            gt->GetObjectDirectory(config),
+                                            suffixes);
+          for (std::string const& extraObject : extraObjects) {
+            std::string const extraRel =
+              ReprobuildConfigFullPath(binaryDir, extraObject, config,
+                                       multiConfig);
+            languageByproducts.push_back(extraRel);
+            ReprobuildAppendUnique(linkObjects, extraRel);
+            ReprobuildAppendCleanFile(cleanFiles, binaryDir, extraRel);
+            sawISPCMultiOutput = true;
+          }
+        }
         cmSystemTools::MakeDirectory(
           cmSystemTools::GetFilenamePath(cmStrCat(binaryDir, "/", objRel)));
         std::string sourcePath = source->GetFullPath();
@@ -1602,7 +2090,26 @@ void cmGlobalReprobuildGenerator::WriteProviderMetadata()
           args.push_back(objRel);
           args.push_back("-c");
           args.push_back(ppRel);
+        } else if (lang == "ISPC") {
+          args.push_back("-M");
+          args.push_back("-MT");
+          args.push_back(objRel);
+          args.push_back("-MF");
+          args.push_back(depRel);
+          args.push_back("-o");
+          args.push_back(objRel);
+          args.push_back("--emit-obj");
+          args.push_back(sourceArg);
+          if (!languageByproducts.empty()) {
+            args.push_back("-h");
+            args.push_back(languageByproducts.front());
+          }
         } else {
+          if (lang == "CUDA" &&
+              gt->GetPropertyAsBool("CUDA_SEPARABLE_COMPILATION")) {
+            ReprobuildAppendParsed(
+              args, mf->GetSafeDefinition("_CMAKE_CUDA_RDC_FLAG"));
+          }
           bool const needCxxDyndep =
             lang == "CXX" && gt->NeedDyndepForSource(lang, config, source);
           if (needCxxDyndep) {
@@ -1724,6 +2231,7 @@ void cmGlobalReprobuildGenerator::WriteProviderMetadata()
         }
         if (declareOutputs) {
           action.Outputs = { objRel };
+          cm::append(action.Outputs, languageByproducts);
         } else {
           action.Cacheable = false;
           for (ReprobuildAction const& custom : target.CustomActions) {
@@ -2000,6 +2508,240 @@ void cmGlobalReprobuildGenerator::WriteProviderMetadata()
                                     compile.Outputs.end());
       }
 
+      std::vector<std::string> cudaDeviceLinkActionIds;
+      if (targetHasCudaSources &&
+          (gt->GetPropertyAsBool("CUDA_SEPARABLE_COMPILATION") ||
+           gt->GetPropertyAsBool("CUDA_RESOLVE_DEVICE_SYMBOLS")) &&
+          type != cmStateEnums::OBJECT_LIBRARY) {
+        cmMakefile const* mf = lg->GetMakefile();
+        if (mf->GetSafeDefinition("CMAKE_REPROBUILD_CUDA_PROFILE") ==
+              "ClangFatbinary" &&
+            mf->GetSafeDefinition("CMAKE_CUDA_COMPILER_ID") != "Clang" &&
+            mf->GetSafeDefinition("CMAKE_CUDA_COMPILER_ID") != "AppleClang") {
+          this->GetCMakeInstance()->IssueMessage(
+            MessageType::FATAL_ERROR,
+            "Reprobuild profile unavailable: Clang CUDA fatbinary and "
+            "registration-stub profile requires a Clang CUDA compiler.");
+          return;
+        }
+        std::string const deviceObjRel = ReprobuildConfigFullPath(
+          binaryDir,
+          cmStrCat(gt->GetObjectDirectory(config),
+                   "cmake_device_link", mf->GetSafeDefinition(
+                                          "CMAKE_CUDA_OUTPUT_EXTENSION")),
+          config, multiConfig);
+        ReprobuildAction deviceLink;
+        deviceLink.Id =
+          ReprobuildSafeId(cmStrCat("device-link-", gt->GetName(),
+                                    configSuffix));
+        deviceLink.Var =
+          ReprobuildNimIdent("action", nextActionVar++, deviceLink.Id);
+        deviceLink.ToolId = ReprobuildToolId("CUDA");
+        usedTools.insert(deviceLink.ToolId);
+        std::string const cudaCompilerId =
+          mf->GetSafeDefinition("CMAKE_CUDA_COMPILER_ID");
+        if (cudaCompilerId == "Clang" || cudaCompilerId == "AppleClang") {
+          std::string architecturesStr =
+            gt->GetSafeProperty("CUDA_ARCHITECTURES");
+          if (cmIsOff(architecturesStr)) {
+            this->GetCMakeInstance()->IssueMessage(
+              MessageType::FATAL_ERROR,
+              "CUDA_SEPARABLE_COMPILATION on Clang requires "
+              "CUDA_ARCHITECTURES to be set.");
+            return;
+          }
+          cmList architectures{ architecturesStr };
+          if (architectures.empty()) {
+            this->GetCMakeInstance()->IssueMessage(
+              MessageType::FATAL_ERROR,
+              "Reprobuild profile unavailable: Clang CUDA fatbinary and "
+              "registration-stub flow requires CUDA_ARCHITECTURES.");
+            return;
+          }
+          std::string const cudaDeviceLinker =
+            mf->GetSafeDefinition("CMAKE_CUDA_DEVICE_LINKER");
+          std::string const cudaFatbinary =
+            mf->GetSafeDefinition("CMAKE_CUDA_FATBINARY");
+          if (cudaDeviceLinker.empty() || cudaFatbinary.empty()) {
+            this->GetCMakeInstance()->IssueMessage(
+              MessageType::FATAL_ERROR,
+              "Reprobuild profile unavailable: Clang CUDA fatbinary and "
+              "registration-stub tools were not found.");
+            return;
+          }
+          std::string const dlinkToolId =
+            ReprobuildSafeId("reprobuild-cmake-cuda-device-linker");
+          std::string const fatbinaryToolId =
+            ReprobuildSafeId("reprobuild-cmake-cuda-fatbinary");
+          if (!ReprobuildWriteWrapper(cmStrCat(wrapperDir, "/", dlinkToolId),
+                                      cudaDeviceLinker) ||
+              !ReprobuildWriteWrapper(
+                cmStrCat(wrapperDir, "/", fatbinaryToolId), cudaFatbinary)) {
+            this->GetCMakeInstance()->IssueMessage(
+              MessageType::FATAL_ERROR,
+              "Could not write Reprobuild Clang CUDA tool wrappers.");
+            return;
+          }
+          usedTools.insert(dlinkToolId);
+          usedTools.insert(fatbinaryToolId);
+
+          std::string const registerRel = ReprobuildConfigFullPath(
+            binaryDir,
+            cmStrCat(gt->GetObjectDirectory(config),
+                     "cmake_cuda_register.h"),
+            config, multiConfig);
+          std::string const fatbinRel = ReprobuildConfigFullPath(
+            binaryDir,
+            cmStrCat(gt->GetObjectDirectory(config), "cmake_cuda_fatbin.h"),
+            config, multiConfig);
+          std::vector<std::string> cubinRels;
+          std::vector<std::string> cubinActionIds;
+          for (std::string const& architectureKind : architectures) {
+            std::string const architecture =
+              architectureKind.substr(0, architectureKind.find('-'));
+            std::string const cubinRel = ReprobuildConfigFullPath(
+              binaryDir,
+              cmStrCat(gt->GetObjectDirectory(config), "sm_", architecture,
+                       ".cubin"),
+              config, multiConfig);
+            ReprobuildAction cubinLink;
+            cubinLink.Id = ReprobuildSafeId(
+              cmStrCat("cuda-device-link-", gt->GetName(), "-sm-",
+                       architecture, configSuffix));
+            cubinLink.Var =
+              ReprobuildNimIdent("action", nextActionVar++, cubinLink.Id);
+            cubinLink.ToolId = dlinkToolId;
+            cubinLink.Args = { cmStrCat("-arch=sm_", architecture) };
+            if (cubinRels.empty()) {
+              cubinLink.Args.push_back(
+                cmStrCat("--register-link-binaries=", registerRel));
+            }
+            cubinLink.Args.push_back("-o");
+            cubinLink.Args.push_back(cubinRel);
+            cm::append(cubinLink.Args, linkObjects);
+            cubinLink.Inputs = linkObjects;
+            for (ReprobuildAction const& compile : target.CompileActions) {
+              ReprobuildAppendUnique(cubinLink.Deps, compile.Id);
+            }
+            if (declareOutputs) {
+              cubinLink.Outputs = { cubinRel };
+              if (cubinRels.empty()) {
+                cubinLink.Outputs.push_back(registerRel);
+              }
+            } else {
+              cubinLink.Cacheable = false;
+            }
+            ReprobuildAppendCleanFile(cleanFiles, binaryDir, cubinRel);
+            if (cubinRels.empty()) {
+              ReprobuildAppendCleanFile(cleanFiles, binaryDir, registerRel);
+            }
+            cubinRels.push_back(cubinRel);
+            cubinActionIds.push_back(cubinLink.Id);
+            target.CustomActions.push_back(std::move(cubinLink));
+          }
+
+          ReprobuildAction fatbinary;
+          fatbinary.Id =
+            ReprobuildSafeId(cmStrCat("cuda-fatbinary-", gt->GetName(),
+                                      configSuffix));
+          fatbinary.Var =
+            ReprobuildNimIdent("action", nextActionVar++, fatbinary.Id);
+          fatbinary.ToolId = fatbinaryToolId;
+          fatbinary.Args = { "-64", "-cmdline=--compile-only",
+                             "-compress-all", "-link",
+                             cmStrCat("--embedded-fatbin=", fatbinRel) };
+          for (std::size_t i = 0; i < cubinRels.size(); ++i) {
+            std::string const architecture =
+              architectures[i].substr(0, architectures[i].find('-'));
+            fatbinary.Args.push_back(
+              cmStrCat("-im=profile=sm_", architecture, ",file=",
+                       cubinRels[i]));
+            fatbinary.Inputs.push_back(cubinRels[i]);
+            fatbinary.Deps.push_back(cubinActionIds[i]);
+          }
+          if (declareOutputs) {
+            fatbinary.Outputs = { fatbinRel };
+          } else {
+            fatbinary.Cacheable = false;
+          }
+          ReprobuildAppendCleanFile(cleanFiles, binaryDir, fatbinRel);
+          std::string const fatbinaryActionId = fatbinary.Id;
+          target.CustomActions.push_back(std::move(fatbinary));
+
+          ReprobuildAction stubCompile;
+          stubCompile.Id =
+            ReprobuildSafeId(cmStrCat("cuda-registration-stub-",
+                                      gt->GetName(), configSuffix));
+          stubCompile.Var =
+            ReprobuildNimIdent("action", nextActionVar++, stubCompile.Id);
+          stubCompile.ToolId = ReprobuildToolId("CUDA");
+          usedTools.insert(stubCompile.ToolId);
+          ReprobuildAppendCommonCompileArgs(stubCompile.Args, lg.get(), gt,
+                                            config, "CUDA");
+          cmLinkLineDeviceComputer deviceLinkComputer(
+            lg.get(), lg->GetStateSnapshot().GetDirectory());
+          std::string linkLibs;
+          std::string linkFlags;
+          std::string frameworkPath;
+          std::string linkPath;
+          lg->GetDeviceLinkFlags(deviceLinkComputer, config, linkLibs,
+                                 linkFlags, frameworkPath, linkPath, gt);
+          ReprobuildAppendParsed(stubCompile.Args, linkFlags);
+          stubCompile.Args.push_back(
+            "-D__CUDA_INCLUDE_COMPILER_INTERNAL_HEADERS__");
+          stubCompile.Args.push_back("-D__NV_EXTRA_INITIALIZATION=\"\"");
+          stubCompile.Args.push_back("-D__NV_EXTRA_FINALIZATION=\"\"");
+          stubCompile.Args.push_back(cmStrCat(
+            "-DREGISTERLINKBINARYFILE=\\\"", registerRel, "\\\""));
+          stubCompile.Args.push_back(
+            cmStrCat("-DFATBINFILE=\\\"", fatbinRel, "\\\""));
+          ReprobuildAppendParsed(
+            stubCompile.Args,
+            mf->GetSafeDefinition("_CMAKE_COMPILE_AS_CUDA_FLAG"));
+          std::string const linkStub =
+            cmStrCat(mf->GetSafeDefinition(
+                       "CMAKE_CUDA_COMPILER_TOOLKIT_LIBRARY_ROOT"),
+                     "/bin/crt/link.stub");
+          stubCompile.Args.push_back("-c");
+          stubCompile.Args.push_back(linkStub);
+          stubCompile.Args.push_back("-o");
+          stubCompile.Args.push_back(deviceObjRel);
+          stubCompile.Inputs = { fatbinRel, registerRel, linkStub };
+          stubCompile.Deps = { fatbinaryActionId };
+          if (declareOutputs) {
+            stubCompile.Outputs = { deviceObjRel };
+          } else {
+            stubCompile.Cacheable = false;
+          }
+          ReprobuildAppendCleanFile(cleanFiles, binaryDir, deviceObjRel);
+          cudaDeviceLinkActionIds.push_back(stubCompile.Id);
+          target.CustomActions.push_back(std::move(stubCompile));
+          ReprobuildAppendUnique(linkObjects, deviceObjRel);
+          sawCudaDeviceLink = true;
+          sawCudaClangFatbinary = true;
+          continue;
+        } else {
+          deviceLink.Args.push_back("-dlink");
+        }
+        deviceLink.Args.push_back("-o");
+        deviceLink.Args.push_back(deviceObjRel);
+        cm::append(deviceLink.Args, linkObjects);
+        deviceLink.Inputs = linkObjects;
+        for (ReprobuildAction const& compile : target.CompileActions) {
+          ReprobuildAppendUnique(deviceLink.Deps, compile.Id);
+        }
+        if (declareOutputs) {
+          deviceLink.Outputs = { deviceObjRel };
+        } else {
+          deviceLink.Cacheable = false;
+        }
+        ReprobuildAppendCleanFile(cleanFiles, binaryDir, deviceObjRel);
+        cudaDeviceLinkActionIds.push_back(deviceLink.Id);
+        target.CustomActions.push_back(std::move(deviceLink));
+        ReprobuildAppendUnique(linkObjects, deviceObjRel);
+        sawCudaDeviceLink = true;
+      }
+
       if (type == cmStateEnums::OBJECT_LIBRARY) {
         buildTargets.push_back(std::move(target));
         continue;
@@ -2019,6 +2761,9 @@ void cmGlobalReprobuildGenerator::WriteProviderMetadata()
                                                       "JOB_POOL_LINK", "");
       for (ReprobuildAction const& compile : target.CompileActions) {
         ReprobuildAppendUnique(target.LinkAction.Deps, compile.Id);
+      }
+      for (std::string const& deviceLinkAction : cudaDeviceLinkActionIds) {
+        ReprobuildAppendUnique(target.LinkAction.Deps, deviceLinkAction);
       }
       for (ReprobuildAction& preLink : target.PreLinkActions) {
         for (ReprobuildAction const& compile : target.CompileActions) {
@@ -2112,6 +2857,34 @@ void cmGlobalReprobuildGenerator::WriteProviderMetadata()
         config, multiConfig);
       ReprobuildAppendCleanFile(cleanFiles, binaryDir, output);
       ReprobuildAppendCleanFile(cleanFiles, binaryDir, realOutput);
+      if (gt->IsBundleOnApple()) {
+        std::string plistFull;
+        if (gt->IsAppBundleOnApple()) {
+          plistFull = cmStrCat(
+            gt->GetDirectory(config), "/",
+            gt->GetAppBundleDirectory(config,
+                                      cmGeneratorTarget::ContentLevel),
+            "/Info.plist");
+        } else if (gt->IsFrameworkOnApple()) {
+          plistFull = cmStrCat(
+            gt->GetDirectory(config), "/",
+            gt->GetFrameworkDirectory(config,
+                                      cmGeneratorTarget::FullLevel),
+            "/Resources/Info.plist");
+        } else if (gt->IsCFBundleOnApple()) {
+          plistFull = cmStrCat(
+            gt->GetDirectory(config), "/",
+            gt->GetCFBundleDirectory(config,
+                                     cmGeneratorTarget::ContentLevel),
+            "/Info.plist");
+        }
+        if (!plistFull.empty()) {
+          ReprobuildAppendCleanFile(
+            cleanFiles, binaryDir,
+            ReprobuildConfigFullPath(binaryDir, plistFull, config,
+                                     multiConfig));
+        }
+      }
       cmSystemTools::MakeDirectory(
         cmSystemTools::GetFilenamePath(cmStrCat(binaryDir, "/", realOutput)));
 
@@ -2161,6 +2934,17 @@ void cmGlobalReprobuildGenerator::WriteProviderMetadata()
         ReprobuildAppendParsed(linkArgs, linkFlags);
         ReprobuildAppendParsed(linkArgs, frameworkPath);
         ReprobuildAppendParsed(linkArgs, linkPath);
+        if (linkLang == "Swift") {
+          std::string swiftFlags;
+          lg->GetTargetCompileFlags(gt, config, "Swift", swiftFlags, "");
+          ReprobuildAppendParsed(linkArgs, swiftFlags);
+          if (type == cmStateEnums::EXECUTABLE) {
+            linkArgs.push_back("-emit-executable");
+          } else if (type == cmStateEnums::SHARED_LIBRARY ||
+                     type == cmStateEnums::MODULE_LIBRARY) {
+            linkArgs.push_back("-emit-library");
+          }
+        }
         if (gt->HasSOName(config)) {
           cmGeneratorTarget::Names const names = gt->GetLibraryNames(config);
           std::string soname = names.SharedObject;
@@ -2233,8 +3017,31 @@ void cmGlobalReprobuildGenerator::WriteProviderMetadata()
                                     configSuffix));
         symlinkAction.Var = ReprobuildNimIdent("action", nextActionVar++,
                                                symlinkAction.Id);
-        symlinkAction.ToolId = ReprobuildSymlinkToolId();
-        symlinkAction.Args = { realOutput, soName, output };
+        if (gt->IsFrameworkOnApple()) {
+          symlinkAction.ToolId =
+            ReprobuildSafeId(cmStrCat("reprobuild-cmake-",
+                                      symlinkAction.Var));
+          std::string const frameworkLinkTarget = cmStrCat(
+            "Versions/Current/", cmSystemTools::GetFilenameName(realOutput));
+          std::vector<std::string> lines;
+          lines.push_back(cmStrCat(
+            ReprobuildShellSingleQuote(cmSystemTools::GetCMakeCommand()),
+            " -E create_symlink ",
+            ReprobuildShellSingleQuote(frameworkLinkTarget), " ",
+            ReprobuildShellSingleQuote(output)));
+          std::string const wrapperPath =
+            cmStrCat(wrapperDir, "/", symlinkAction.ToolId);
+          if (!ReprobuildWriteCommandScript(wrapperPath, binaryDir, lines)) {
+            this->GetCMakeInstance()->IssueMessage(
+              MessageType::FATAL_ERROR,
+              cmStrCat("Could not write Reprobuild framework symlink wrapper: ",
+                       wrapperPath));
+            return;
+          }
+        } else {
+          symlinkAction.ToolId = ReprobuildSymlinkToolId();
+          symlinkAction.Args = { realOutput, soName, output };
+        }
         symlinkAction.Inputs = { realOutput };
         if (declareOutputs) {
           symlinkAction.Outputs = { output };
@@ -2249,7 +3056,7 @@ void cmGlobalReprobuildGenerator::WriteProviderMetadata()
         }
         ReprobuildAppendCleanFile(cleanFiles, binaryDir, output);
         symlinkAction.Deps = { target.LinkAction.Id };
-        usedTools.insert(ReprobuildSymlinkToolId());
+        usedTools.insert(symlinkAction.ToolId);
         sawSymlinkOutput = true;
         target.SymlinkActions.push_back(std::move(symlinkAction));
       }
@@ -2667,6 +3474,24 @@ void cmGlobalReprobuildGenerator::WriteProviderMetadata()
            << "\n";
   metadata << "m4_symlink_outputs="
            << (sawSymlinkOutput ? "generated" : "not_required_by_targets")
+           << "\n";
+  metadata << "m8_cuda_device_link="
+           << (sawCudaDeviceLink ? "generated" : "not_required_by_targets")
+           << "\n";
+  metadata << "m8_cuda_clang_fatbinary="
+           << (sawCudaClangFatbinary ? "generated" : "not_required_by_targets")
+           << "\n";
+  metadata << "m8_ispc_multiple_outputs="
+           << (sawISPCMultiOutput ? "generated" : "not_required_by_targets")
+           << "\n";
+  metadata << "m8_swift_output_maps="
+           << (sawSwiftOutputMap ? "generated" : "not_required_by_targets")
+           << "\n";
+  metadata << "m8_swift_split="
+           << (sawSwiftSplit ? "generated" : "not_required_by_targets")
+           << "\n";
+  metadata << "m8_apple_bundles="
+           << (sawAppleBundle ? "generated" : "not_applicable_on_host")
            << "\n";
   metadata << "source_dir=" << this->GetCMakeInstance()->GetHomeDirectory()
            << "\n";

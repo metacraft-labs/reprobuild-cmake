@@ -6,7 +6,7 @@
 
 include(${CMAKE_ROOT}/Modules/CMakeDetermineCompiler.cmake)
 
-if( NOT (("${CMAKE_GENERATOR}" MATCHES "Make") OR ("${CMAKE_GENERATOR}" MATCHES "Ninja")) )
+if( NOT (("${CMAKE_GENERATOR}" MATCHES "Make") OR ("${CMAKE_GENERATOR}" MATCHES "Ninja") OR ("${CMAKE_GENERATOR}" STREQUAL "Reprobuild")) )
   message(FATAL_ERROR "ISPC language not currently supported by \"${CMAKE_GENERATOR}\" generator")
 endif()
 

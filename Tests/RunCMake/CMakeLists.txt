@@ -508,6 +508,53 @@ add_test(NAME e2e_cmake_reprobuild_cross_config_generated_source
     -DTEST_REPROBUILD_REPRO=${_ReprobuildBin}
     -DTEST_RUNQUOTAD=${_RunQuotaDaemonBin}
     -P ${_ReprobuildGeneratorTestDir}/e2e.cmake)
+add_test(NAME e2e_cmake_reprobuild_language_profile_matrix
+  COMMAND ${CMAKE_CMAKE_COMMAND}
+    -DCMAKE_COMMAND=${CMAKE_CMAKE_COMMAND}
+    -DTEST_MODE=language_profile_matrix
+    -DTEST_BINARY_ROOT=${_ReprobuildGeneratorTestBin}/language-profile-matrix
+    -DTEST_C_COMPILER=${CMAKE_C_COMPILER}
+    -DTEST_CXX_COMPILER=${CMAKE_CXX_COMPILER}
+    -DTEST_SWIFT_COMPILER=${CMAKE_Swift_COMPILER}
+    -DTEST_CUDA_COMPILER=${CMAKE_CUDA_COMPILER}
+    -DTEST_CUDA_COMPILER_ID=${CMAKE_CUDA_COMPILER_ID}
+    -DTEST_ISPC_COMPILER=${CMAKE_ISPC_COMPILER}
+    -DTEST_REPROBUILD_SOURCE_ROOT=${_ReprobuildSourceRoot}
+    -DTEST_REPROBUILD_REPO=${_ReprobuildSourceRoot}
+    -DTEST_REPROBUILD_REPRO=${_ReprobuildBin}
+    -DTEST_RUNQUOTAD=${_RunQuotaDaemonBin}
+    -P ${_ReprobuildGeneratorTestDir}/e2e.cmake)
+add_test(NAME e2e_cmake_reprobuild_profile_unavailable_diagnostics
+  COMMAND ${CMAKE_CMAKE_COMMAND}
+    -DCMAKE_COMMAND=${CMAKE_CMAKE_COMMAND}
+    -DTEST_MODE=profile_unavailable_diagnostics
+    -DTEST_BINARY_ROOT=${_ReprobuildGeneratorTestBin}/profile-unavailable-diagnostics
+    -DTEST_C_COMPILER=${CMAKE_C_COMPILER}
+    -DTEST_CXX_COMPILER=${CMAKE_CXX_COMPILER}
+    -DTEST_CUDA_COMPILER=${CMAKE_CUDA_COMPILER}
+    -DTEST_CUDA_COMPILER_ID=${CMAKE_CUDA_COMPILER_ID}
+    -DTEST_ISPC_COMPILER=${CMAKE_ISPC_COMPILER}
+    -DTEST_REPROBUILD_SOURCE_ROOT=${_ReprobuildSourceRoot}
+    -DTEST_REPROBUILD_REPO=${_ReprobuildSourceRoot}
+    -DTEST_REPROBUILD_REPRO=${_ReprobuildBin}
+    -DTEST_RUNQUOTAD=${_RunQuotaDaemonBin}
+    -P ${_ReprobuildGeneratorTestDir}/e2e.cmake)
+add_test(NAME e2e_cmake_reprobuild_language_byproduct_metadata
+  COMMAND ${CMAKE_CMAKE_COMMAND}
+    -DCMAKE_COMMAND=${CMAKE_CMAKE_COMMAND}
+    -DTEST_MODE=language_byproduct_metadata
+    -DTEST_BINARY_ROOT=${_ReprobuildGeneratorTestBin}/language-byproduct-metadata
+    -DTEST_C_COMPILER=${CMAKE_C_COMPILER}
+    -DTEST_CXX_COMPILER=${CMAKE_CXX_COMPILER}
+    -DTEST_SWIFT_COMPILER=${CMAKE_Swift_COMPILER}
+    -DTEST_CUDA_COMPILER=${CMAKE_CUDA_COMPILER}
+    -DTEST_CUDA_COMPILER_ID=${CMAKE_CUDA_COMPILER_ID}
+    -DTEST_ISPC_COMPILER=${CMAKE_ISPC_COMPILER}
+    -DTEST_REPROBUILD_SOURCE_ROOT=${_ReprobuildSourceRoot}
+    -DTEST_REPROBUILD_REPO=${_ReprobuildSourceRoot}
+    -DTEST_REPROBUILD_REPRO=${_ReprobuildBin}
+    -DTEST_RUNQUOTAD=${_RunQuotaDaemonBin}
+    -P ${_ReprobuildGeneratorTestDir}/e2e.cmake)
 
 if(CMAKE_GENERATOR MATCHES "Ninja")
   set(Ninja_ARGS

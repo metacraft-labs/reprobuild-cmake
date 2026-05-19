@@ -788,6 +788,314 @@ function(resolve_fortran_compiler out_var)
   endif()
 endfunction()
 
+function(resolve_swift_compiler out_var)
+  if(DEFINED TEST_SWIFT_COMPILER AND
+      NOT "${TEST_SWIFT_COMPILER}" STREQUAL "" AND
+      NOT "${TEST_SWIFT_COMPILER}" MATCHES "NOTFOUND$")
+    set(${out_var} "${TEST_SWIFT_COMPILER}" PARENT_SCOPE)
+    return()
+  endif()
+  if(CMAKE_HOST_SYSTEM_NAME STREQUAL "Darwin")
+    set(xcode_swift "/Applications/Xcode.app/Contents/Developer/Toolchains/XcodeDefault.xctoolchain/usr/bin/swiftc")
+    if(EXISTS "${xcode_swift}")
+      set(${out_var} "${xcode_swift}" PARENT_SCOPE)
+      return()
+    endif()
+    execute_process(COMMAND xcrun --find swiftc
+      OUTPUT_VARIABLE xcrun_swift
+      RESULT_VARIABLE xcrun_swift_result
+      OUTPUT_STRIP_TRAILING_WHITESPACE
+      ERROR_QUIET)
+    if(xcrun_swift_result EQUAL 0 AND EXISTS "${xcrun_swift}")
+      set(${out_var} "${xcrun_swift}" PARENT_SCOPE)
+      return()
+    endif()
+  endif()
+  find_program(found_swift NAMES swiftc)
+  if(found_swift)
+    set(${out_var} "${found_swift}" PARENT_SCOPE)
+  else()
+    set(${out_var} "" PARENT_SCOPE)
+  endif()
+endfunction()
+
+function(swift_config_args out_var swift_compiler)
+  set(args "-DCMAKE_Swift_COMPILER=${swift_compiler}" "-DCMAKE_Swift_COMPILER_WORKS=1")
+  if(CMAKE_HOST_SYSTEM_NAME STREQUAL "Darwin")
+    set(xcode_sdk "/Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/SDKs/MacOSX.sdk")
+    if(EXISTS "${xcode_sdk}")
+      list(APPEND args "-DCMAKE_OSX_SYSROOT=${xcode_sdk}")
+    else()
+      execute_process(COMMAND xcrun --show-sdk-path
+        OUTPUT_VARIABLE xcrun_sdk
+        RESULT_VARIABLE xcrun_sdk_result
+        OUTPUT_STRIP_TRAILING_WHITESPACE
+        ERROR_QUIET)
+      if(xcrun_sdk_result EQUAL 0 AND EXISTS "${xcrun_sdk}")
+        list(APPEND args "-DCMAKE_OSX_SYSROOT=${xcrun_sdk}")
+      endif()
+    endif()
+  endif()
+  set(${out_var} "${args}" PARENT_SCOPE)
+endfunction()
+
+function(resolve_ispc_compiler out_var)
+  if(DEFINED TEST_ISPC_COMPILER AND
+      NOT "${TEST_ISPC_COMPILER}" STREQUAL "" AND
+      NOT "${TEST_ISPC_COMPILER}" MATCHES "NOTFOUND$")
+    set(${out_var} "${TEST_ISPC_COMPILER}" PARENT_SCOPE)
+    return()
+  endif()
+  find_program(found_ispc NAMES ispc)
+  if(found_ispc)
+    set(${out_var} "${found_ispc}" PARENT_SCOPE)
+  else()
+    set(${out_var} "" PARENT_SCOPE)
+  endif()
+endfunction()
+
+function(resolve_cuda_compiler out_var)
+  if(DEFINED TEST_CUDA_COMPILER AND
+      NOT "${TEST_CUDA_COMPILER}" STREQUAL "" AND
+      NOT "${TEST_CUDA_COMPILER}" MATCHES "NOTFOUND$" AND
+      (NOT DEFINED TEST_CUDA_COMPILER_ID OR
+        "${TEST_CUDA_COMPILER_ID}" STREQUAL "" OR
+        "${TEST_CUDA_COMPILER_ID}" STREQUAL "NVIDIA"))
+    set(${out_var} "${TEST_CUDA_COMPILER}" PARENT_SCOPE)
+    return()
+  endif()
+  find_program(found_cuda NAMES nvcc)
+  if(found_cuda)
+    set(${out_var} "${found_cuda}" PARENT_SCOPE)
+  else()
+    set(${out_var} "" PARENT_SCOPE)
+  endif()
+endfunction()
+
+function(resolve_clang_cuda_compiler out_var)
+  if(DEFINED TEST_CUDA_COMPILER AND
+      NOT "${TEST_CUDA_COMPILER}" STREQUAL "" AND
+      NOT "${TEST_CUDA_COMPILER}" MATCHES "NOTFOUND$" AND
+      (("${TEST_CUDA_COMPILER_ID}" STREQUAL "Clang") OR
+       ("${TEST_CUDA_COMPILER_ID}" STREQUAL "AppleClang")))
+    set(${out_var} "${TEST_CUDA_COMPILER}" PARENT_SCOPE)
+  else()
+    set(${out_var} "" PARENT_SCOPE)
+  endif()
+endfunction()
+
+function(write_swift_profile_project source_dir project_name)
+  file(REMOVE_RECURSE "${source_dir}")
+  file(MAKE_DIRECTORY "${source_dir}")
+  file(WRITE "${source_dir}/CMakeLists.txt"
+    "cmake_minimum_required(VERSION 4.1)\n"
+    "cmake_policy(SET CMP0157 NEW)\n"
+    "cmake_policy(SET CMP0215 NEW)\n"
+    "project(${project_name} Swift)\n"
+    "set(CMAKE_Swift_COMPILATION_MODE incremental)\n"
+    "set(CMAKE_Swift_NUM_THREADS 2)\n"
+    "add_executable(swiftapp main.swift helper.swift)\n"
+    "set_source_files_properties(helper.swift PROPERTIES Swift_DEPENDENCIES_FILE \"\${CMAKE_CURRENT_BINARY_DIR}/helper.custom.swiftdeps\" Swift_DIAGNOSTICS_FILE \"\${CMAKE_CURRENT_BINARY_DIR}/helper.custom.dia\")\n")
+  file(WRITE "${source_dir}/helper.swift"
+    "func answer() -> Int32 { return 42 }\n")
+  file(WRITE "${source_dir}/main.swift"
+    "#if os(macOS)\n"
+    "import Darwin\n"
+    "#else\n"
+    "import Glibc\n"
+    "#endif\n"
+    "exit(answer() == 42 ? 0 : 1)\n")
+endfunction()
+
+function(write_swift_split_project source_dir project_name)
+  file(REMOVE_RECURSE "${source_dir}")
+  file(MAKE_DIRECTORY "${source_dir}")
+  file(WRITE "${source_dir}/CMakeLists.txt"
+    "cmake_minimum_required(VERSION 4.1)\n"
+    "cmake_policy(SET CMP0157 NEW)\n"
+    "cmake_policy(SET CMP0215 NEW)\n"
+    "project(${project_name} Swift)\n"
+    "add_executable(splitapp main.swift helper.swift)\n"
+    "set_target_properties(splitapp PROPERTIES Swift_SEPARATE_MODULE_EMISSION ON Swift_MODULE_NAME SplitApp)\n")
+  file(WRITE "${source_dir}/helper.swift" "func value() -> Int32 { return 7 }\n")
+  file(WRITE "${source_dir}/main.swift"
+    "#if os(macOS)\n"
+    "import Darwin\n"
+    "#else\n"
+    "import Glibc\n"
+    "#endif\n"
+    "exit(value() == 7 ? 0 : 1)\n")
+endfunction()
+
+function(write_apple_bundle_project source_dir project_name)
+  file(REMOVE_RECURSE "${source_dir}")
+  file(MAKE_DIRECTORY "${source_dir}/Assets" "${source_dir}/FrameworkAssets" "${source_dir}/PluginAssets")
+  file(WRITE "${source_dir}/CMakeLists.txt"
+    "cmake_minimum_required(VERSION 3.20)\n"
+    "project(${project_name} C)\n"
+    "add_executable(bundleapp MACOSX_BUNDLE main.c Assets/data.txt)\n"
+    "set_source_files_properties(Assets/data.txt PROPERTIES MACOSX_PACKAGE_LOCATION Resources)\n"
+    "set_target_properties(bundleapp PROPERTIES MACOSX_BUNDLE_INFO_PLIST \"${source_dir}/Info.plist.in\" MACOSX_BUNDLE_BUNDLE_NAME ReproBundle MACOSX_BUNDLE_GUI_IDENTIFIER org.reprobuild.bundle)\n"
+    "add_library(ReproKit SHARED framework.c framework.h FrameworkAssets/fwdata.txt)\n"
+    "set_source_files_properties(FrameworkAssets/fwdata.txt PROPERTIES MACOSX_PACKAGE_LOCATION Resources)\n"
+    "set_target_properties(ReproKit PROPERTIES FRAMEWORK TRUE FRAMEWORK_VERSION A PUBLIC_HEADER framework.h MACOSX_FRAMEWORK_INFO_PLIST \"${source_dir}/FrameworkInfo.plist.in\")\n"
+    "add_library(reproplug MODULE plug.c PluginAssets/plugdata.txt)\n"
+    "set_source_files_properties(PluginAssets/plugdata.txt PROPERTIES MACOSX_PACKAGE_LOCATION Resources)\n"
+    "set_target_properties(reproplug PROPERTIES BUNDLE TRUE BUNDLE_EXTENSION bundle MACOSX_BUNDLE_INFO_PLIST \"${source_dir}/PluginInfo.plist.in\")\n")
+  file(WRITE "${source_dir}/Info.plist.in"
+    "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n"
+    "<!DOCTYPE plist PUBLIC \"-//Apple//DTD PLIST 1.0//EN\" \"http://www.apple.com/DTDs/PropertyList-1.0.dtd\">\n"
+    "<plist version=\"1.0\"><dict><key>CFBundleExecutable</key><string>${MACOSX_BUNDLE_EXECUTABLE_NAME}</string><key>CFBundleIdentifier</key><string>${MACOSX_BUNDLE_GUI_IDENTIFIER}</string><key>CFBundleName</key><string>${MACOSX_BUNDLE_BUNDLE_NAME}</string><key>CFBundlePackageType</key><string>APPL</string></dict></plist>\n")
+  file(WRITE "${source_dir}/FrameworkInfo.plist.in"
+    "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n"
+    "<!DOCTYPE plist PUBLIC \"-//Apple//DTD PLIST 1.0//EN\" \"http://www.apple.com/DTDs/PropertyList-1.0.dtd\">\n"
+    "<plist version=\"1.0\"><dict><key>CFBundleExecutable</key><string>${MACOSX_FRAMEWORK_NAME}</string><key>CFBundleIdentifier</key><string>org.reprobuild.framework</string><key>CFBundleName</key><string>${MACOSX_FRAMEWORK_NAME}</string><key>CFBundlePackageType</key><string>FMWK</string></dict></plist>\n")
+  file(WRITE "${source_dir}/PluginInfo.plist.in"
+    "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n"
+    "<!DOCTYPE plist PUBLIC \"-//Apple//DTD PLIST 1.0//EN\" \"http://www.apple.com/DTDs/PropertyList-1.0.dtd\">\n"
+    "<plist version=\"1.0\"><dict><key>CFBundleExecutable</key><string>${MACOSX_BUNDLE_EXECUTABLE_NAME}</string><key>CFBundleIdentifier</key><string>org.reprobuild.plugin</string><key>CFBundleName</key><string>reproplug</string><key>CFBundlePackageType</key><string>BNDL</string></dict></plist>\n")
+  file(WRITE "${source_dir}/Assets/data.txt" "bundle-resource\n")
+  file(WRITE "${source_dir}/FrameworkAssets/fwdata.txt" "framework-resource\n")
+  file(WRITE "${source_dir}/PluginAssets/plugdata.txt" "plugin-resource\n")
+  file(WRITE "${source_dir}/framework.h" "int reprokit_value(void);\n")
+  file(WRITE "${source_dir}/framework.c" "int reprokit_value(void) { return 42; }\n")
+  file(WRITE "${source_dir}/plug.c" "int reproplug_value(void) { return 7; }\n")
+  file(WRITE "${source_dir}/main.c" "int main(void) { return 0; }\n")
+endfunction()
+
+function(write_cuda_unavailable_project source_dir project_name)
+  file(REMOVE_RECURSE "${source_dir}")
+  file(MAKE_DIRECTORY "${source_dir}")
+  file(WRITE "${source_dir}/CMakeLists.txt"
+    "cmake_minimum_required(VERSION 3.20)\n"
+    "project(${project_name} CUDA)\n"
+    "add_executable(cudaapp main.cu)\n"
+    "set_target_properties(cudaapp PROPERTIES CUDA_SEPARABLE_COMPILATION ON CUDA_RESOLVE_DEVICE_SYMBOLS ON)\n")
+  file(WRITE "${source_dir}/main.cu" "__global__ void k() {}\nint main() { k<<<1,1>>>(); return 0; }\n")
+endfunction()
+
+function(write_cuda_available_project source_dir project_name)
+  file(REMOVE_RECURSE "${source_dir}")
+  file(MAKE_DIRECTORY "${source_dir}")
+  file(WRITE "${source_dir}/CMakeLists.txt"
+    "cmake_minimum_required(VERSION 3.20)\n"
+    "project(${project_name} CUDA)\n"
+    "add_library(cudalib STATIC kernels.cu)\n"
+    "set_target_properties(cudalib PROPERTIES CUDA_SEPARABLE_COMPILATION ON CUDA_RESOLVE_DEVICE_SYMBOLS ON POSITION_INDEPENDENT_CODE ON)\n"
+    "add_executable(cudaapp main.cu)\n"
+    "target_link_libraries(cudaapp PRIVATE cudalib)\n"
+    "set_target_properties(cudaapp PROPERTIES CUDA_SEPARABLE_COMPILATION ON CUDA_RESOLVE_DEVICE_SYMBOLS ON)\n")
+  file(WRITE "${source_dir}/kernels.cu" "__device__ int device_value() { return 42; }\n")
+  file(WRITE "${source_dir}/main.cu" "int main() { return 0; }\n")
+endfunction()
+
+function(write_clang_cuda_available_project source_dir project_name)
+  write_cuda_available_project("${source_dir}" "${project_name}")
+  file(APPEND "${source_dir}/CMakeLists.txt"
+    "set_property(TARGET cudalib cudaapp PROPERTY CUDA_ARCHITECTURES 52)\n")
+endfunction()
+
+function(write_ispc_unavailable_project source_dir project_name)
+  file(REMOVE_RECURSE "${source_dir}")
+  file(MAKE_DIRECTORY "${source_dir}")
+  file(WRITE "${source_dir}/CMakeLists.txt"
+    "cmake_minimum_required(VERSION 3.20)\n"
+    "project(${project_name} CXX ISPC)\n"
+    "add_executable(ispcapp main.cxx kernel.ispc)\n"
+    "set_property(TARGET ispcapp PROPERTY ISPC_INSTRUCTION_SETS sse2-i32x4;sse4-i32x4)\n")
+  file(WRITE "${source_dir}/kernel.ispc" "export void fill(uniform int n, uniform int v[], uniform int x) { foreach (i = 0 ... n) v[i] = x; }\n")
+  file(WRITE "${source_dir}/main.cxx" "int main() { return 0; }\n")
+endfunction()
+
+function(write_ispc_available_project source_dir project_name)
+  file(REMOVE_RECURSE "${source_dir}")
+  file(MAKE_DIRECTORY "${source_dir}")
+  file(WRITE "${source_dir}/CMakeLists.txt"
+    "cmake_minimum_required(VERSION 3.20)\n"
+    "project(${project_name} ISPC)\n"
+    "set(CMAKE_ISPC_FLAGS \"--arch=x86\")\n"
+    "add_library(ispc_objects OBJECT kernel.ispc)\n"
+    "set_property(TARGET ispc_objects PROPERTY ISPC_INSTRUCTION_SETS sse2-i32x4;sse4-i32x4)\n")
+  file(WRITE "${source_dir}/kernel.ispc" "export void fill(uniform int n, uniform int v[], uniform int x) { foreach (i = 0 ... n) v[i] = x; }\n")
+endfunction()
+
+function(run_cuda_available_fixture label cuda_compiler extra_args)
+  set(cuda_source_dir "${TEST_BINARY_ROOT}/${label}-src")
+  set(cuda_binary_dir "${TEST_BINARY_ROOT}/${label}-build")
+  write_cuda_available_project("${cuda_source_dir}" ReprobuildCudaAvailable)
+  run_configure("${cuda_source_dir}" "${cuda_binary_dir}" TRUE ""
+    "-DCMAKE_CUDA_COMPILER=${cuda_compiler}"
+    "-DCMAKE_CUDA_ARCHITECTURES=52"
+    ${extra_args})
+  file(READ "${cuda_binary_dir}/CMakeFiles/reprobuild/provider.meta" cuda_metadata)
+  assert_contains("${cuda_metadata}" "m8_cuda_device_link=generated" "CUDA metadata")
+  file(READ "${cuda_binary_dir}/reprobuild.nim" cuda_provider)
+  assert_contains("${cuda_provider}" "device-link-cudalib" "CUDA provider")
+  assert_contains("${cuda_provider}" "cmake_device_link" "CUDA provider")
+  file(READ "${cuda_binary_dir}/CMakeFiles/reprobuild/clean.manifest" cuda_clean)
+  assert_contains("${cuda_clean}" "cmake_device_link" "CUDA clean manifest")
+  start_runquota("${TEST_BINARY_ROOT}" runquota_socket runquota_pid)
+  run_build("${cuda_binary_dir}" "cudaapp" "${runquota_socket}" cuda_output)
+  stop_runquota("${runquota_pid}")
+  report_path_from_output("${cuda_output}" cuda_report_path)
+  file(READ "${cuda_report_path}" cuda_report)
+  assert_contains("${cuda_report}" "device-link-cudalib" "CUDA scheduler report")
+endfunction()
+
+function(run_clang_cuda_available_fixture label clang_cuda_compiler)
+  set(cuda_source_dir "${TEST_BINARY_ROOT}/${label}-src")
+  set(cuda_binary_dir "${TEST_BINARY_ROOT}/${label}-build")
+  write_clang_cuda_available_project("${cuda_source_dir}" ReprobuildClangCudaAvailable)
+  run_configure("${cuda_source_dir}" "${cuda_binary_dir}" TRUE ""
+    "-DCMAKE_CUDA_COMPILER=${clang_cuda_compiler}"
+    "-DCMAKE_CUDA_ARCHITECTURES=52"
+    "-DCMAKE_REPROBUILD_CUDA_PROFILE=ClangFatbinary")
+  file(READ "${cuda_binary_dir}/CMakeFiles/reprobuild/provider.meta" cuda_metadata)
+  assert_contains("${cuda_metadata}" "m8_cuda_clang_fatbinary=generated" "Clang CUDA metadata")
+  file(READ "${cuda_binary_dir}/reprobuild.nim" cuda_provider)
+  foreach(expected IN ITEMS
+      "cuda-device-link-cudalib-sm-52"
+      "cuda-fatbinary-cudalib"
+      "cuda-registration-stub-cudalib"
+      "cmake_cuda_fatbin.h"
+      "cmake_cuda_register.h")
+    assert_contains("${cuda_provider}" "${expected}" "Clang CUDA provider")
+  endforeach()
+  file(READ "${cuda_binary_dir}/CMakeFiles/reprobuild/clean.manifest" cuda_clean)
+  assert_contains("${cuda_clean}" "cmake_cuda_fatbin.h" "Clang CUDA clean manifest")
+  assert_contains("${cuda_clean}" "cmake_cuda_register.h" "Clang CUDA clean manifest")
+  start_runquota("${TEST_BINARY_ROOT}" runquota_socket runquota_pid)
+  run_build("${cuda_binary_dir}" "cudaapp" "${runquota_socket}" cuda_output)
+  stop_runquota("${runquota_pid}")
+  report_path_from_output("${cuda_output}" cuda_report_path)
+  file(READ "${cuda_report_path}" cuda_report)
+  assert_contains("${cuda_report}" "cuda-registration-stub-cudalib" "Clang CUDA scheduler report")
+endfunction()
+
+function(run_ispc_available_fixture label ispc_compiler)
+  set(ispc_source_dir "${TEST_BINARY_ROOT}/${label}-src")
+  set(ispc_binary_dir "${TEST_BINARY_ROOT}/${label}-build")
+  write_ispc_available_project("${ispc_source_dir}" ReprobuildIspcAvailable)
+  run_configure("${ispc_source_dir}" "${ispc_binary_dir}" TRUE ""
+    "-DCMAKE_CXX_COMPILER=${TEST_CXX_COMPILER}"
+    "-DCMAKE_ISPC_COMPILER=${ispc_compiler}")
+  file(READ "${ispc_binary_dir}/CMakeFiles/reprobuild/provider.meta" ispc_metadata)
+  assert_contains("${ispc_metadata}" "m8_ispc_multiple_outputs=generated" "ISPC metadata")
+  file(READ "${ispc_binary_dir}/reprobuild.nim" ispc_provider)
+  assert_contains("${ispc_provider}" "kernel_ispc.h" "ISPC provider")
+  assert_contains("${ispc_provider}" "kernel_sse2" "ISPC provider")
+  assert_contains("${ispc_provider}" "kernel_sse4" "ISPC provider")
+  file(READ "${ispc_binary_dir}/CMakeFiles/reprobuild/clean.manifest" ispc_clean)
+  assert_contains("${ispc_clean}" "kernel_ispc.h" "ISPC clean manifest")
+  assert_contains("${ispc_clean}" "kernel_sse2" "ISPC clean manifest")
+  start_runquota("${TEST_BINARY_ROOT}" runquota_socket runquota_pid)
+  run_build("${ispc_binary_dir}" "ispc_objects" "${runquota_socket}" ispc_output)
+  stop_runquota("${runquota_pid}")
+  report_path_from_output("${ispc_output}" ispc_report_path)
+  file(READ "${ispc_report_path}" ispc_report)
+  assert_contains("${ispc_report}" "compile-ispc_objects" "ISPC scheduler report")
+endfunction()
+
 function(find_module_scan_wrapper binary_dir needle out_var)
   file(GLOB wrappers "${binary_dir}/CMakeFiles/reprobuild/bin/*scan*")
   foreach(wrapper IN LISTS wrappers)
@@ -1631,6 +1939,214 @@ elseif(TEST_MODE STREQUAL "dyndep_corruption_fails_closed")
   assert_file_not_exists("${corrupt_binary_dir}/app" "corrupt dyndep fail-closed")
   assert_file_not_exists("${corrupt_binary_dir}/CMakeFiles/app.dir/main.cpp.o" "corrupt dyndep fail-closed")
   assert_file_not_exists("${corrupt_binary_dir}/CMakeFiles/app.dir/m.cppm.o" "corrupt dyndep fail-closed")
+elseif(TEST_MODE STREQUAL "language_profile_matrix")
+  resolve_swift_compiler(swift_compiler)
+  if(NOT "${swift_compiler}" STREQUAL "")
+    set(swift_source_dir "${TEST_BINARY_ROOT}/swift-src")
+    set(swift_binary_dir "${TEST_BINARY_ROOT}/swift-build")
+    write_swift_profile_project("${swift_source_dir}" ReprobuildSwiftProfile)
+    swift_config_args(swift_args "${swift_compiler}")
+    run_configure("${swift_source_dir}" "${swift_binary_dir}" TRUE ""
+      ${swift_args})
+    file(READ "${swift_binary_dir}/reprobuild.nim" swift_provider)
+    foreach(expected IN ITEMS
+        "compile-swiftapp-Swift"
+        "output-file-map.json"
+        "helper.custom.swiftdeps"
+        "helper.custom.dia")
+      assert_contains("${swift_provider}" "${expected}" "Swift profile provider")
+    endforeach()
+    start_runquota("${TEST_BINARY_ROOT}" runquota_socket runquota_pid)
+    run_build("${swift_binary_dir}" "swiftapp" "${runquota_socket}" swift_output)
+    stop_runquota("${runquota_pid}")
+    execute_process(COMMAND "${swift_binary_dir}/swiftapp" RESULT_VARIABLE swift_result)
+    if(NOT swift_result EQUAL 0)
+      message(FATAL_ERROR "Swift profile executable failed with ${swift_result}")
+    endif()
+    assert_file_exists("${swift_binary_dir}/CMakeFiles/swiftapp.dir/output-file-map.json" "Swift output map")
+    assert_file_exists("${swift_binary_dir}/helper.custom.swiftdeps" "Swift custom swiftdeps")
+    assert_file_exists("${swift_binary_dir}/helper.custom.dia" "Swift custom diagnostics")
+  endif()
+
+  if(CMAKE_HOST_SYSTEM_NAME STREQUAL "Darwin")
+    set(bundle_source_dir "${TEST_BINARY_ROOT}/bundle-src")
+    set(bundle_binary_dir "${TEST_BINARY_ROOT}/bundle-build")
+    write_apple_bundle_project("${bundle_source_dir}" ReprobuildAppleBundle)
+    run_configure("${bundle_source_dir}" "${bundle_binary_dir}" TRUE "")
+    file(READ "${bundle_binary_dir}/reprobuild.nim" bundle_provider)
+    assert_contains("${bundle_provider}" "bundle-content-bundleapp" "Apple bundle provider")
+    assert_contains("${bundle_provider}" "bundle-content-ReproKit" "Apple framework provider")
+    assert_contains("${bundle_provider}" "bundle-content-reproplug" "Apple CFBundle provider")
+    start_runquota("${TEST_BINARY_ROOT}" runquota_socket runquota_pid)
+    run_build("${bundle_binary_dir}" "" "${runquota_socket}" bundle_output)
+    stop_runquota("${runquota_pid}")
+    assert_file_exists("${bundle_binary_dir}/bundleapp.app/Contents/MacOS/bundleapp" "Apple bundle executable")
+    assert_file_exists("${bundle_binary_dir}/bundleapp.app/Contents/Info.plist" "Apple bundle Info.plist")
+    assert_file_exists("${bundle_binary_dir}/bundleapp.app/Contents/Resources/data.txt" "Apple bundle resource")
+    assert_file_exists("${bundle_binary_dir}/ReproKit.framework/Versions/A/ReproKit" "Apple framework library")
+    assert_file_exists("${bundle_binary_dir}/ReproKit.framework/Versions/A/Resources/Info.plist" "Apple framework Info.plist")
+    assert_file_exists("${bundle_binary_dir}/ReproKit.framework/Versions/A/Resources/fwdata.txt" "Apple framework resource")
+    assert_file_exists("${bundle_binary_dir}/reproplug.bundle/Contents/MacOS/reproplug" "Apple CFBundle library")
+    assert_file_exists("${bundle_binary_dir}/reproplug.bundle/Contents/Info.plist" "Apple CFBundle Info.plist")
+    assert_file_exists("${bundle_binary_dir}/reproplug.bundle/Contents/Resources/plugdata.txt" "Apple CFBundle resource")
+  endif()
+
+  resolve_cuda_compiler(cuda_compiler)
+  if(NOT "${cuda_compiler}" STREQUAL "")
+    run_cuda_available_fixture("cuda-available" "${cuda_compiler}" "")
+  else()
+    set(cuda_source_dir "${TEST_BINARY_ROOT}/cuda-unavailable-src")
+    set(cuda_binary_dir "${TEST_BINARY_ROOT}/cuda-unavailable-build")
+    write_cuda_unavailable_project("${cuda_source_dir}" ReprobuildCudaUnavailable)
+    run_configure("${cuda_source_dir}" "${cuda_binary_dir}" FALSE
+      "Reprobuild profile unavailable: CUDA compiler")
+  endif()
+
+  resolve_clang_cuda_compiler(clang_cuda_compiler)
+  if(NOT "${clang_cuda_compiler}" STREQUAL "")
+    run_clang_cuda_available_fixture("clang-cuda-available" "${clang_cuda_compiler}")
+  else()
+    set(clang_cuda_source_dir "${TEST_BINARY_ROOT}/clang-cuda-unavailable-src")
+    set(clang_cuda_binary_dir "${TEST_BINARY_ROOT}/clang-cuda-unavailable-build")
+    write_cuda_unavailable_project("${clang_cuda_source_dir}" ReprobuildClangCudaUnavailable)
+    run_configure("${clang_cuda_source_dir}" "${clang_cuda_binary_dir}" FALSE
+      "Reprobuild profile unavailable: Clang CUDA fatbinary"
+      "-DCMAKE_REPROBUILD_CUDA_PROFILE=ClangFatbinary")
+  endif()
+
+  resolve_ispc_compiler(ispc_compiler)
+  if(NOT "${ispc_compiler}" STREQUAL "")
+    run_ispc_available_fixture("ispc-available" "${ispc_compiler}")
+  else()
+    set(ispc_source_dir "${TEST_BINARY_ROOT}/ispc-unavailable-src")
+    set(ispc_binary_dir "${TEST_BINARY_ROOT}/ispc-unavailable-build")
+    write_ispc_unavailable_project("${ispc_source_dir}" ReprobuildIspcUnavailable)
+    run_configure("${ispc_source_dir}" "${ispc_binary_dir}" FALSE
+      "Reprobuild profile unavailable: ISPC compiler"
+      "-DCMAKE_CXX_COMPILER=${TEST_CXX_COMPILER}")
+  endif()
+elseif(TEST_MODE STREQUAL "profile_unavailable_diagnostics")
+  resolve_cuda_compiler(cuda_compiler)
+  if("${cuda_compiler}" STREQUAL "")
+    set(cuda_source_dir "${TEST_BINARY_ROOT}/cuda-unavailable-src")
+    set(cuda_binary_dir "${TEST_BINARY_ROOT}/cuda-unavailable-build")
+    write_cuda_unavailable_project("${cuda_source_dir}" ReprobuildCudaUnavailable)
+    run_configure("${cuda_source_dir}" "${cuda_binary_dir}" FALSE
+      "Reprobuild profile unavailable: CUDA compiler")
+  else()
+    run_cuda_available_fixture("cuda-available" "${cuda_compiler}" "")
+  endif()
+
+  resolve_clang_cuda_compiler(clang_cuda_compiler)
+  if("${clang_cuda_compiler}" STREQUAL "")
+    set(clang_cuda_source_dir "${TEST_BINARY_ROOT}/clang-cuda-unavailable-src")
+    set(clang_cuda_binary_dir "${TEST_BINARY_ROOT}/clang-cuda-unavailable-build")
+    write_cuda_unavailable_project("${clang_cuda_source_dir}" ReprobuildClangCudaUnavailable)
+    run_configure("${clang_cuda_source_dir}" "${clang_cuda_binary_dir}" FALSE
+      "Reprobuild profile unavailable: Clang CUDA fatbinary"
+      "-DCMAKE_REPROBUILD_CUDA_PROFILE=ClangFatbinary")
+  else()
+    run_clang_cuda_available_fixture("clang-cuda-available" "${clang_cuda_compiler}")
+  endif()
+
+  resolve_ispc_compiler(ispc_compiler)
+  if("${ispc_compiler}" STREQUAL "")
+    set(ispc_source_dir "${TEST_BINARY_ROOT}/ispc-unavailable-src")
+    set(ispc_binary_dir "${TEST_BINARY_ROOT}/ispc-unavailable-build")
+    write_ispc_unavailable_project("${ispc_source_dir}" ReprobuildIspcUnavailable)
+    run_configure("${ispc_source_dir}" "${ispc_binary_dir}" FALSE
+      "Reprobuild profile unavailable: ISPC compiler"
+      "-DCMAKE_CXX_COMPILER=${TEST_CXX_COMPILER}")
+  else()
+    run_ispc_available_fixture("ispc-available" "${ispc_compiler}")
+  endif()
+
+  if(NOT CMAKE_HOST_SYSTEM_NAME STREQUAL "Darwin")
+    set(bundle_source_dir "${TEST_BINARY_ROOT}/apple-unavailable-src")
+    set(bundle_binary_dir "${TEST_BINARY_ROOT}/apple-unavailable-build")
+    write_apple_bundle_project("${bundle_source_dir}" ReprobuildAppleUnavailable)
+    run_configure("${bundle_source_dir}" "${bundle_binary_dir}" FALSE
+      "Reprobuild profile unavailable: Apple bundle")
+  else()
+    set(bundle_source_dir "${TEST_BINARY_ROOT}/apple-available-src")
+    set(bundle_binary_dir "${TEST_BINARY_ROOT}/apple-available-build")
+    write_apple_bundle_project("${bundle_source_dir}" ReprobuildAppleAvailable)
+    run_configure("${bundle_source_dir}" "${bundle_binary_dir}" TRUE "")
+    start_runquota("${TEST_BINARY_ROOT}" runquota_socket runquota_pid)
+    run_build("${bundle_binary_dir}" "" "${runquota_socket}" bundle_output)
+    stop_runquota("${runquota_pid}")
+    assert_file_exists("${bundle_binary_dir}/ReproKit.framework/Versions/A/Resources/Info.plist" "Apple framework Info.plist")
+    assert_file_exists("${bundle_binary_dir}/reproplug.bundle/Contents/Info.plist" "Apple CFBundle Info.plist")
+  endif()
+elseif(TEST_MODE STREQUAL "language_byproduct_metadata")
+  resolve_swift_compiler(swift_compiler)
+  if(NOT "${swift_compiler}" STREQUAL "")
+    set(split_source_dir "${TEST_BINARY_ROOT}/swift-split-src")
+    set(split_binary_dir "${TEST_BINARY_ROOT}/swift-split-build")
+    write_swift_split_project("${split_source_dir}" ReprobuildSwiftSplit)
+    swift_config_args(swift_args "${swift_compiler}")
+    run_configure("${split_source_dir}" "${split_binary_dir}" TRUE ""
+      ${swift_args})
+    file(READ "${split_binary_dir}/CMakeFiles/reprobuild/provider.meta" split_metadata)
+    assert_contains("${split_metadata}" "m8_swift_output_maps=generated" "Swift split metadata")
+    assert_contains("${split_metadata}" "m8_swift_split=generated" "Swift split metadata")
+    file(READ "${split_binary_dir}/reprobuild.nim" split_provider)
+    assert_contains("${split_provider}" "emit-module-splitapp" "Swift split provider")
+    assert_contains("${split_provider}" ".swiftdeps" "Swift split provider")
+    assert_contains("${split_provider}" ".dia" "Swift split provider")
+    start_runquota("${TEST_BINARY_ROOT}" runquota_socket runquota_pid)
+    run_build("${split_binary_dir}" "splitapp" "${runquota_socket}" split_output)
+    stop_runquota("${runquota_pid}")
+    execute_process(COMMAND "${split_binary_dir}/splitapp" RESULT_VARIABLE split_result)
+    if(NOT split_result EQUAL 0)
+      message(FATAL_ERROR "Swift split executable failed with ${split_result}")
+    endif()
+    file(READ "${split_binary_dir}/CMakeFiles/reprobuild/clean.manifest" split_clean)
+    assert_contains("${split_clean}" "output-file-map.json" "Swift clean manifest")
+    assert_contains("${split_clean}" ".swiftdeps" "Swift clean manifest")
+    report_path_from_output("${split_output}" split_report_path)
+    file(READ "${split_report_path}" split_report)
+    assert_contains("${split_report}" "emit-module-splitapp" "Swift split scheduler report")
+  endif()
+
+  if(CMAKE_HOST_SYSTEM_NAME STREQUAL "Darwin")
+    set(bundle_source_dir "${TEST_BINARY_ROOT}/bundle-meta-src")
+    set(bundle_binary_dir "${TEST_BINARY_ROOT}/bundle-meta-build")
+    write_apple_bundle_project("${bundle_source_dir}" ReprobuildAppleBundleMeta)
+    run_configure("${bundle_source_dir}" "${bundle_binary_dir}" TRUE "")
+    file(READ "${bundle_binary_dir}/CMakeFiles/reprobuild/provider.meta" bundle_metadata)
+    assert_contains("${bundle_metadata}" "m8_apple_bundles=generated" "Apple bundle metadata")
+    file(READ "${bundle_binary_dir}/CMakeFiles/reprobuild/clean.manifest" bundle_clean)
+    assert_contains("${bundle_clean}" "Info.plist" "Apple bundle clean manifest")
+    assert_contains("${bundle_clean}" "Resources/data.txt" "Apple bundle clean manifest")
+    assert_contains("${bundle_clean}" "ReproKit.framework" "Apple framework clean manifest")
+    assert_contains("${bundle_clean}" "reproplug.bundle" "Apple CFBundle clean manifest")
+    start_runquota("${TEST_BINARY_ROOT}" runquota_socket runquota_pid)
+    run_build("${bundle_binary_dir}" "" "${runquota_socket}" bundle_output)
+    stop_runquota("${runquota_pid}")
+    report_path_from_output("${bundle_output}" bundle_report_path)
+    file(READ "${bundle_report_path}" bundle_report)
+    assert_contains("${bundle_report}" "bundle-content-bundleapp" "Apple bundle scheduler report")
+    assert_contains("${bundle_report}" "bundle-content-ReproKit" "Apple framework scheduler report")
+    assert_contains("${bundle_report}" "bundle-content-reproplug" "Apple CFBundle scheduler report")
+    assert_file_exists("${bundle_binary_dir}/ReproKit.framework/Versions/A/Resources/Info.plist" "Apple framework Info.plist")
+    assert_file_exists("${bundle_binary_dir}/reproplug.bundle/Contents/Info.plist" "Apple CFBundle Info.plist")
+  endif()
+
+  resolve_cuda_compiler(cuda_compiler)
+  if(NOT "${cuda_compiler}" STREQUAL "")
+    run_cuda_available_fixture("cuda-byproducts" "${cuda_compiler}" "")
+  endif()
+
+  resolve_clang_cuda_compiler(clang_cuda_compiler)
+  if(NOT "${clang_cuda_compiler}" STREQUAL "")
+    run_clang_cuda_available_fixture("clang-cuda-byproducts" "${clang_cuda_compiler}")
+  endif()
+
+  resolve_ispc_compiler(ispc_compiler)
+  if(NOT "${ispc_compiler}" STREQUAL "")
+    run_ispc_available_fixture("ispc-byproducts" "${ispc_compiler}")
+  endif()
 else()
   message(FATAL_ERROR "Unknown TEST_MODE: ${TEST_MODE}")
 endif()
