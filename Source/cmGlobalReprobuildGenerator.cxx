@@ -1048,6 +1048,40 @@ void ReprobuildAppendHcrCompilePolicy(std::vector<std::string>& args)
     args.push_back("-fno-optimize-sibling-calls");
   }
 }
+
+bool ReprobuildLooksLikeMakeProgram(std::string const& path)
+{
+  std::string const name =
+    cmSystemTools::LowerCase(cmSystemTools::GetFilenameName(path));
+  return name == "make" || name == "gmake" || name == "nmake" ||
+    name == "nmake.exe" || name == "mingw32-make" ||
+    name == "mingw32-make.exe" || name == "wmake" ||
+    name == "wmake.exe" || name == "jom" || name == "jom.exe";
+}
+
+std::string ReprobuildCliFromEnv()
+{
+  if (cm::optional<std::string> reproEnv =
+        cmSystemTools::GetEnvVar("REPROBUILD_REPRO")) {
+    if (!reproEnv->empty() && cmSystemTools::FileExists(*reproEnv, true)) {
+      return *reproEnv;
+    }
+  }
+  return std::string();
+}
+
+std::string ReprobuildFindCliOnPath()
+{
+#ifdef _WIN32
+  std::string makeProgram = cmSystemTools::FindProgram("repro.exe");
+  if (makeProgram.empty()) {
+    makeProgram = cmSystemTools::FindProgram("repro");
+  }
+  return makeProgram;
+#else
+  return cmSystemTools::FindProgram("repro");
+#endif
+}
 }
 
 cmGlobalReprobuildGenerator::cmGlobalReprobuildGenerator(cmake* cm)
@@ -1069,26 +1103,12 @@ bool cmGlobalReprobuildGenerator::FindMakeProgram(cmMakefile* mf)
   //   1. CMAKE_MAKE_PROGRAM already set by the caller (e.g. -D on cmdline)
   //   2. $REPROBUILD_REPRO env var (set by the develop wrapper)
   //   3. `repro` (or `repro.exe` on Windows) on PATH
-  if (mf->GetDefinition("CMAKE_MAKE_PROGRAM").IsOff()) {
-    std::string makeProgram;
-    if (cm::optional<std::string> reproEnv =
-          cmSystemTools::GetEnvVar("REPROBUILD_REPRO")) {
-      if (!reproEnv->empty() && cmSystemTools::FileExists(*reproEnv, true)) {
-        makeProgram = *reproEnv;
-      }
-    }
+  std::string const current = mf->GetSafeDefinition("CMAKE_MAKE_PROGRAM");
+  if (mf->GetDefinition("CMAKE_MAKE_PROGRAM").IsOff() ||
+      ReprobuildLooksLikeMakeProgram(current)) {
+    std::string makeProgram = ReprobuildCliFromEnv();
     if (makeProgram.empty()) {
-#ifdef _WIN32
-      // Windows: FindProgram already tries the .exe extension automatically,
-      // but be explicit so a bare-name lookup behaves the same as the env-var
-      // path above.
-      makeProgram = cmSystemTools::FindProgram("repro.exe");
-      if (makeProgram.empty()) {
-        makeProgram = cmSystemTools::FindProgram("repro");
-      }
-#else
-      makeProgram = cmSystemTools::FindProgram("repro");
-#endif
+      makeProgram = ReprobuildFindCliOnPath();
     }
     if (!makeProgram.empty()) {
       mf->AddCacheDefinition("CMAKE_MAKE_PROGRAM", makeProgram,
@@ -4324,7 +4344,6 @@ cmGlobalReprobuildGenerator::GenerateBuildCommand(
       buildOptions, makeOptions, isInTryCompile);
   }
 
-  GeneratedMakeCommand makeCommand;
   bool cleanTarget = buildOptions.Clean;
   for (std::string const& targetName : targetNames) {
     if (targetName == "clean") {
@@ -4332,18 +4351,79 @@ cmGlobalReprobuildGenerator::GenerateBuildCommand(
       break;
     }
   }
-  makeCommand.Add(cmSystemTools::GetCMakeCommand());
-  makeCommand.Add("--reprobuild-launch");
-  makeCommand.Add(projectDir);
-  makeCommand.Add(cleanTarget ? "--action=clean" : "--action=build");
-  makeCommand.Add(cmStrCat("--project=", projectName));
-  if (!config.empty()) {
-    makeCommand.Add(cmStrCat("--config=", config));
+  if (cleanTarget) {
+    GeneratedMakeCommand cleanCommand;
+    cleanCommand.Add(cmSystemTools::GetCMakeCommand());
+    cleanCommand.Add("--reprobuild-launch");
+    cleanCommand.Add(projectDir);
+    cleanCommand.Add("--action=clean");
+    cleanCommand.Add(cmStrCat("--project=", projectName));
+    if (!config.empty()) {
+      cleanCommand.Add(cmStrCat("--config=", config));
+    }
+    return { std::move(cleanCommand) };
   }
-  for (std::string const& targetName : targetNames) {
-    if (!targetName.empty() && targetName != "clean") {
-      makeCommand.Add(cmStrCat("--target=", targetName));
+
+  std::string const effectiveConfig =
+    this->IsMultiConfig() ? config : std::string();
+  auto selectedTarget = [&effectiveConfig](std::string const& targetName) {
+    if (effectiveConfig.empty()) {
+      return targetName;
+    }
+    if (targetName.empty()) {
+      return cmStrCat("all:", effectiveConfig);
+    }
+    if (targetName == "all" || targetName == "default") {
+      return cmStrCat(targetName, ":", effectiveConfig);
+    }
+    std::string::size_type colon = targetName.find(':');
+    if (colon == std::string::npos) {
+      return cmStrCat(targetName, ":", effectiveConfig);
+    }
+    std::string const suffix = targetName.substr(colon + 1);
+    if (suffix == "all") {
+      return cmStrCat(targetName, ":", effectiveConfig);
+    }
+    if (suffix == effectiveConfig || suffix.find(':') != std::string::npos) {
+      return targetName;
+    }
+    return cmStrCat(targetName, ":", effectiveConfig);
+  };
+
+  std::string repro = ReprobuildCliFromEnv();
+  if (repro.empty() && !makeProgram.empty() &&
+      !ReprobuildLooksLikeMakeProgram(makeProgram)) {
+    repro = makeProgram;
+  }
+  if (repro.empty()) {
+    repro = ReprobuildFindCliOnPath();
+  }
+  if (repro.empty()) {
+    repro = "repro";
+  }
+  std::vector<std::string> targets;
+  if (targetNames.empty()) {
+    targets.emplace_back(selectedTarget(std::string()));
+  } else {
+    for (std::string const& targetName : targetNames) {
+      if (!targetName.empty() && targetName != "clean") {
+        targets.emplace_back(selectedTarget(targetName));
+      }
     }
   }
-  return { std::move(makeCommand) };
+
+  std::vector<GeneratedMakeCommand> commands;
+  for (std::string const& target : targets) {
+    GeneratedMakeCommand makeCommand;
+    makeCommand.Add(repro);
+    makeCommand.Add("build");
+    if (!target.empty()) {
+      makeCommand.Add(cmStrCat(projectDir, "#", target));
+    }
+    makeCommand.Add("--tool-provisioning=path");
+    makeCommand.Add(cmStrCat("--work-root=", projectDir,
+                             "/CMakeFiles/reprobuild"));
+    commands.emplace_back(std::move(makeCommand));
+  }
+  return commands;
 }
