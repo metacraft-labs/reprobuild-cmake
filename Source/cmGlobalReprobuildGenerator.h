@@ -78,6 +78,8 @@ public:
     std::vector<std::string> const& makeOptions = std::vector<std::string>(),
     BuildTryCompile isInTryCompile = BuildTryCompile::No) override;
 
+  void PrimeProviderMetadata();
+
 private:
   void WriteProviderMetadata();
 

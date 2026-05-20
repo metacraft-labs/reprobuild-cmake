@@ -49,6 +49,7 @@
 #include "cmGlobCacheEntry.h" // IWYU pragma: keep
 #include "cmGlobalGenerator.h"
 #include "cmGlobalGeneratorFactory.h"
+#include "cmGlobalReprobuildGenerator.h"
 #include "cmJSONState.h"
 #include "cmLinkLineComputer.h"
 #include "cmList.h"
@@ -3280,6 +3281,14 @@ int cmake::Generate()
   // variables created during Generate are saved. (Specifically target GUIDs
   // for the Visual Studio and Xcode generators.)
   this->SaveCache(this->GetHomeOutputDirectory());
+  if (auto* reprobuildGenerator =
+        dynamic_cast<cmGlobalReprobuildGenerator*>(
+          this->GlobalGenerator.get())) {
+    reprobuildGenerator->PrimeProviderMetadata();
+    if (cmSystemTools::GetErrorOccurredFlag()) {
+      return -1;
+    }
+  }
 
 #if !defined(CMAKE_BOOTSTRAP)
   this->GlobalGenerator->WriteInstallJson();

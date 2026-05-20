@@ -1082,6 +1082,21 @@ std::string ReprobuildFindCliOnPath()
   return cmSystemTools::FindProgram("repro");
 #endif
 }
+
+bool ReprobuildCliSupportsProviderPriming(std::string const& repro)
+{
+  if (repro.empty()) {
+    return false;
+  }
+  std::vector<std::string> command = { repro, "capabilities",
+                                       "--format=json" };
+  std::string output;
+  int ret = 0;
+  bool const ok = cmSystemTools::RunSingleCommand(
+    command, &output, nullptr, &ret, nullptr, cmSystemTools::OUTPUT_NONE);
+  return ok && ret == 0 &&
+    output.find("\"provider-cache-priming\"") != std::string::npos;
+}
 }
 
 cmGlobalReprobuildGenerator::cmGlobalReprobuildGenerator(cmake* cm)
@@ -1344,6 +1359,99 @@ void cmGlobalReprobuildGenerator::Generate()
   }
 
   this->WriteProviderMetadata();
+}
+
+void cmGlobalReprobuildGenerator::PrimeProviderMetadata()
+{
+  if (this->LocalGenerators.empty()) {
+    return;
+  }
+
+  std::string const binaryDir =
+    this->GetCMakeInstance()->GetHomeOutputDirectory();
+  std::string const providerDir =
+    cmStrCat(binaryDir, "/CMakeFiles/reprobuild");
+  std::string const wrapperDir = cmStrCat(providerDir, "/bin");
+  std::string const providerFile = cmStrCat(binaryDir, "/reprobuild.nim");
+  std::string const metadataFile = cmStrCat(providerDir, "/provider.meta");
+  if (!cmSystemTools::FileExists(providerFile, true) ||
+      !cmSystemTools::FileExists(metadataFile, true)) {
+    return;
+  }
+
+  std::string repro = ReprobuildCliFromEnv();
+  if (repro.empty()) {
+    std::string const makeProgram =
+      this->LocalGenerators.front()->GetMakefile()->GetSafeDefinition(
+        "CMAKE_MAKE_PROGRAM");
+    if (!makeProgram.empty() && !ReprobuildLooksLikeMakeProgram(makeProgram)) {
+      repro = makeProgram;
+    }
+  }
+  if (repro.empty()) {
+    repro = ReprobuildFindCliOnPath();
+  }
+  if (repro.empty()) {
+    return;
+  }
+  if (!ReprobuildCliSupportsProviderPriming(repro)) {
+    return;
+  }
+
+  std::vector<std::string> env = cmSystemTools::GetEnvironmentVariables();
+  auto setEnv = [&env](std::string const& key, std::string const& value) {
+    std::string const prefix = key + "=";
+    for (std::string& entry : env) {
+      if (entry.rfind(prefix, 0) == 0) {
+        entry = prefix + value;
+        return;
+      }
+    }
+    env.push_back(prefix + value);
+  };
+
+  std::string oldPath;
+  if (cm::optional<std::string> envPath = cmSystemTools::GetEnvVar("PATH")) {
+    oldPath = *envPath;
+  }
+#ifdef _WIN32
+  setEnv("PATH", cmStrCat(wrapperDir, ";", oldPath));
+#else
+  setEnv("PATH", cmStrCat(wrapperDir, ":", oldPath));
+#endif
+
+  std::vector<std::string> command = {
+    repro,
+    "build",
+    "--tool-provisioning=path",
+    cmStrCat("--work-root=", providerDir),
+    "--prepare-only",
+    "--skip-cmake-regeneration",
+    "--progress=none",
+    "--report=none",
+    "--log=quiet",
+  };
+
+  std::string output;
+  std::string error;
+  int ret = 0;
+  bool const ok = cmSystemTools::RunSingleCommand(
+    command, &output, &error, &ret, binaryDir.c_str(),
+    cmSystemTools::OUTPUT_NONE, cmDuration::zero(), cmProcessOutput::Auto,
+    env);
+  if (!ok || ret != 0) {
+    std::ostringstream message;
+    message << "Reprobuild provider preparation failed while running: "
+            << cmSystemTools::PrintSingleCommand(command);
+    if (!output.empty()) {
+      message << "\nstdout:\n" << output;
+    }
+    if (!error.empty()) {
+      message << "\nstderr:\n" << error;
+    }
+    this->GetCMakeInstance()->IssueMessage(MessageType::FATAL_ERROR,
+                                           message.str());
+  }
 }
 
 void cmGlobalReprobuildGenerator::WriteProviderMetadata()
@@ -4338,11 +4446,9 @@ cmGlobalReprobuildGenerator::GenerateBuildCommand(
   cmBuildOptions buildOptions, std::vector<std::string> const& makeOptions,
   BuildTryCompile isInTryCompile)
 {
-  if (isInTryCompile == BuildTryCompile::Yes) {
-    return this->cmGlobalUnixMakefileGenerator3::GenerateBuildCommand(
-      makeProgram, projectName, projectDir, targetNames, config, jobs, verbose,
-      buildOptions, makeOptions, isInTryCompile);
-  }
+  (void)jobs;
+  (void)verbose;
+  (void)makeOptions;
 
   bool cleanTarget = buildOptions.Clean;
   for (std::string const& targetName : targetNames) {
@@ -4367,27 +4473,31 @@ cmGlobalReprobuildGenerator::GenerateBuildCommand(
   std::string const effectiveConfig =
     this->IsMultiConfig() ? config : std::string();
   auto selectedTarget = [&effectiveConfig](std::string const& targetName) {
-    if (effectiveConfig.empty()) {
-      return targetName;
+    std::string normalizedTarget = targetName;
+    if (cmHasSuffix(normalizedTarget, "/fast")) {
+      normalizedTarget.resize(normalizedTarget.size() - 5);
     }
-    if (targetName.empty()) {
+    if (effectiveConfig.empty()) {
+      return normalizedTarget;
+    }
+    if (normalizedTarget.empty()) {
       return cmStrCat("all:", effectiveConfig);
     }
-    if (targetName == "all" || targetName == "default") {
-      return cmStrCat(targetName, ":", effectiveConfig);
+    if (normalizedTarget == "all" || normalizedTarget == "default") {
+      return cmStrCat(normalizedTarget, ":", effectiveConfig);
     }
-    std::string::size_type colon = targetName.find(':');
+    std::string::size_type colon = normalizedTarget.find(':');
     if (colon == std::string::npos) {
-      return cmStrCat(targetName, ":", effectiveConfig);
+      return cmStrCat(normalizedTarget, ":", effectiveConfig);
     }
-    std::string const suffix = targetName.substr(colon + 1);
+    std::string const suffix = normalizedTarget.substr(colon + 1);
     if (suffix == "all") {
-      return cmStrCat(targetName, ":", effectiveConfig);
+      return cmStrCat(normalizedTarget, ":", effectiveConfig);
     }
     if (suffix == effectiveConfig || suffix.find(':') != std::string::npos) {
-      return targetName;
+      return normalizedTarget;
     }
-    return cmStrCat(targetName, ":", effectiveConfig);
+    return cmStrCat(normalizedTarget, ":", effectiveConfig);
   };
 
   std::string repro = ReprobuildCliFromEnv();
@@ -4423,6 +4533,11 @@ cmGlobalReprobuildGenerator::GenerateBuildCommand(
     makeCommand.Add("--tool-provisioning=path");
     makeCommand.Add(cmStrCat("--work-root=", projectDir,
                              "/CMakeFiles/reprobuild"));
+    if (isInTryCompile == BuildTryCompile::Yes) {
+      makeCommand.Add("--progress=none");
+      makeCommand.Add("--report=none");
+      makeCommand.Add("--log=quiet");
+    }
     commands.emplace_back(std::move(makeCommand));
   }
   return commands;
