@@ -1083,6 +1083,21 @@ std::string ReprobuildFindCliOnPath()
 #endif
 }
 
+std::string ReprobuildFindNativeMakeOnPath()
+{
+#ifdef _WIN32
+  return std::string();
+#else
+  for (char const* candidate : { "gmake", "make", "smake" }) {
+    std::string makeProgram = cmSystemTools::FindProgram(candidate);
+    if (!makeProgram.empty()) {
+      return makeProgram;
+    }
+  }
+  return std::string();
+#endif
+}
+
 bool ReprobuildCliSupportsProviderPriming(std::string const& repro)
 {
   if (repro.empty()) {
@@ -1363,6 +1378,10 @@ void cmGlobalReprobuildGenerator::Generate()
 
 void cmGlobalReprobuildGenerator::PrimeProviderMetadata()
 {
+  if (this->GetCMakeInstance()->GetIsInTryCompile()) {
+    return;
+  }
+
   if (this->LocalGenerators.empty()) {
     return;
   }
@@ -3177,7 +3196,9 @@ void cmGlobalReprobuildGenerator::WriteProviderMetadata()
       }
 
       std::vector<std::string> linkDependencyActions;
-      auto appendLinkedTarget = [&](cmGeneratorTarget const* depTargetConst) {
+      std::vector<std::string> linkLibraryInputs;
+      auto appendLinkedTarget = [&](cmGeneratorTarget const* depTargetConst,
+                                    bool includeObjectLibraryOutputs) {
         cmGeneratorTarget* depTarget =
           const_cast<cmGeneratorTarget*>(depTargetConst);
         if (!depTarget || depTarget->IsImported()) {
@@ -3189,8 +3210,10 @@ void cmGlobalReprobuildGenerator::WriteProviderMetadata()
           return;
         }
         if (depType == cmStateEnums::OBJECT_LIBRARY) {
-          appendObjectLibraryOutputs(depTarget, linkObjects,
-                                     linkDependencyActions);
+          if (includeObjectLibraryOutputs) {
+            appendObjectLibraryOutputs(depTarget, linkObjects,
+                                       linkDependencyActions);
+          }
           return;
         }
         if (depType == cmStateEnums::STATIC_LIBRARY ||
@@ -3204,7 +3227,7 @@ void cmGlobalReprobuildGenerator::WriteProviderMetadata()
           std::string const depPath = ReprobuildRelativeTo(
             binaryDir, depTarget->GetFullPath(config, artifact, true));
           ReprobuildAppendUnique(
-            linkObjects,
+            linkLibraryInputs,
             ReprobuildConfigPath(depPath, config, multiConfig));
           ReprobuildAppendUnique(linkDependencyActions,
                                 ReprobuildSafeId(cmStrCat("link-",
@@ -3218,7 +3241,7 @@ void cmGlobalReprobuildGenerator::WriteProviderMetadata()
       for (cmSourceFile const* externalObject : externalObjects) {
         std::string const& objLib = externalObject->GetObjectLibrary();
         if (!objLib.empty()) {
-          appendLinkedTarget(lg->FindGeneratorTargetToUse(objLib));
+          appendLinkedTarget(lg->FindGeneratorTargetToUse(objLib), true);
         } else {
           ReprobuildAppendUnique(
             linkObjects,
@@ -3229,11 +3252,11 @@ void cmGlobalReprobuildGenerator::WriteProviderMetadata()
       if (cmComputeLinkInformation* cli = gt->GetLinkInformation(config)) {
         for (cmComputeLinkInformation::Item const& item : cli->GetItems()) {
           if (item.Target) {
-            appendLinkedTarget(item.Target);
+            appendLinkedTarget(item.Target, false);
           } else if (item.ObjectSource) {
             std::string const& objLib = item.ObjectSource->GetObjectLibrary();
             if (!objLib.empty()) {
-              appendLinkedTarget(lg->FindGeneratorTargetToUse(objLib));
+              appendLinkedTarget(lg->FindGeneratorTargetToUse(objLib), true);
             } else {
               ReprobuildAppendUnique(
                 linkObjects,
@@ -3389,6 +3412,9 @@ void cmGlobalReprobuildGenerator::WriteProviderMetadata()
         target.LinkAction.ToolId = ReprobuildToolId(linkLang);
         target.LinkAction.Args = linkArgs;
         target.LinkAction.Inputs = linkObjects;
+        for (std::string const& linkLibraryInput : linkLibraryInputs) {
+          ReprobuildAppendUnique(target.LinkAction.Inputs, linkLibraryInput);
+        }
         if (declareOutputs) {
           target.LinkAction.Outputs = { realOutput };
         }
@@ -4455,6 +4481,14 @@ cmGlobalReprobuildGenerator::GenerateBuildCommand(
     if (targetName == "clean") {
       cleanTarget = true;
       break;
+    }
+  }
+  if (isInTryCompile == BuildTryCompile::Yes) {
+    std::string const nativeMake = ReprobuildFindNativeMakeOnPath();
+    if (!nativeMake.empty()) {
+      return this->cmGlobalUnixMakefileGenerator3::GenerateBuildCommand(
+        nativeMake, projectName, projectDir, targetNames, config, jobs, verbose,
+        buildOptions, makeOptions, isInTryCompile);
     }
   }
   if (cleanTarget) {

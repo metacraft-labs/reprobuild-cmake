@@ -119,7 +119,7 @@ std::unique_ptr<cmMakefileTargetGenerator> cmMakefileTargetGenerator::New(
 std::string const& cmMakefileTargetGenerator::GetConfigName() const
 {
   auto const& configNames = this->LocalGenerator->GetConfigNames();
-  assert(configNames.size() == 1);
+  assert(!configNames.empty());
   return configNames.front();
 }
 

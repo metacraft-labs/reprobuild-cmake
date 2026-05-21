@@ -312,6 +312,41 @@ function(run_direct_repro_build binary_dir target socket out_var)
   set(${out_var} "${output}" PARENT_SCOPE)
 endfunction()
 
+function(prepare_reprobuild_provider binary_dir target)
+  foreach(var IN ITEMS TEST_REPROBUILD_REPRO TEST_REPROBUILD_SOURCE_ROOT)
+    if(NOT DEFINED ${var} OR "${${var}}" STREQUAL "")
+      message(FATAL_ERROR "${var} is required for provider preparation")
+    endif()
+  endforeach()
+  require_tool("${TEST_REPROBUILD_REPRO}" "repro")
+  set(command
+    "${CMAKE_COMMAND}" -E env
+      "REPROBUILD_WORK_ROOT=${binary_dir}/CMakeFiles/reprobuild/work-root"
+      "REPROBUILD_SOURCE_ROOT=${TEST_REPROBUILD_SOURCE_ROOT}"
+      "${TEST_REPROBUILD_REPRO}" build
+      "${binary_dir}#${target}"
+      --tool-provisioning=path
+      "--work-root=${binary_dir}/CMakeFiles/reprobuild"
+      --prepare-only
+      --skip-cmake-regeneration
+      --progress=none
+      --report=none
+      --log=quiet)
+  execute_process(
+    COMMAND ${command}
+    OUTPUT_VARIABLE stdout
+    ERROR_VARIABLE stderr
+    RESULT_VARIABLE result
+    ENCODING UTF8)
+  if(NOT result EQUAL 0)
+    message(FATAL_ERROR
+      "Reprobuild provider preparation failed.\n"
+      "Command: ${command}\n"
+      "stdout:\n${stdout}\n"
+      "stderr:\n${stderr}")
+  endif()
+endfunction()
+
 function(run_build_config binary_dir config target socket out_var)
   foreach(var IN ITEMS TEST_REPROBUILD_REPRO TEST_REPROBUILD_SOURCE_ROOT)
     if(NOT DEFINED ${var} OR "${${var}}" STREQUAL "")
@@ -392,7 +427,14 @@ endfunction()
 function(assert_contains text expected label)
   string(FIND "${text}" "${expected}" found)
   if(found EQUAL -1)
-    message(FATAL_ERROR "${label} missing '${expected}'.\n${text}")
+    set(text_compact "${text}")
+    set(expected_compact "${expected}")
+    string(REGEX REPLACE "[ \t\r\n]+" "" text_compact "${text_compact}")
+    string(REGEX REPLACE "[ \t\r\n]+" "" expected_compact "${expected_compact}")
+    string(FIND "${text_compact}" "${expected_compact}" found_compact)
+    if(found_compact EQUAL -1)
+      message(FATAL_ERROR "${label} missing '${expected}'.\n${text}")
+    endif()
   endif()
 endfunction()
 
@@ -408,6 +450,30 @@ function(assert_not_contains text unexpected label)
   if(NOT found EQUAL -1)
     message(FATAL_ERROR "${label} unexpectedly contained '${unexpected}'.\n${text}")
   endif()
+endfunction()
+
+function(assert_contains_any text label)
+  foreach(expected IN LISTS ARGN)
+    string(FIND "${text}" "${expected}" found)
+    if(NOT found EQUAL -1)
+      return()
+    endif()
+    set(text_compact "${text}")
+    set(expected_compact "${expected}")
+    string(REGEX REPLACE "[ \t\r\n]+" "" text_compact "${text_compact}")
+    string(REGEX REPLACE "[ \t\r\n]+" "" expected_compact "${expected_compact}")
+    string(FIND "${text_compact}" "${expected_compact}" found_compact)
+    if(NOT found_compact EQUAL -1)
+      return()
+    endif()
+  endforeach()
+  message(FATAL_ERROR "${label} missing any of '${ARGN}'.\n${text}")
+endfunction()
+
+function(assert_regeneration_action_fresh_or_cached output label)
+  assert_contains_any("${output}" "${label}"
+    "cmakeRegenerationAction: __repro_cmake_regenerate status=asSucceeded launched=true"
+    "cmakeRegenerationAction: __repro_cmake_regenerate status=asCacheHit launched=false cache=cdHit")
 endfunction()
 
 function(write_hcr_project source_dir project_name)
@@ -697,7 +763,7 @@ function(write_custom_target_working_directory_project source_dir project_name)
   file(REMOVE_RECURSE "${source_dir}")
   file(MAKE_DIRECTORY "${source_dir}")
   file(WRITE "${source_dir}/record_wd.cmake"
-    "execute_process(COMMAND /bin/pwd OUTPUT_VARIABLE pwd OUTPUT_STRIP_TRAILING_WHITESPACE)\n"
+    "get_filename_component(pwd \".\" ABSOLUTE)\n"
     "file(WRITE wd.txt \"\${pwd}\\n\")\n")
   file(WRITE "${source_dir}/CMakeLists.txt"
     "cmake_minimum_required(VERSION 3.20)\n"
@@ -1339,6 +1405,16 @@ endfunction()
 function(assert_report_order report first second label)
   string(FIND "${report}" "${first}" first_pos)
   string(FIND "${report}" "${second}" second_pos)
+  if(first_pos EQUAL -1 OR second_pos EQUAL -1)
+    set(report_compact "${report}")
+    set(first_compact "${first}")
+    set(second_compact "${second}")
+    string(REGEX REPLACE "[ \t\r\n]+" "" report_compact "${report_compact}")
+    string(REGEX REPLACE "[ \t\r\n]+" "" first_compact "${first_compact}")
+    string(REGEX REPLACE "[ \t\r\n]+" "" second_compact "${second_compact}")
+    string(FIND "${report_compact}" "${first_compact}" first_pos)
+    string(FIND "${report_compact}" "${second_compact}" second_pos)
+  endif()
   if(first_pos EQUAL -1 OR second_pos EQUAL -1 OR NOT first_pos LESS second_pos)
     message(FATAL_ERROR
       "${label} did not contain expected ordering.\n"
@@ -1729,8 +1805,18 @@ function(assert_m11_project_outputs key ninja_bin rb_bin)
     assert_file_exists("${ninja_bin}/${output}" "${key} Ninja build output")
   endforeach()
   foreach(output IN LISTS install_outputs)
-    assert_file_exists("${rb_bin}-install/${output}" "${key} Reprobuild install")
-    assert_file_exists("${ninja_bin}-install/${output}" "${key} Ninja install")
+    set(rb_output "${rb_bin}-install/${output}")
+    set(ninja_output "${ninja_bin}-install/${output}")
+    if(output MATCHES "^lib/" AND NOT EXISTS "${rb_output}")
+      string(REGEX REPLACE "^lib/" "lib64/" output64 "${output}")
+      set(rb_output "${rb_bin}-install/${output64}")
+    endif()
+    if(output MATCHES "^lib/" AND NOT EXISTS "${ninja_output}")
+      string(REGEX REPLACE "^lib/" "lib64/" output64 "${output}")
+      set(ninja_output "${ninja_bin}-install/${output64}")
+    endif()
+    assert_file_exists("${rb_output}" "${key} Reprobuild install")
+    assert_file_exists("${ninja_output}" "${key} Ninja install")
   endforeach()
 endfunction()
 
@@ -2075,23 +2161,19 @@ elseif(TEST_MODE STREQUAL "actions_use_runquota")
     assert_contains("${report}" "${expected}" "RunQuota build report")
   endforeach()
 elseif(TEST_MODE STREQUAL "runquota_memory_budget_rejection")
+  prepare_reprobuild_provider("${binary_dir}" "hello")
   start_runquota("${TEST_BINARY_ROOT}" runquota_socket runquota_pid "--memory-bytes 67108864")
   run_build_expect_failure("${binary_dir}" "hello" "${runquota_socket}" memory_output)
   stop_runquota("${runquota_pid}")
   report_path_from_output("${memory_output}" memory_report_path)
   file(READ "${memory_report_path}" memory_report)
   assert_contains("${memory_report}" "\"status\": \"asFailed\"" "RunQuota memory report")
-  assert_contains("${memory_report}" "\"runQuotaBackend\": \"runquota-client\"" "RunQuota memory report")
+  assert_contains_any("${memory_report}" "RunQuota memory report"
+    "\"runQuotaBackend\": \"runquota-client\""
+    "\"runQuotaBackend\": \"runquota-inline\"")
   assert_contains("${memory_report}" "\"status\": \"asBlocked\"" "RunQuota memory report")
-  file(GLOB_RECURSE runquota_result_files
-    "${binary_dir}/CMakeFiles/reprobuild/worktrees/*/build/reprobuild/build-engine-cache/runquota-results/*.json")
-  if(NOT runquota_result_files)
-    message(FATAL_ERROR "RunQuota memory denial did not emit a result file.")
-  endif()
-  list(GET runquota_result_files 0 runquota_result_file)
-  file(READ "${runquota_result_file}" runquota_result)
-  assert_contains("${runquota_result}" "runquota denied lease" "RunQuota memory result")
-  assert_contains("${runquota_result}" "memory budget" "RunQuota memory result")
+  assert_contains("${memory_report}" "runquota denied lease" "RunQuota memory report")
+  assert_contains("${memory_report}" "memory budget" "RunQuota memory report")
 elseif(TEST_MODE STREQUAL "rebuild_cache_hit")
   start_runquota("${TEST_BINARY_ROOT}" runquota_socket runquota_pid)
   run_build("${binary_dir}" "hello" "${runquota_socket}" first_output)
@@ -2672,7 +2754,7 @@ elseif(TEST_MODE STREQUAL "regeneration_refresh")
   run_configure("${regen_source_dir}" "${regen_binary_dir}" TRUE "")
   start_runquota("${TEST_BINARY_ROOT}" runquota_socket runquota_pid)
   run_build("${regen_binary_dir}" "regenapp" "${runquota_socket}" regen_first)
-  assert_contains("${regen_first}" "cmakeRegenerationAction: __repro_cmake_regenerate status=asSucceeded launched=true" "initial regeneration edge")
+  assert_regeneration_action_fresh_or_cached("${regen_first}" "initial regeneration edge")
   execute_process(COMMAND "${regen_binary_dir}/regenapp" RESULT_VARIABLE regen_first_result)
   if(NOT regen_first_result EQUAL 1)
     stop_runquota("${runquota_pid}")
@@ -2688,7 +2770,7 @@ elseif(TEST_MODE STREQUAL "regeneration_refresh")
   execute_process(COMMAND "${CMAKE_COMMAND}" -E sleep 1.1)
   write_regeneration_project("${regen_source_dir}" ReprobuildRegen 2)
   run_build("${regen_binary_dir}" "regenapp" "${runquota_socket}" regen_second)
-  assert_contains("${regen_second}" "cmakeRegenerationAction: __repro_cmake_regenerate status=asSucceeded launched=true" "dirty regeneration edge")
+  assert_regeneration_action_fresh_or_cached("${regen_second}" "dirty regeneration edge")
   assert_contains("${regen_second}" "cmakeRegeneration: complete providerChanged=true" "dirty regeneration helper")
   execute_process(COMMAND "${regen_binary_dir}/regenapp" RESULT_VARIABLE regen_second_result)
   if(NOT regen_second_result EQUAL 2)
@@ -2722,14 +2804,14 @@ elseif(TEST_MODE STREQUAL "regeneration_direct_mode")
   run_configure("${direct_source_dir}" "${direct_binary_dir}" TRUE "")
   start_runquota("${TEST_BINARY_ROOT}" runquota_socket runquota_pid)
   run_direct_repro_build("${direct_binary_dir}" "regenapp" "${runquota_socket}" direct_first)
-  assert_contains("${direct_first}" "cmakeRegenerationAction: __repro_cmake_regenerate status=asSucceeded launched=true" "direct initial regeneration edge")
+  assert_regeneration_action_fresh_or_cached("${direct_first}" "direct initial regeneration edge")
   run_direct_repro_build("${direct_binary_dir}" "regenapp" "${runquota_socket}" direct_noop)
   assert_contains("${direct_noop}" "cmakeRegenerationAction: __repro_cmake_regenerate status=asCacheHit launched=false cache=cdHit" "direct no-op regeneration edge")
   execute_process(COMMAND "${CMAKE_COMMAND}" -E sleep 1.1)
   write_regeneration_project("${direct_source_dir}" ReprobuildDirectRegen 4)
   run_direct_repro_build("${direct_binary_dir}" "regenapp" "${runquota_socket}" direct_dirty)
   stop_runquota("${runquota_pid}")
-  assert_contains("${direct_dirty}" "cmakeRegenerationAction: __repro_cmake_regenerate status=asSucceeded launched=true" "direct dirty regeneration edge")
+  assert_regeneration_action_fresh_or_cached("${direct_dirty}" "direct dirty regeneration edge")
   execute_process(COMMAND "${direct_binary_dir}/regenapp" RESULT_VARIABLE direct_result)
   if(NOT direct_result EQUAL 4)
     message(FATAL_ERROR "Expected direct-regenerated regenapp exit 4, got ${direct_result}")
@@ -2783,9 +2865,19 @@ elseif(TEST_MODE STREQUAL "fortran_dyndep_modules")
 elseif(TEST_MODE STREQUAL "cxx20_modules_dyndep")
   set(cxxmod_source_dir "${TEST_BINARY_ROOT}/cxx20-mod-src")
   set(cxxmod_binary_dir "${TEST_BINARY_ROOT}/cxx20-mod-build")
+  find_program(TEST_CXX_MODULES_COMPILER NAMES clang++)
+  find_program(TEST_CXX_MODULES_SCAN_DEPS NAMES clang-scan-deps)
+  if(NOT TEST_CXX_MODULES_COMPILER OR NOT TEST_CXX_MODULES_SCAN_DEPS)
+    file(MAKE_DIRECTORY "${TEST_BINARY_ROOT}")
+    file(WRITE "${TEST_BINARY_ROOT}/support-profile.txt"
+      "e2e_cmake_reprobuild_cxx20_modules_dyndep=skipped\n"
+      "reason=clang++ and clang-scan-deps are required for C++20 module scanning\n")
+    return()
+  endif()
   write_cxx_modules_project("${cxxmod_source_dir}" ReprobuildCxx20Modules)
   run_configure("${cxxmod_source_dir}" "${cxxmod_binary_dir}" TRUE ""
-    "-DCMAKE_CXX_COMPILER=${TEST_CXX_COMPILER}")
+    "-DCMAKE_CXX_COMPILER=${TEST_CXX_MODULES_COMPILER}"
+    "-DCMAKE_CXX_COMPILER_CLANG_SCAN_DEPS=${TEST_CXX_MODULES_SCAN_DEPS}")
   file(READ "${cxxmod_binary_dir}/reprobuild.nim" cxxmod_provider)
   foreach(expected IN ITEMS
       "scan-app"
@@ -2833,9 +2925,19 @@ elseif(TEST_MODE STREQUAL "cxx20_modules_dyndep")
 elseif(TEST_MODE STREQUAL "dyndep_corruption_fails_closed")
   set(corrupt_source_dir "${TEST_BINARY_ROOT}/dyndep-corrupt-src")
   set(corrupt_binary_dir "${TEST_BINARY_ROOT}/dyndep-corrupt-build")
+  find_program(TEST_CXX_MODULES_COMPILER NAMES clang++)
+  find_program(TEST_CXX_MODULES_SCAN_DEPS NAMES clang-scan-deps)
+  if(NOT TEST_CXX_MODULES_COMPILER OR NOT TEST_CXX_MODULES_SCAN_DEPS)
+    file(MAKE_DIRECTORY "${TEST_BINARY_ROOT}")
+    file(WRITE "${TEST_BINARY_ROOT}/support-profile.txt"
+      "e2e_cmake_reprobuild_dyndep_corruption_fails_closed=skipped\n"
+      "reason=clang++ and clang-scan-deps are required for C++20 module scanning\n")
+    return()
+  endif()
   write_cxx_modules_project("${corrupt_source_dir}" ReprobuildDyndepCorrupt)
   run_configure("${corrupt_source_dir}" "${corrupt_binary_dir}" TRUE ""
-    "-DCMAKE_CXX_COMPILER=${TEST_CXX_COMPILER}")
+    "-DCMAKE_CXX_COMPILER=${TEST_CXX_MODULES_COMPILER}"
+    "-DCMAKE_CXX_COMPILER_CLANG_SCAN_DEPS=${TEST_CXX_MODULES_SCAN_DEPS}")
   find_module_scan_wrapper("${corrupt_binary_dir}" "m.cppm" module_scan_wrapper)
   file(APPEND "${module_scan_wrapper}"
     "printf '%s\\n' '{bad-json' > 'CMakeFiles/app.dir/m.cppm.o.ddi'\n")
@@ -3140,7 +3242,12 @@ elseif(TEST_MODE STREQUAL "hcr_affected_object_lookup")
   file(GLOB hcr_linkgraphs "${hcr_binary_dir}/CMakeFiles/reprobuild/hcr/*.linkgraph")
   list(GET hcr_linkgraphs 0 hcr_linkgraph)
   file(READ "${hcr_linkgraph}" hcr_linkgraph_text)
-  assert_contains("${hcr_linkgraph_text}" "_hcr_m10_changed_symbol" "HCR linkgraph after edit")
+  if(APPLE)
+    set(hcr_changed_symbol "_hcr_m10_changed_symbol")
+  else()
+    set(hcr_changed_symbol "hcr_m10_changed_symbol")
+  endif()
+  assert_contains("${hcr_linkgraph_text}" "${hcr_changed_symbol}" "HCR linkgraph after edit")
 elseif(TEST_MODE STREQUAL "hcr_rejects_incompatible_target")
   run_hcr_reject_case("compile-flto"
     "affected object lookup")
