@@ -298,6 +298,30 @@ std::string ReprobuildShellSingleQuote(std::string const& value)
   return out;
 }
 
+bool ReprobuildFinalizeWrapper(std::string const& path)
+{
+  if (!cmSystemTools::SetPermissions(path.c_str(), 0755).IsSuccess()) {
+    return false;
+  }
+#ifdef _WIN32
+  // The wrapper body is a POSIX /bin/sh script: Windows cannot CreateProcess
+  // it directly, and repro's PATH resolution deliberately skips extensionless
+  // files (they cannot be launched as Win32 apps). Emit a .cmd shim beside it
+  // -- discoverable via PATHEXT -- that runs the script body through `sh`.
+  // `%~dpn0` is this .cmd's path minus its extension, i.e. the sibling
+  // wrapper script.
+  std::string const shimPath = cmStrCat(path, ".cmd");
+  cmsys::ofstream shim(shimPath.c_str());
+  if (!shim) {
+    return false;
+  }
+  shim << "@echo off\r\n";
+  shim << "sh \"%~dpn0\" %*\r\n";
+  shim.close();
+#endif
+  return true;
+}
+
 bool ReprobuildWriteWrapper(std::string const& path,
                             std::string const& executable)
 {
@@ -309,7 +333,7 @@ bool ReprobuildWriteWrapper(std::string const& path,
   wrapper << "exec " << ReprobuildShellSingleQuote(executable)
           << " \"$@\"\n";
   wrapper.close();
-  return cmSystemTools::SetPermissions(path.c_str(), 0755).IsSuccess();
+  return ReprobuildFinalizeWrapper(path);
 }
 
 std::string ReprobuildParentPath(std::string const& path)
@@ -400,7 +424,7 @@ bool ReprobuildWriteLaunchedWrapper(std::string const& path,
   }
   wrapper << " " << ReprobuildShellSingleQuote(executable) << " \"$@\"\n";
   wrapper.close();
-  return cmSystemTools::SetPermissions(path.c_str(), 0755).IsSuccess();
+  return ReprobuildFinalizeWrapper(path);
 }
 
 bool ReprobuildWriteCommandScript(std::string const& path,
@@ -421,7 +445,7 @@ bool ReprobuildWriteCommandScript(std::string const& path,
     wrapper << command << "\n";
   }
   wrapper.close();
-  return cmSystemTools::SetPermissions(path.c_str(), 0755).IsSuccess();
+  return ReprobuildFinalizeWrapper(path);
 }
 
 bool ReprobuildWriteArchiveWrapper(std::string const& path)
@@ -441,7 +465,7 @@ bool ReprobuildWriteArchiveWrapper(std::string const& path)
   wrapper << "\"$ar_tool\" \"$@\"\n";
   wrapper << "if [ -n \"$ranlib_tool\" ]; then \"$ranlib_tool\" \"$output\"; fi\n";
   wrapper.close();
-  return cmSystemTools::SetPermissions(path.c_str(), 0755).IsSuccess();
+  return ReprobuildFinalizeWrapper(path);
 }
 
 bool ReprobuildWriteSymlinkWrapper(std::string const& path,
@@ -457,7 +481,7 @@ bool ReprobuildWriteSymlinkWrapper(std::string const& path,
   wrapper << "exec " << ReprobuildShellSingleQuote(cmakeCommand)
           << " -E cmake_symlink_library \"$@\"\n";
   wrapper.close();
-  return cmSystemTools::SetPermissions(path.c_str(), 0755).IsSuccess();
+  return ReprobuildFinalizeWrapper(path);
 }
 
 bool ReprobuildCompilerUsesMakeDepfile(cmMakefile const* mf,
