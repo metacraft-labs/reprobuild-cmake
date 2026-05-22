@@ -299,28 +299,86 @@ std::string ReprobuildShellSingleQuote(std::string const& value)
   return out;
 }
 
-bool ReprobuildFinalizeWrapper(std::string const& path)
+// Quote a tool path or argument for a `cmd.exe` batch file. Batch has no
+// general escaping for a `"` *inside* a quoted string, but tool paths and
+// the structured argv we emit here are filesystem paths / plain flags that
+// never contain an embedded double quote (the POSIX wrapper bodies confirm
+// this: they only ever single-quote whole paths/args). Should one ever
+// appear, "" is the closest cmd.exe approximation.
+std::string ReprobuildBatchQuote(std::string const& value)
+{
+  std::string out;
+  out.reserve(value.size() + 2);
+  out.push_back('"');
+  for (char ch : value) {
+    if (ch == '"') {
+      out += "\"\"";
+    } else {
+      out.push_back(ch);
+    }
+  }
+  out.push_back('"');
+  return out;
+}
+
+// Emit the Windows `.cmd` shim beside an extensionless POSIX wrapper script.
+//
+// Windows cannot CreateProcess the `#!/bin/sh` body directly, and repro's
+// PATH resolution deliberately skips extensionless files (they cannot be
+// launched as Win32 apps), so a sibling `.cmd` -- discoverable via PATHEXT --
+// is required.
+//
+// When `nativeBody` is non-empty it is a self-contained batch program that
+// invokes the real tool directly (no `sh`, no delegation to the script body):
+// every build action then costs one CreateProcess instead of
+// cmd.exe -> MSYS sh.exe -> script -> tool. When it is empty (wrappers whose
+// bodies are genuine multi-step POSIX shell) we fall back to running the
+// sibling script through `sh`; `%~dpn0` is this .cmd's path minus its
+// extension, i.e. the sibling wrapper script.
+bool ReprobuildFinalizeWrapper(std::string const& path,
+                               std::string const& nativeBody = std::string())
 {
   if (!cmSystemTools::SetPermissions(path.c_str(), 0755).IsSuccess()) {
     return false;
   }
 #ifdef _WIN32
-  // The wrapper body is a POSIX /bin/sh script: Windows cannot CreateProcess
-  // it directly, and repro's PATH resolution deliberately skips extensionless
-  // files (they cannot be launched as Win32 apps). Emit a .cmd shim beside it
-  // -- discoverable via PATHEXT -- that runs the script body through `sh`.
-  // `%~dpn0` is this .cmd's path minus its extension, i.e. the sibling
-  // wrapper script.
   std::string const shimPath = cmStrCat(path, ".cmd");
-  cmsys::ofstream shim(shimPath.c_str());
+  // cmd.exe batch files use CRLF line endings; open in binary mode so the
+  // \r\n we write is preserved verbatim.
+  cmsys::ofstream shim(shimPath.c_str(), std::ios::out | std::ios::binary);
   if (!shim) {
     return false;
   }
   shim << "@echo off\r\n";
-  shim << "sh \"%~dpn0\" %*\r\n";
+  if (nativeBody.empty()) {
+    shim << "sh \"%~dpn0\" %*\r\n";
+  } else {
+    shim << nativeBody;
+    if (!cmHasSuffix(nativeBody, "\r\n")) {
+      shim << "\r\n";
+    }
+  }
   shim.close();
+#else
+  static_cast<void>(nativeBody);
 #endif
   return true;
+}
+
+// Native batch body for a passthrough wrapper: run the tool (optionally with
+// a fixed launcher prefix) forwarding all arguments. Mirrors the POSIX body
+// `exec [launcher...] '<tool>' "$@"`.
+std::string ReprobuildNativePassthroughBody(
+  std::vector<std::string> const& launcher, std::string const& executable)
+{
+  std::string body;
+  for (std::string const& arg : launcher) {
+    body += ReprobuildBatchQuote(arg);
+    body.push_back(' ');
+  }
+  body += ReprobuildBatchQuote(executable);
+  body += " %*\r\n";
+  return body;
 }
 
 bool ReprobuildWriteWrapper(std::string const& path,
@@ -334,7 +392,8 @@ bool ReprobuildWriteWrapper(std::string const& path,
   wrapper << "exec " << ReprobuildShellSingleQuote(executable)
           << " \"$@\"\n";
   wrapper.close();
-  return ReprobuildFinalizeWrapper(path);
+  return ReprobuildFinalizeWrapper(
+    path, ReprobuildNativePassthroughBody({}, executable));
 }
 
 std::string ReprobuildParentPath(std::string const& path)
@@ -425,7 +484,8 @@ bool ReprobuildWriteLaunchedWrapper(std::string const& path,
   }
   wrapper << " " << ReprobuildShellSingleQuote(executable) << " \"$@\"\n";
   wrapper.close();
-  return ReprobuildFinalizeWrapper(path);
+  return ReprobuildFinalizeWrapper(
+    path, ReprobuildNativePassthroughBody(launcher, executable));
 }
 
 bool ReprobuildWriteCommandScript(std::string const& path,
@@ -482,7 +542,15 @@ bool ReprobuildWriteSymlinkWrapper(std::string const& path,
   wrapper << "exec " << ReprobuildShellSingleQuote(cmakeCommand)
           << " -E cmake_symlink_library \"$@\"\n";
   wrapper.close();
-  return ReprobuildFinalizeWrapper(path);
+  // Native shim: mirror the POSIX body's `--version` probe, then forward all
+  // arguments to the fixed `cmake -E cmake_symlink_library` command. `set -e`
+  // is preserved by propagating the tool's exit code.
+  std::string nativeBody =
+    "if \"%~1\"==\"--version\" (echo 1.0 & exit /b 0)\r\n";
+  nativeBody += ReprobuildBatchQuote(cmakeCommand);
+  nativeBody += " -E cmake_symlink_library %*\r\n";
+  nativeBody += "exit /b %ERRORLEVEL%\r\n";
+  return ReprobuildFinalizeWrapper(path, nativeBody);
 }
 
 bool ReprobuildCompilerUsesMakeDepfile(cmMakefile const* mf,
@@ -3498,6 +3566,26 @@ void cmGlobalReprobuildGenerator::WriteProviderMetadata()
                                      importOutputConfig);
             }
             sawImportLibraryOutput = true;
+            // The link command is hand-built above and -- unlike CMake's
+            // CMAKE_<LANG>_CREATE_SHARED_LIBRARY rule -- carries no import
+            // library flag. A GNU-family linker would therefore produce the
+            // DLL but never the import library (.dll.a) declared as an output
+            // just above, so a consumer opening that output fails. Emit the
+            // flag explicitly. (MSVC's linker writes the import library for a
+            // /DLL automatically and needs no flag.)
+            std::string const linkerId = lg->GetMakefile()->GetSafeDefinition(
+              cmStrCat("CMAKE_", linkLang, "_COMPILER_ID"));
+            std::string const linkerSimId =
+              lg->GetMakefile()->GetSafeDefinition(
+                cmStrCat("CMAKE_", linkLang, "_SIMULATE_ID"));
+            bool const gnuStyleLinker =
+              linkerId == "GNU" ||
+              ((linkerId == "Clang" || linkerId == "AppleClang") &&
+               linkerSimId != "MSVC");
+            if (gnuStyleLinker) {
+              target.LinkAction.Args.push_back(
+                cmStrCat("-Wl,--out-implib,", importOutputConfig));
+            }
           }
         }
         if (declareOutputs && gt->HasLinkDependencyFile(config)) {
