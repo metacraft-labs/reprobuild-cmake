@@ -53,6 +53,31 @@ function(write_hyphen_project source_dir project_name)
     "int main(void) { puts(MSG); return 0; }\n")
 endfunction()
 
+function(write_source_flags_subdir_link_project source_dir project_name)
+  file(REMOVE_RECURSE "${source_dir}")
+  file(MAKE_DIRECTORY "${source_dir}/libdir")
+  file(WRITE "${source_dir}/CMakeLists.txt"
+    "cmake_minimum_required(VERSION 3.20)\n"
+    "project(${project_name} C)\n"
+    "add_subdirectory(libdir)\n"
+    "add_executable(app main.c)\n"
+    "target_link_libraries(app PRIVATE nested)\n")
+  file(WRITE "${source_dir}/libdir/CMakeLists.txt"
+    "add_library(nested STATIC nested.c)\n"
+    "set_source_files_properties(nested.c PROPERTIES COMPILE_FLAGS \"-DSOURCE_COMPILE_FLAGS=1\" COMPILE_OPTIONS \"-DSOURCE_COMPILE_OPTION=1\")\n")
+  file(WRITE "${source_dir}/libdir/nested.c"
+    "#ifndef SOURCE_COMPILE_FLAGS\n"
+    "#  error SOURCE_COMPILE_FLAGS missing\n"
+    "#endif\n"
+    "#ifndef SOURCE_COMPILE_OPTION\n"
+    "#  error SOURCE_COMPILE_OPTION missing\n"
+    "#endif\n"
+    "int nested_value(void) { return 42; }\n")
+  file(WRITE "${source_dir}/main.c"
+    "int nested_value(void);\n"
+    "int main(void) { return nested_value() == 42 ? 0 : 1; }\n")
+endfunction()
+
 function(run_configure source_dir binary_dir expect_success expected_error)
   file(REMOVE_RECURSE "${binary_dir}")
   set(command
@@ -2145,6 +2170,37 @@ elseif(TEST_MODE STREQUAL "hyphen_target_build")
       "stderr:\n${run_stderr}")
   endif()
   assert_contains("${hyphen_output}" "selectedTarget: my-tool" "hyphen build output")
+elseif(TEST_MODE STREQUAL "source_flags_subdir_link")
+  set(source_flags_source_dir "${TEST_BINARY_ROOT}/source-flags-src")
+  set(source_flags_binary_dir "${TEST_BINARY_ROOT}/source-flags-build")
+  write_source_flags_subdir_link_project("${source_flags_source_dir}" ReprobuildSourceFlagsSubdirLink)
+  run_configure("${source_flags_source_dir}" "${source_flags_binary_dir}" TRUE ""
+    "-DCMAKE_BUILD_TYPE=Debug")
+  file(READ "${source_flags_binary_dir}/reprobuild.nim" source_flags_provider)
+  foreach(expected IN ITEMS
+      "\"-g\""
+      "\"-DSOURCE_COMPILE_FLAGS=1\""
+      "\"-DSOURCE_COMPILE_OPTION=1\""
+      "\"libdir/libnested.a\"")
+    assert_contains("${source_flags_provider}" "${expected}" "source flags/subdir link provider")
+  endforeach()
+
+  start_runquota("${TEST_BINARY_ROOT}" runquota_socket runquota_pid)
+  run_build("${source_flags_binary_dir}" "app" "${runquota_socket}" source_flags_output)
+  stop_runquota("${runquota_pid}")
+  execute_process(
+    COMMAND "${source_flags_binary_dir}/app"
+    RESULT_VARIABLE source_flags_result
+    OUTPUT_VARIABLE source_flags_stdout
+    ERROR_VARIABLE source_flags_stderr
+    ENCODING UTF8)
+  if(NOT source_flags_result EQUAL 0)
+    message(FATAL_ERROR
+      "Source-flags/subdir-link executable did not run correctly.\n"
+      "stdout:\n${source_flags_stdout}\n"
+      "stderr:\n${source_flags_stderr}\n"
+      "build output:\n${source_flags_output}")
+  endif()
 elseif(TEST_MODE STREQUAL "actions_use_runquota")
   start_runquota("${TEST_BINARY_ROOT}" runquota_socket runquota_pid)
   run_build("${binary_dir}" "hello" "${runquota_socket}" build_output)
@@ -2241,6 +2297,9 @@ elseif(TEST_MODE STREQUAL "response_file_identity")
   start_runquota("${TEST_BINARY_ROOT}" runquota_socket runquota_pid)
   run_build("${rsp_binary_dir}" "rspapp" "${runquota_socket}" first_output)
   list(GET rsp_files 0 rsp_file)
+  run_build("${rsp_binary_dir}" "clean" "${runquota_socket}" rsp_clean_output)
+  assert_file_exists("${rsp_file}" "response file after clean")
+  run_build("${rsp_binary_dir}" "rspapp" "${runquota_socket}" post_clean_output)
   file(READ "${rsp_file}" rsp_content)
   string(REPLACE "IDENTITY_FLAG=1" "IDENTITY_FLAG=2" rsp_content2 "${rsp_content}")
   if("${rsp_content2}" STREQUAL "${rsp_content}")

@@ -27,6 +27,7 @@
 #include "cmGlobalGeneratorFactory.h"
 #include "cmGeneratorExpression.h"
 #include "cmGeneratorFileSet.h"
+#include "cmGeneratorFileSets.h"
 #include "cmGeneratorTarget.h"
 #include "cmLinkLineDeviceComputer.h"
 #include "cmLinkLineComputer.h"
@@ -597,6 +598,38 @@ void ReprobuildAppendCommonCompileArgs(std::vector<std::string>& args,
   lg->GetIncludeDirectories(includes, gt, lang, config);
   for (std::string const& include : includes) {
     args.push_back(cmStrCat("-I", include));
+  }
+}
+
+void ReprobuildAppendSourcePropertyCompileArgs(std::vector<std::string>& args,
+                                               cmLocalGenerator* lg,
+                                               cmGeneratorTarget* gt,
+                                               cmSourceFile const* source,
+                                               std::string const& config,
+                                               std::string const& lang)
+{
+  cmGeneratorExpressionInterpreter genexInterpreter(lg, config, gt, lang);
+
+  std::string const compileFlagsProp("COMPILE_FLAGS");
+  if (cmValue compileFlags = source->GetProperty(compileFlagsProp)) {
+    ReprobuildAppendParsed(
+      args, genexInterpreter.Evaluate(*compileFlags, compileFlagsProp));
+  }
+
+  std::string const compileOptionsProp("COMPILE_OPTIONS");
+  if (cmValue compileOptions = source->GetProperty(compileOptionsProp)) {
+    ReprobuildAppendOptionList(
+      args, genexInterpreter.Evaluate(*compileOptions, compileOptionsProp));
+  }
+
+  if (auto const* fileSet =
+        gt->GetGeneratorFileSets()->GetFileSetForSource(config, source)) {
+    auto options = fileSet->BelongsTo(gt)
+      ? fileSet->GetCompileOptions(config, lang)
+      : fileSet->GetInterfaceCompileOptions(config, lang);
+    for (BT<std::string> const& option : options) {
+      ReprobuildAppendOptionList(args, option.Value);
+    }
   }
 }
 
@@ -1545,6 +1578,7 @@ void cmGlobalReprobuildGenerator::WriteProviderMetadata()
   bool sawSwiftSplit = false;
   bool sawAppleBundle = false;
   bool const multiConfig = this->IsMultiConfig();
+  cmLocalGenerator* rootLg = this->LocalGenerators.front().get();
   cmMakefile* rootMf = this->LocalGenerators.front()->GetMakefile();
   if (!this->GetCMakeInstance()->GetState()->GetCacheEntryValue(
         "CMAKE_REPROBUILD_HCR")) {
@@ -1557,7 +1591,7 @@ void cmGlobalReprobuildGenerator::WriteProviderMetadata()
   if (multiConfig) {
     configs = rootMf->GetGeneratorConfigs(cmMakefile::ExcludeEmptyConfig);
   } else {
-    configs.emplace_back();
+    configs.push_back(rootMf->GetSafeDefinition("CMAKE_BUILD_TYPE"));
   }
   std::set<std::string> nativeCommandConfigTargets;
   if (multiConfig && !this->CrossConfigs.empty()) {
@@ -2400,9 +2434,15 @@ void cmGlobalReprobuildGenerator::WriteProviderMetadata()
         }
 
         std::vector<std::string> args;
+        std::string explicitLanguageFlags;
+        gt->AddExplicitLanguageFlags(explicitLanguageFlags, *source);
+        ReprobuildAppendParsed(args, explicitLanguageFlags);
+
         std::string flags;
         lg->GetTargetCompileFlags(gt, config, lang, flags, "");
         ReprobuildAppendParsed(args, flags);
+        ReprobuildAppendSourcePropertyCompileArgs(args, lg.get(), gt, source,
+                                                  config, lang);
 
         std::vector<std::string> definitions;
         gt->GetCompileDefinitions(definitions, config, lang);
@@ -2739,7 +2779,6 @@ void cmGlobalReprobuildGenerator::WriteProviderMetadata()
           }
           action.Args = { cmStrCat("@", action.ResponseFile) };
           action.Inputs.push_back(action.ResponseFile);
-          ReprobuildAppendCleanFile(cleanFiles, binaryDir, action.ResponseFile);
         }
         if (target.HcrEnabled && (lang == "C" || lang == "CXX")) {
           target.HcrObjects.push_back(ReprobuildHcrObject{
@@ -3367,8 +3406,11 @@ void cmGlobalReprobuildGenerator::WriteProviderMetadata()
         std::string linkLibs;
         std::string frameworkPath;
         std::string linkPath;
+        // Reprobuild runs actions from the build root.  Use the root local
+        // generator for link-line path conversion so CMake does not emit
+        // library references relative to a target subdirectory.
         cmLinkLineComputer linkLineComputer(
-          lg.get(), lg->GetStateSnapshot().GetDirectory());
+          rootLg, rootLg->GetStateSnapshot().GetDirectory());
         lg->GetTargetFlags(&linkLineComputer, config, linkLibs, flags,
                            linkFlags, frameworkPath, linkPath, gt);
         lg->AppendDependencyInfoLinkerFlags(linkFlags, gt, config, linkLang);
@@ -3620,8 +3662,6 @@ void cmGlobalReprobuildGenerator::WriteProviderMetadata()
         }
         target.LinkAction.Args = { cmStrCat("@", target.LinkAction.ResponseFile) };
         target.LinkAction.Inputs.push_back(target.LinkAction.ResponseFile);
-        ReprobuildAppendCleanFile(cleanFiles, binaryDir,
-                                  target.LinkAction.ResponseFile);
       }
 
       for (std::string const& cleanFile : ReprobuildEvaluateCleanFiles(
