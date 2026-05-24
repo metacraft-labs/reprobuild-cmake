@@ -275,16 +275,6 @@ std::string ReprobuildToolId(std::string const& lang)
   return "reprobuild-cmake-cc";
 }
 
-std::string ReprobuildArchiveToolId()
-{
-  return "reprobuild-cmake-ar-ranlib";
-}
-
-std::string ReprobuildSymlinkToolId()
-{
-  return "reprobuild-cmake-symlink";
-}
-
 std::string ReprobuildShellSingleQuote(std::string const& value)
 {
   std::string out = "'";
@@ -507,50 +497,6 @@ bool ReprobuildWriteCommandScript(std::string const& path,
   }
   wrapper.close();
   return ReprobuildFinalizeWrapper(path);
-}
-
-bool ReprobuildWriteArchiveWrapper(std::string const& path)
-{
-  cmsys::ofstream wrapper(path.c_str());
-  if (!wrapper) {
-    return false;
-  }
-  wrapper << "#!/bin/sh\n";
-  wrapper << "set -e\n";
-  wrapper << "if [ \"${1:-}\" = \"--version\" ]; then echo 1.0; exit 0; fi\n";
-  wrapper << "ar_tool=\"$1\"\n";
-  wrapper << "ranlib_tool=\"$2\"\n";
-  wrapper << "shift 2\n";
-  wrapper << "output=\"$2\"\n";
-  wrapper << "rm -f \"$output\"\n";
-  wrapper << "\"$ar_tool\" \"$@\"\n";
-  wrapper << "if [ -n \"$ranlib_tool\" ]; then \"$ranlib_tool\" \"$output\"; fi\n";
-  wrapper.close();
-  return ReprobuildFinalizeWrapper(path);
-}
-
-bool ReprobuildWriteSymlinkWrapper(std::string const& path,
-                                   std::string const& cmakeCommand)
-{
-  cmsys::ofstream wrapper(path.c_str());
-  if (!wrapper) {
-    return false;
-  }
-  wrapper << "#!/bin/sh\n";
-  wrapper << "set -e\n";
-  wrapper << "if [ \"${1:-}\" = \"--version\" ]; then echo 1.0; exit 0; fi\n";
-  wrapper << "exec " << ReprobuildShellSingleQuote(cmakeCommand)
-          << " -E cmake_symlink_library \"$@\"\n";
-  wrapper.close();
-  // Native shim: mirror the POSIX body's `--version` probe, then forward all
-  // arguments to the fixed `cmake -E cmake_symlink_library` command. `set -e`
-  // is preserved by propagating the tool's exit code.
-  std::string nativeBody =
-    "if \"%~1\"==\"--version\" (echo 1.0 & exit /b 0)\r\n";
-  nativeBody += ReprobuildBatchQuote(cmakeCommand);
-  nativeBody += " -E cmake_symlink_library %*\r\n";
-  nativeBody += "exit /b %ERRORLEVEL%\r\n";
-  return ReprobuildFinalizeWrapper(path, nativeBody);
 }
 
 bool ReprobuildCompilerUsesMakeDepfile(cmMakefile const* mf,
@@ -850,6 +796,38 @@ std::vector<std::string> ReprobuildCustomCommandLines(
   return commandLines;
 }
 
+// Try to extract a raw argv (vector<string>) for command `c` of `ccg`
+// without going through shell quoting. Returns empty when the command
+// cannot be safely inlined (multi-emulator setups where the engine would
+// need to layer extra arguments are routed through the legacy
+// shell-wrapper path instead).
+//
+// The returned argv is what would be passed to a direct CreateProcess /
+// posix_spawn for that one command: argv[0] is the resolved executable
+// (which already accounts for `cmake -E …` renames and CROSSCOMPILING
+// adjustments inside `ccg.GetCommand`), and argv[1..] are the original
+// raw arguments from the custom command's command line (no shell quoting,
+// no `cd` prefix, no `&&` chaining).
+std::vector<std::string> ReprobuildCustomCommandArgv(
+  cmCustomCommandGenerator const& ccg, unsigned int c)
+{
+  std::vector<std::string> argv;
+  std::string const exe = ccg.GetCommand(c);
+  if (exe.empty()) {
+    return argv;
+  }
+  cmCustomCommandLines const& lines = ccg.GetCC().GetCommandLines();
+  if (c >= lines.size() || lines[c].empty()) {
+    argv.push_back(exe);
+    return argv;
+  }
+  argv.push_back(exe);
+  for (std::size_t j = 1; j < lines[c].size(); ++j) {
+    argv.push_back(lines[c][j]);
+  }
+  return argv;
+}
+
 bool ReprobuildWriteDyndepActionMap(
   std::string const& path,
   std::vector<std::pair<std::string, std::string>> const& entries)
@@ -981,6 +959,17 @@ struct ReprobuildAction
   std::string CompileCommand;
   std::string CompileFile;
   bool Cacheable = true;
+
+  // When `Inline` is true, the action is emitted as
+  // `inlineExecCall(@argv, cwd)` instead of `publicCliCall(<package>, …)`,
+  // and no synthetic per-action package is added to `uses:` or written as a
+  // wrapper script. The engine's `reprobuild.builtin.exec` lowering takes
+  // over and launches `InlineArgv` directly. Used for CMake custom commands
+  // and other build edges whose absolute argv is fully known at generate
+  // time and that do not need a typed-tool identity.
+  bool Inline = false;
+  std::vector<std::string> InlineArgv;
+  std::string InlineCwd;
 };
 
 struct ReprobuildHcrObject
@@ -2126,16 +2115,39 @@ void cmGlobalReprobuildGenerator::WriteProviderMetadata()
           ReprobuildAppendCleanFile(cleanFiles, binaryDir, custom.Depfile);
         }
 
-        std::string const wrapperPath =
-          cmStrCat(wrapperDir, "/", custom.ToolId);
-        if (!ReprobuildWriteCommandScript(wrapperPath, "", commandLines)) {
-          this->GetCMakeInstance()->IssueMessage(
-            MessageType::FATAL_ERROR,
-            cmStrCat("Could not write Reprobuild custom command wrapper: ",
-                     wrapperPath));
-          return;
+        // Inline-exec fast path: a single-command custom command with no
+        // declared comment-echo and no working-directory rewrite can be
+        // emitted as `inlineExecCall(argv, cwd)` instead of a synthetic
+        // package + shell wrapper. The lowered binary graph then holds
+        // the literal argv per edge and the engine launches the tool
+        // directly. Multi-command and comment-echo custom commands fall
+        // back to the legacy wrapper-script path below for now (the
+        // engine only knows how to inline a single argv per builtin
+        // exec action; chaining multiple shell statements still needs
+        // the wrapper).
+        bool inlined = false;
+        if (ccg.GetNumberOfCommands() == 1 && !ccg.GetComment().has_value()) {
+          std::vector<std::string> inlineArgv =
+            ReprobuildCustomCommandArgv(ccg, 0);
+          if (!inlineArgv.empty()) {
+            custom.Inline = true;
+            custom.InlineArgv = std::move(inlineArgv);
+            custom.InlineCwd = ccg.GetWorkingDirectory();
+            inlined = true;
+          }
         }
-        usedTools.insert(custom.ToolId);
+        if (!inlined) {
+          std::string const wrapperPath =
+            cmStrCat(wrapperDir, "/", custom.ToolId);
+          if (!ReprobuildWriteCommandScript(wrapperPath, "", commandLines)) {
+            this->GetCMakeInstance()->IssueMessage(
+              MessageType::FATAL_ERROR,
+              cmStrCat("Could not write Reprobuild custom command wrapper: ",
+                       wrapperPath));
+            return;
+          }
+          usedTools.insert(custom.ToolId);
+        }
         target.CustomActions.push_back(std::move(custom));
         ++customIndex;
       }
@@ -3448,7 +3460,6 @@ void cmGlobalReprobuildGenerator::WriteProviderMetadata()
         cmSystemTools::GetFilenamePath(cmStrCat(binaryDir, "/", realOutput)));
 
       if (type == cmStateEnums::STATIC_LIBRARY) {
-        usedTools.insert(ReprobuildArchiveToolId());
         std::string const arTool =
           lg->GetMakefile()->GetSafeDefinition("CMAKE_AR");
         std::string const ranlibTool =
@@ -3460,9 +3471,20 @@ void cmGlobalReprobuildGenerator::WriteProviderMetadata()
                      gt->GetName()));
           return;
         }
-        target.LinkAction.ToolId = ReprobuildArchiveToolId();
-        target.LinkAction.Args = { arTool, ranlibTool, "qc", output };
-        cm::append(target.LinkAction.Args, linkObjects);
+        // Inline-exec: emit a single `ar rcs <output> <objects…>` invocation.
+        // The flags collapse what the old multi-step shell wrapper did
+        // (`rm -f output; ar qc output objects…; ranlib output`) into one
+        // direct call: `r` replaces matching members (so re-runs don't
+        // accumulate duplicates the way `qc` would), `c` suppresses the
+        // "creating archive" warning, and `s` writes the symbol table —
+        // i.e. ar performs its own ranlib step. CMAKE_RANLIB is not invoked
+        // separately on the modern toolchains the bench exercises; if an
+        // AIX-style toolchain ever needs a follow-up ranlib edge we can
+        // add it as a second inline-exec depending on this one.
+        std::vector<std::string> archiveArgv = { arTool, "rcs", output };
+        cm::append(archiveArgv, linkObjects);
+        target.LinkAction.Inline = true;
+        target.LinkAction.InlineArgv = std::move(archiveArgv);
         target.LinkAction.Inputs = linkObjects;
         if (declareOutputs) {
           target.LinkAction.Outputs = { output };
@@ -3611,30 +3633,24 @@ void cmGlobalReprobuildGenerator::WriteProviderMetadata()
                                     configSuffix));
         symlinkAction.Var = ReprobuildNimIdent("action", nextActionVar++,
                                                symlinkAction.Id);
+        // Inline-exec both symlink flavours: a framework's "Versions/Current"
+        // shortcut uses `cmake -E create_symlink`, an ordinary shared-library
+        // soname chain uses `cmake -E cmake_symlink_library`. Both are
+        // single direct cmake.exe invocations — no shell, no wrapper script.
+        std::string const cmakeCmd = cmSystemTools::GetCMakeCommand();
+        symlinkAction.Inline = true;
+        symlinkAction.InlineCwd = binaryDir;
         if (gt->IsFrameworkOnApple()) {
-          symlinkAction.ToolId =
-            ReprobuildSafeId(cmStrCat("reprobuild-cmake-",
-                                      symlinkAction.Var));
           std::string const frameworkLinkTarget = cmStrCat(
             "Versions/Current/", cmSystemTools::GetFilenameName(realOutput));
-          std::vector<std::string> lines;
-          lines.push_back(cmStrCat(
-            ReprobuildShellSingleQuote(cmSystemTools::GetCMakeCommand()),
-            " -E create_symlink ",
-            ReprobuildShellSingleQuote(frameworkLinkTarget), " ",
-            ReprobuildShellSingleQuote(output)));
-          std::string const wrapperPath =
-            cmStrCat(wrapperDir, "/", symlinkAction.ToolId);
-          if (!ReprobuildWriteCommandScript(wrapperPath, binaryDir, lines)) {
-            this->GetCMakeInstance()->IssueMessage(
-              MessageType::FATAL_ERROR,
-              cmStrCat("Could not write Reprobuild framework symlink wrapper: ",
-                       wrapperPath));
-            return;
-          }
+          symlinkAction.InlineArgv = {
+            cmakeCmd, "-E", "create_symlink", frameworkLinkTarget, output
+          };
         } else {
-          symlinkAction.ToolId = ReprobuildSymlinkToolId();
-          symlinkAction.Args = { realOutput, soName, output };
+          symlinkAction.InlineArgv = {
+            cmakeCmd, "-E", "cmake_symlink_library",
+            realOutput, soName, output
+          };
         }
         symlinkAction.Inputs = { realOutput };
         if (declareOutputs) {
@@ -3650,7 +3666,6 @@ void cmGlobalReprobuildGenerator::WriteProviderMetadata()
         }
         ReprobuildAppendCleanFile(cleanFiles, binaryDir, output);
         symlinkAction.Deps = { target.LinkAction.Id };
-        usedTools.insert(symlinkAction.ToolId);
         sawSymlinkOutput = true;
         target.SymlinkActions.push_back(std::move(symlinkAction));
       }
@@ -3896,8 +3911,13 @@ void cmGlobalReprobuildGenerator::WriteProviderMetadata()
     }
   }
 
+  // All builtin targets (install, install/local, install/strip, preinstall,
+  // test, package, help, rebuild_cache) emit a single direct command, so they
+  // collapse to `inlineExecCall(@argv, cwd=binaryDir)` — no per-target
+  // synthetic package, no shell wrapper, no entry in `uses:`. The engine's
+  // `reprobuild.builtin.exec` lowering launches the argv directly.
   auto addBuiltinTarget =
-    [&](std::string const& name, std::vector<std::string> const& commands,
+    [&](std::string const& name, std::vector<std::string> const& argv,
         std::vector<std::string> const& deps, bool usesTerminal) {
       ReprobuildTarget target;
       target.Name = name;
@@ -3907,32 +3927,19 @@ void cmGlobalReprobuildGenerator::WriteProviderMetadata()
       target.UtilityAction.Id = ReprobuildSafeId(cmStrCat("builtin-", name));
       target.UtilityAction.Var = ReprobuildNimIdent(
         "action", nextActionVar++, target.UtilityAction.Id);
-      target.UtilityAction.ToolId =
-        ReprobuildSafeId(cmStrCat("reprobuild-cmake-",
-                                  target.UtilityAction.Var));
       target.UtilityAction.Pool = usesTerminal ? "console" : "";
       target.UtilityAction.Deps = deps;
       target.UtilityAction.Cacheable = false;
-      std::string const wrapperPath =
-        cmStrCat(wrapperDir, "/", target.UtilityAction.ToolId);
-      if (!ReprobuildWriteCommandScript(wrapperPath, binaryDir, commands)) {
-        this->GetCMakeInstance()->IssueMessage(
-          MessageType::FATAL_ERROR,
-          cmStrCat("Could not write Reprobuild builtin target wrapper: ",
-                   wrapperPath));
-        return false;
-      }
-      usedTools.insert(target.UtilityAction.ToolId);
+      target.UtilityAction.Inline = true;
+      target.UtilityAction.InlineArgv = argv;
+      target.UtilityAction.InlineCwd = binaryDir;
       buildTargets.push_back(std::move(target));
       return true;
     };
 
-  std::string const cmakeCmd =
-    ReprobuildShellSingleQuote(cmSystemTools::GetCMakeCommand());
-  std::string const ctestCmd =
-    ReprobuildShellSingleQuote(cmSystemTools::GetCTestCommand());
-  std::string const cpackCmd =
-    ReprobuildShellSingleQuote(cmSystemTools::GetCPackCommand());
+  std::string const cmakeCmd = cmSystemTools::GetCMakeCommand();
+  std::string const ctestCmd = cmSystemTools::GetCTestCommand();
+  std::string const cpackCmd = cmSystemTools::GetCPackCommand();
   std::vector<std::string> helpTargets = { "all", "default", "clean" };
   auto addHelpTargetName = [&helpTargets](std::string const& name) {
     helpTargets.push_back(name);
@@ -3941,21 +3948,19 @@ void cmGlobalReprobuildGenerator::WriteProviderMetadata()
   if (!skipInstallRules && cmSystemTools::FileExists(
                              cmStrCat(binaryDir, "/cmake_install.cmake"))) {
     if (!addBuiltinTarget("install",
-                          { cmStrCat(cmakeCmd, " -P cmake_install.cmake") },
+                          { cmakeCmd, "-P", "cmake_install.cmake" },
                           allTargetDeps, true) ||
         !addBuiltinTarget("install/local",
-                          { cmStrCat(cmakeCmd,
-                                     " -DCMAKE_INSTALL_LOCAL_ONLY=1 -P "
-                                     "cmake_install.cmake") },
+                          { cmakeCmd, "-DCMAKE_INSTALL_LOCAL_ONLY=1",
+                            "-P", "cmake_install.cmake" },
                           {}, true) ||
         !addBuiltinTarget("install/strip",
-                          { cmStrCat(cmakeCmd,
-                                     " -DCMAKE_INSTALL_DO_STRIP=1 -P "
-                                     "cmake_install.cmake") },
+                          { cmakeCmd, "-DCMAKE_INSTALL_DO_STRIP=1",
+                            "-P", "cmake_install.cmake" },
                           allTargetDeps, true) ||
         !addBuiltinTarget("preinstall",
-                          { cmStrCat(cmakeCmd,
-                                     " -E echo 'Built target preinstall'") },
+                          { cmakeCmd, "-E", "echo",
+                            "Built target preinstall" },
                           allTargetDeps, false)) {
       return;
     }
@@ -3973,12 +3978,11 @@ void cmGlobalReprobuildGenerator::WriteProviderMetadata()
       }
     }
     cmList ctestArgs(rootMf->GetDefinition("CMAKE_CTEST_ARGUMENTS"));
-    std::vector<std::string> testCommand = { ctestCmd };
+    std::vector<std::string> testArgv = { ctestCmd };
     for (std::string const& arg : ctestArgs) {
-      testCommand.push_back(ReprobuildShellSingleQuote(arg));
+      testArgv.push_back(arg);
     }
-    if (!addBuiltinTarget("test", { cmJoin(testCommand, " ") }, testDeps,
-                          true)) {
+    if (!addBuiltinTarget("test", testArgv, testDeps, true)) {
       return;
     }
     addHelpTargetName("test");
@@ -3995,7 +3999,7 @@ void cmGlobalReprobuildGenerator::WriteProviderMetadata()
     }
     if (!addBuiltinTarget(
           "package",
-          { cmStrCat(cpackCmd, " --config ./CPackConfig.cmake") },
+          { cpackCmd, "--config", "./CPackConfig.cmake" },
           packageDeps, false)) {
       return;
     }
@@ -4005,7 +4009,7 @@ void cmGlobalReprobuildGenerator::WriteProviderMetadata()
                                          "/CPackSourceConfig.cmake"))) {
     if (!addBuiltinTarget(
           "package_source",
-          { cmStrCat(cpackCmd, " --config ./CPackSourceConfig.cmake") },
+          { cpackCmd, "--config", "./CPackSourceConfig.cmake" },
           {}, false)) {
       return;
     }
@@ -4013,20 +4017,19 @@ void cmGlobalReprobuildGenerator::WriteProviderMetadata()
   }
   addHelpTargetName("help");
   addHelpTargetName("rebuild_cache");
+  // `help`: use `cmake -E echo` instead of a shell `echo` so the action runs
+  // directly without a cmd.exe / sh.exe interpreter — cmake.exe is always
+  // available since the user just invoked it.
   if (!addBuiltinTarget("help",
-                        { cmStrCat("echo ",
-                                   ReprobuildShellSingleQuote(cmStrCat(
-                                     "The Reprobuild generator provides: ",
-                                     cmJoin(helpTargets, " ")))) },
+                        { cmakeCmd, "-E", "echo",
+                          cmStrCat(
+                            "The Reprobuild generator provides: ",
+                            cmJoin(helpTargets, " ")) },
                         {}, false) ||
       !addBuiltinTarget("rebuild_cache",
-                        { cmStrCat(cmakeCmd,
-                                   " --regenerate-during-build -S ",
-                                   ReprobuildShellSingleQuote(
-                                     this->GetCMakeInstance()
-                                       ->GetHomeDirectory()),
-                                   " -B ",
-                                   ReprobuildShellSingleQuote(binaryDir)) },
+                        { cmakeCmd, "--regenerate-during-build", "-S",
+                          this->GetCMakeInstance()->GetHomeDirectory(),
+                          "-B", binaryDir },
                         {}, true)) {
     return;
   }
@@ -4050,42 +4053,32 @@ void cmGlobalReprobuildGenerator::WriteProviderMetadata()
                  " while writing Reprobuild provider."));
       return;
     }
+    // Only the sidecar (`<toolId>.repro-tool-profile`) is written. The
+    // engine's PATH-only resolver looks for the sidecar directly on PATH
+    // (libs/repro_tool_profiles/src/repro_tool_profiles.nim:
+    // findToolProfileSidecarOnPath), so no on-disk wrapper executable is
+    // needed as a PATH marker. The sidecar carries the real compiler
+    // path; the build action's argv[0] is the compiler, launched
+    // directly.
     std::string const wrapperPath =
       cmStrCat(wrapperDir, "/", ReprobuildToolId(lang));
-    if (!ReprobuildWriteWrapper(wrapperPath, compiler) ||
-        !ReprobuildWriteToolProfile(wrapperPath, compiler, toolPortabilityMode,
+    if (!ReprobuildWriteToolProfile(wrapperPath, compiler, toolPortabilityMode,
                                     true)) {
       this->GetCMakeInstance()->IssueMessage(
         MessageType::FATAL_ERROR,
-        cmStrCat("Could not write Reprobuild compiler wrapper for ", lang));
+        cmStrCat("Could not write Reprobuild compiler tool profile for ",
+                 lang));
       return;
     }
   }
-  if (usedTools.count(ReprobuildArchiveToolId())) {
-    std::string const wrapperPath =
-      cmStrCat(wrapperDir, "/", ReprobuildArchiveToolId());
-    if (!ReprobuildWriteArchiveWrapper(wrapperPath) ||
-        !ReprobuildWriteToolProfile(wrapperPath, wrapperPath,
-                                    toolPortabilityMode, false)) {
-      this->GetCMakeInstance()->IssueMessage(
-        MessageType::FATAL_ERROR,
-        "Could not write Reprobuild archiver wrapper.");
-      return;
-    }
-  }
-  if (usedTools.count(ReprobuildSymlinkToolId())) {
-    std::string const wrapperPath =
-      cmStrCat(wrapperDir, "/", ReprobuildSymlinkToolId());
-    std::string const cmakeCommand = cmSystemTools::GetCMakeCommand();
-    if (!ReprobuildWriteSymlinkWrapper(wrapperPath, cmakeCommand) ||
-        !ReprobuildWriteToolProfile(wrapperPath, cmakeCommand,
-                                    toolPortabilityMode, false)) {
-      this->GetCMakeInstance()->IssueMessage(
-        MessageType::FATAL_ERROR,
-        "Could not write Reprobuild symlink wrapper.");
-      return;
-    }
-  }
+  // Archive (ar+ranlib) and symlink helpers were previously published as
+  // synthetic packages (`reprobuild-cmake-ar-ranlib`,
+  // `reprobuild-cmake-symlink`) backed by multi-step shell wrappers. Both
+  // are now emitted as `inlineExecCall` actions in the per-target loop
+  // above — the static-library link is one direct `ar rcs <output>
+  // <objects…>` invocation, and the soname chain / framework shortcut is
+  // one direct `cmake -E (cmake_symlink_library|create_symlink) …` call.
+  // No wrappers, no synthetic packages, no entries in `uses:`.
 
   std::set<std::string> allCleanFiles;
   for (auto const& entry : cleanFilesByConfig) {
@@ -4300,14 +4293,24 @@ void cmGlobalReprobuildGenerator::WriteProviderMetadata()
   }
   auto writeAction = [&provider](ReprobuildAction const& action) {
     provider << "    let " << action.Var << " = buildAction("
-             << ReprobuildEscape(action.Id)
-             << ", publicCliCall("
-             << ReprobuildEscape(action.ToolId) << ", "
-             << ReprobuildEscape(action.ToolId) << ", \"\", "
-             << ReprobuildEscape(cmStrCat(action.ToolId, ".call"))
-             << ", @[cliArgSeq(\"args\", ";
-    ReprobuildWriteStringArray(provider, action.Args);
-    provider << ", cpkPositional, 0)]), deps = ";
+             << ReprobuildEscape(action.Id) << ", ";
+    if (action.Inline) {
+      provider << "inlineExecCall(";
+      ReprobuildWriteStringArray(provider, action.InlineArgv);
+      if (!action.InlineCwd.empty()) {
+        provider << ", cwd = " << ReprobuildEscape(action.InlineCwd);
+      }
+      provider << ")";
+    } else {
+      provider << "publicCliCall("
+               << ReprobuildEscape(action.ToolId) << ", "
+               << ReprobuildEscape(action.ToolId) << ", \"\", "
+               << ReprobuildEscape(cmStrCat(action.ToolId, ".call"))
+               << ", @[cliArgSeq(\"args\", ";
+      ReprobuildWriteStringArray(provider, action.Args);
+      provider << ", cpkPositional, 0)])";
+    }
+    provider << ", deps = ";
     ReprobuildWriteStringArray(provider, action.Deps);
     provider << ", inputs = ";
     ReprobuildWriteStringArray(provider, action.Inputs);
