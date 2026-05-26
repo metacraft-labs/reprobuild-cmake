@@ -281,6 +281,62 @@ std::string ReprobuildCanonicaliseTryCompileSourcePath(
   return canonicalPath;
 }
 
+// Encodes the Tier 2a TryCompile metadata envelope written next to
+// reprobuild.nim in each try_compile() scratch dir. The byte layout must
+// stay in lockstep with the Nim decoder in
+// ``libs/repro_cmake_trycompile/src/repro_cmake_trycompile.nim``.
+//
+// Format (little-endian, length-prefixed):
+//   magic        "RBCT"
+//   version      u16  (= 1)
+//   payloadLen   u32
+//   payload {
+//     usedTools  : string-seq
+//     pools      : u32 count + each (name: string, capacity: u32)
+//     actions    : u32 count + each TryCompileAction
+//     targetName : string
+//     targetActionIds : string-seq
+//   }
+//
+// TryCompileAction matches the Nim decoder's struct field-for-field.
+namespace ReprobuildTryCompileEnvelope {
+
+void AppendU16Le(std::string& out, std::uint16_t v)
+{
+  out.push_back(static_cast<char>(v & 0xff));
+  out.push_back(static_cast<char>((v >> 8) & 0xff));
+}
+
+void AppendU32Le(std::string& out, std::uint32_t v)
+{
+  out.push_back(static_cast<char>(v & 0xff));
+  out.push_back(static_cast<char>((v >> 8) & 0xff));
+  out.push_back(static_cast<char>((v >> 16) & 0xff));
+  out.push_back(static_cast<char>((v >> 24) & 0xff));
+}
+
+void AppendString(std::string& out, std::string const& s)
+{
+  AppendU32Le(out, static_cast<std::uint32_t>(s.size()));
+  out.append(s);
+}
+
+void AppendStringSeq(std::string& out,
+                     std::vector<std::string> const& items)
+{
+  AppendU32Le(out, static_cast<std::uint32_t>(items.size()));
+  for (auto const& s : items) {
+    AppendString(out, s);
+  }
+}
+
+void AppendBool(std::string& out, bool v)
+{
+  out.push_back(static_cast<char>(v ? 1 : 0));
+}
+
+} // namespace ReprobuildTryCompileEnvelope
+
 std::string ReprobuildSafeId(std::string value)
 {
   // Canonicalise CMake TryCompile random tokens BEFORE the [^A-Za-z0-9_.-]
@@ -1767,6 +1823,79 @@ void cmGlobalReprobuildGenerator::PrimeProviderMetadata()
   }
 }
 
+// Serializes one ReprobuildAction into the trycompile.rbsz binary envelope
+// using the field order that the Nim decoder in
+// ``libs/repro_cmake_trycompile/src/repro_cmake_trycompile.nim`` expects.
+// ``poolUnits`` is hard-coded to 1 to mirror ``writeAction`` in
+// ``WriteProviderMetadata`` below.
+static void ReprobuildAppendTryCompileAction(std::string& out,
+                                             ReprobuildAction const& action)
+{
+  using namespace ReprobuildTryCompileEnvelope;
+  AppendString(out, action.Id);
+  AppendBool(out, action.Inline);
+  AppendStringSeq(out, action.InlineArgv);
+  AppendString(out, action.InlineCwd);
+  AppendString(out, action.ToolId);
+  AppendStringSeq(out, action.Args);
+  AppendStringSeq(out, action.Deps);
+  AppendStringSeq(out, action.Inputs);
+  AppendStringSeq(out, action.Outputs);
+  AppendString(out, action.Pool);
+  AppendU32Le(out, 1u);
+  AppendString(out, action.Depfile);
+  AppendString(out, action.DynamicDepsFile);
+  AppendBool(out, action.Cacheable);
+  AppendString(out, ReprobuildCommandStatsId(action.Id));
+}
+
+// Writes ``trycompile.rbsz`` next to ``reprobuild.nim`` for stereotyped
+// try_compile() projects. The engine routes any work-dir containing this
+// marker to the pre-built ``repro-cmake-trycompile-provider`` binary
+// (Provider-Compile-Tiering.md §"2a"), skipping the ~2 s per-project
+// provider compile. Returns true on success; on failure the generator
+// continues with just ``reprobuild.nim`` (the slow path) — emission is a
+// pure optimisation, not load-bearing for correctness.
+static bool ReprobuildWriteTryCompileMetadata(
+  std::string const& path,
+  std::vector<std::string> const& usedTools,
+  std::vector<ReprobuildPool> const& pools,
+  std::vector<ReprobuildAction const*> const& actions,
+  std::string const& targetName,
+  std::vector<std::string> const& targetActionIds)
+{
+  using namespace ReprobuildTryCompileEnvelope;
+  std::string payload;
+  AppendStringSeq(payload, usedTools);
+  AppendU32Le(payload, static_cast<std::uint32_t>(pools.size()));
+  for (auto const& pool : pools) {
+    AppendString(payload, pool.Name);
+    AppendU32Le(payload, pool.Capacity);
+  }
+  AppendU32Le(payload, static_cast<std::uint32_t>(actions.size()));
+  for (auto const* action : actions) {
+    ReprobuildAppendTryCompileAction(payload, *action);
+  }
+  AppendString(payload, targetName);
+  AppendStringSeq(payload, targetActionIds);
+
+  std::string envelope = "RBCT";
+  AppendU16Le(envelope, 1);
+  AppendU32Le(envelope, static_cast<std::uint32_t>(payload.size()));
+  envelope.append(payload);
+
+  if (!cmSystemTools::MakeDirectory(cmSystemTools::GetFilenamePath(path))) {
+    return false;
+  }
+  cmsys::ofstream out(path.c_str(), std::ios::binary);
+  if (!out) {
+    return false;
+  }
+  out.write(envelope.data(),
+            static_cast<std::streamsize>(envelope.size()));
+  return out.good();
+}
+
 void cmGlobalReprobuildGenerator::WriteProviderMetadata()
 {
   std::string const binaryDir = this->GetCMakeInstance()->GetHomeOutputDirectory();
@@ -2985,6 +3114,26 @@ void cmGlobalReprobuildGenerator::WriteProviderMetadata()
         }
         usedTools.insert(action.ToolId);
         action.Args = args;
+        // Tier 2a: inside try_compile() the compiler binary is fully
+        // resolved from CMAKE_<LANG>_COMPILER (which CMake's TryCompile
+        // mechanism inherits from the parent configure), so the action
+        // is self-contained and does not need a typed tool profile. Lift
+        // it to inline-exec so the direct provider can emit the build
+        // graph without going through tool resolution.
+        if (this->GetCMakeInstance()->GetIsInTryCompile() &&
+            lang != "Fortran") {
+          std::string const compilerPath =
+            mf->GetSafeDefinition(ReprobuildCompilerVar(lang));
+          if (!compilerPath.empty()) {
+            action.Inline = true;
+            action.InlineArgv.clear();
+            action.InlineArgv.push_back(compilerPath);
+            for (std::string const& arg : args) {
+              action.InlineArgv.push_back(arg);
+            }
+            action.InlineCwd = binaryDir;
+          }
+        }
         if (lang == "Fortran") {
           action.Inputs = { cmStrCat(objRel, ".ddi.i") };
         } else {
@@ -3770,6 +3919,24 @@ void cmGlobalReprobuildGenerator::WriteProviderMetadata()
         }
         if (declareOutputs) {
           target.LinkAction.Outputs = { realOutput };
+        }
+        // Tier 2a: TryCompile link uses the same absolute compiler/linker
+        // CMAKE_<LANG>_COMPILER as the compile step, so lift to inline-exec
+        // for the same reason — the direct provider needs the action to
+        // be self-contained.
+        if (this->GetCMakeInstance()->GetIsInTryCompile()) {
+          cmMakefile const* linkMf = lg->GetMakefile();
+          std::string const linkerPath =
+            linkMf->GetSafeDefinition(ReprobuildCompilerVar(linkLang));
+          if (!linkerPath.empty()) {
+            target.LinkAction.Inline = true;
+            target.LinkAction.InlineArgv.clear();
+            target.LinkAction.InlineArgv.push_back(linkerPath);
+            for (std::string const& arg : linkArgs) {
+              target.LinkAction.InlineArgv.push_back(arg);
+            }
+            target.LinkAction.InlineCwd = binaryDir;
+          }
         }
         if (gt->HasImportLibrary(config)) {
           std::string const importOutput = ReprobuildRelativeTo(
@@ -4814,6 +4981,76 @@ void cmGlobalReprobuildGenerator::WriteProviderMetadata()
   launcherState << "provider=" << providerFile << "\n";
   launcherState << "targets=all,default," << cmJoin(targetNames, ",")
                 << "\n";
+
+  // Tier 2a: emit ``trycompile.rbsz`` next to ``reprobuild.nim`` for
+  // stereotyped try_compile() projects. The engine recognises the marker
+  // and dispatches the pre-built ``repro-cmake-trycompile-provider`` binary
+  // instead of compiling the per-project provider — saving ~2 s per probe.
+  // Reprobuild.nim is still emitted for the fallback path (older repro
+  // binaries / missing direct provider artifact).
+  // Per Provider-Compile-Tiering.md §"2a — repro-cmake-trycompile-provider".
+  if (this->GetCMakeInstance()->GetIsInTryCompile()) {
+    // The single concrete target of a try_compile() invocation. CMake
+    // always generates exactly one non-utility build target per probe.
+    ReprobuildTarget const* tryCompileTarget = nullptr;
+    for (ReprobuildTarget const& target : buildTargets) {
+      if (target.IsUtility) {
+        continue;
+      }
+      tryCompileTarget = &target;
+      break;
+    }
+    if (tryCompileTarget != nullptr) {
+      std::vector<std::string> tryCompileUsedTools(usedTools.begin(),
+                                                    usedTools.end());
+      std::vector<ReprobuildAction const*> tryCompileActions;
+      std::vector<std::string> tryCompileActionIds;
+      auto pushAction = [&](ReprobuildAction const& action) {
+        tryCompileActions.push_back(&action);
+        tryCompileActionIds.push_back(action.Id);
+      };
+      for (ReprobuildAction const& action : tryCompileTarget->CustomActions) {
+        pushAction(action);
+      }
+      for (ReprobuildAction const& action :
+           tryCompileTarget->PreBuildActions) {
+        pushAction(action);
+      }
+      for (ReprobuildAction const& action :
+           tryCompileTarget->CompileActions) {
+        pushAction(action);
+      }
+      for (ReprobuildAction const& action :
+           tryCompileTarget->PreLinkActions) {
+        pushAction(action);
+      }
+      if (tryCompileTarget->HasLinkAction) {
+        pushAction(tryCompileTarget->LinkAction);
+      }
+      for (ReprobuildAction const& action :
+           tryCompileTarget->SymlinkActions) {
+        pushAction(action);
+      }
+      for (ReprobuildAction const& action :
+           tryCompileTarget->PostBuildActions) {
+        pushAction(action);
+      }
+      std::string const tryCompileMetadataFile =
+        cmStrCat(binaryDir, "/trycompile.rbsz");
+      if (!ReprobuildWriteTryCompileMetadata(
+            tryCompileMetadataFile, tryCompileUsedTools, pools,
+            tryCompileActions, tryCompileTarget->Name,
+            tryCompileActionIds)) {
+        // Best-effort: log a non-fatal message and continue. The
+        // reprobuild.nim slow-path remains available.
+        this->GetCMakeInstance()->IssueMessage(
+          MessageType::WARNING,
+          cmStrCat("Could not write Reprobuild trycompile metadata "
+                   "(falling back to per-project provider compile): ",
+                   tryCompileMetadataFile));
+      }
+    }
+  }
 }
 
 std::vector<cmGlobalGenerator::GeneratedMakeCommand>
