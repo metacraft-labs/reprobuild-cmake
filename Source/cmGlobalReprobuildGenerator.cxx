@@ -114,8 +114,69 @@ std::string ReprobuildJsonEscape(std::string const& value)
   return out;
 }
 
+std::string ReprobuildSafeId(std::string value);
+
+// Canonicalise CMake TryCompile ephemeral tokens out of any string that
+// downstream code is going to hash. CMake mints a fresh `cmTC_<hex>` target
+// name for each try_compile() invocation; without canonicalisation, two
+// projects asking the same CMake check (e.g. CheckIncludeFile sys/types.h)
+// produce action ids and commandStats ids that differ only in that hex
+// suffix, defeating the action cache.
+//
+// We rewrite every `cmTC_<hex>` token to a fixed `cmTC_tryCompile` token.
+// The hex suffix is exactly 24 lowercase hex chars in practice (libcmake's
+// `cmSystemTools::RandomSeed`-derived id, see cmCoreTryCompile.cxx) but we
+// accept any non-empty run of [0-9a-fA-F] for forward-compatibility. We
+// stop at the first non-hex character so adjacent non-hex text (e.g. a
+// `.dir/` or `.exe` suffix) is preserved verbatim.
+//
+// Per Provider-Compile-Tiering.md §"Cache Scope" Phase 1 fingerprint
+// canonicalisation requirements.
+std::string ReprobuildCanonicaliseTryCompileTokens(std::string const& input)
+{
+  std::string out;
+  out.reserve(input.size());
+  std::size_t i = 0;
+  while (i < input.size()) {
+    // Look for the literal "cmTC_" sentinel and verify a non-empty hex
+    // suffix follows. The sentinel itself is preserved; the hex run is
+    // replaced with the canonical "tryCompile".
+    if (i + 5 <= input.size() && input.compare(i, 5, "cmTC_") == 0) {
+      std::size_t hexStart = i + 5;
+      std::size_t j = hexStart;
+      while (j < input.size()) {
+        char c = input[j];
+        bool isHex = (c >= '0' && c <= '9') || (c >= 'a' && c <= 'f') ||
+          (c >= 'A' && c <= 'F');
+        if (!isHex) {
+          break;
+        }
+        ++j;
+      }
+      // Real cmTC ids are >= 8 hex chars in modern CMake; insist on >= 4 to
+      // avoid spurious matches against e.g. "cmTC_abc.cmake" where the tail
+      // is an alphabetic identifier.
+      if (j - hexStart >= 4) {
+        out.append("cmTC_tryCompile");
+        i = j;
+        continue;
+      }
+    }
+    out.push_back(input[i]);
+    ++i;
+  }
+  return out;
+}
+
 std::string ReprobuildSafeId(std::string value)
 {
+  // Canonicalise CMake TryCompile random tokens BEFORE the [^A-Za-z0-9_.-]
+  // replacement. The canonicalisation walks the literal "cmTC_<hex>"
+  // substrings; doing it before character normalisation keeps the match
+  // logic free of post-replacement quirks. Non-TryCompile inputs are
+  // unchanged because they do not contain the sentinel + hex suffix
+  // pattern.
+  value = ReprobuildCanonicaliseTryCompileTokens(value);
   for (char& ch : value) {
     unsigned char uch = static_cast<unsigned char>(ch);
     if (!std::isalnum(uch) && ch != '_' && ch != '-' && ch != '.') {
@@ -131,12 +192,18 @@ std::string ReprobuildSafeId(std::string value)
 std::string ReprobuildCommandStatsId(std::string const& id)
 {
   constexpr std::size_t maxCommandStatsIdBytes = 64;
-  if (id.size() <= maxCommandStatsIdBytes) {
-    return id;
+  // The commandStats id is also user-visible bench stats output. Canonicalise
+  // the TryCompile random suffix on the way in so two probes for the same
+  // CMake check aggregate into one metric line. Since `id` typically comes
+  // from ReprobuildSafeId() it is already canonicalised, but defend against
+  // callers that compose ids out of band.
+  std::string canonical = ReprobuildCanonicaliseTryCompileTokens(id);
+  if (canonical.size() <= maxCommandStatsIdBytes) {
+    return canonical;
   }
   cmCryptoHash hash(cmCryptoHash::AlgoSHA256);
-  std::string const suffix = hash.HashString(id).substr(0, 16);
-  return cmStrCat(id.substr(0, maxCommandStatsIdBytes - suffix.size() - 1),
+  std::string const suffix = hash.HashString(canonical).substr(0, 16);
+  return cmStrCat(canonical.substr(0, maxCommandStatsIdBytes - suffix.size() - 1),
                   "-", suffix);
 }
 
