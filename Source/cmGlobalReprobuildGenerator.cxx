@@ -168,6 +168,119 @@ std::string ReprobuildCanonicaliseTryCompileTokens(std::string const& input)
   return out;
 }
 
+// Returns the user-level reprobuild store root that hosts cross-project
+// content-addressed assets (action cache, CAS, and our TryCompile source
+// mirror). Mirrors the engine's resolveActionCacheRoot precedence
+// (Cache-Scope.milestones §"Cache-root split"):
+//   1. ${REPROBUILD_STORE_ROOT}
+//   2. ${REPRO_STORE_ROOT} (compat alias)
+//   3. Platform default
+//      - Windows: %LOCALAPPDATA%\repro
+//      - macOS:   $HOME/Library/Caches/repro
+//      - Linux:   $XDG_CACHE_HOME/repro, else $HOME/.cache/repro
+// Returns empty string if none can be resolved (e.g. no HOME) — callers
+// must treat that as "no shared store available" and fall back to per-project
+// paths rather than synthesising one.
+std::string ReprobuildSharedStoreRoot()
+{
+  if (cm::optional<std::string> v =
+        cmSystemTools::GetEnvVar("REPROBUILD_STORE_ROOT")) {
+    if (!v->empty()) {
+      return *v;
+    }
+  }
+  if (cm::optional<std::string> v =
+        cmSystemTools::GetEnvVar("REPRO_STORE_ROOT")) {
+    if (!v->empty()) {
+      return *v;
+    }
+  }
+#ifdef _WIN32
+  if (cm::optional<std::string> v =
+        cmSystemTools::GetEnvVar("LOCALAPPDATA")) {
+    if (!v->empty()) {
+      return cmStrCat(*v, "\\repro");
+    }
+  }
+  return std::string();
+#elif defined(__APPLE__)
+  if (cm::optional<std::string> v = cmSystemTools::GetEnvVar("HOME")) {
+    if (!v->empty()) {
+      return cmStrCat(*v, "/Library/Caches/repro");
+    }
+  }
+  return std::string();
+#else
+  if (cm::optional<std::string> v =
+        cmSystemTools::GetEnvVar("XDG_CACHE_HOME")) {
+    if (!v->empty()) {
+      return cmStrCat(*v, "/repro");
+    }
+  }
+  if (cm::optional<std::string> v = cmSystemTools::GetEnvVar("HOME")) {
+    if (!v->empty()) {
+      return cmStrCat(*v, "/.cache/repro");
+    }
+  }
+  return std::string();
+#endif
+}
+
+// Stage a TryCompile test source through a content-addressed canonical
+// location under the user-level reprobuild store so two projects asking the
+// same CMake check probe (e.g. check_include_file(sys/types.h)) emit
+// byte-identical compile-action input paths. The Reprobuild engine's strong
+// fingerprint hashes input.path + content; per-project scratch paths defeat
+// cross-project reuse even when the content is identical, so re-routing the
+// path through a single content-addressed location is what makes a second
+// project's identical probe actually hit the action cache.
+//
+// Failure modes (store root missing, source unreadable, copy fails) silently
+// fall back to the original per-project path — the canonical-source step is
+// a pure optimisation, never load-bearing.
+//
+// Per Cache-Scope.milestones §"Cross-project reuse: canonical source path"
+// and Provider-Compile-Tiering.md §"Cache Scope".
+std::string ReprobuildCanonicaliseTryCompileSourcePath(
+  std::string const& originalPath)
+{
+  if (originalPath.empty() ||
+      !cmSystemTools::FileExists(originalPath, true)) {
+    return originalPath;
+  }
+  std::string const storeRoot = ReprobuildSharedStoreRoot();
+  if (storeRoot.empty()) {
+    return originalPath;
+  }
+  cmCryptoHash hash(cmCryptoHash::AlgoSHA256);
+  std::string const digest = hash.HashFile(originalPath);
+  if (digest.empty()) {
+    return originalPath;
+  }
+  // 128 bits of digest is ample collision resistance for a user-local cache
+  // and keeps the resulting path short — relevant on Windows where the
+  // compiler still has to spell the path on its command line.
+  std::string const shortDigest = digest.substr(0, 32);
+  std::string const baseName =
+    cmSystemTools::GetFilenameName(originalPath);
+  std::string const canonicalDir =
+    cmStrCat(storeRoot, "/cmake-trycompile-sources/", shortDigest);
+  std::string const canonicalPath = cmStrCat(canonicalDir, "/", baseName);
+  if (cmSystemTools::FileExists(canonicalPath, true)) {
+    return canonicalPath;
+  }
+  if (!cmSystemTools::MakeDirectory(canonicalDir)) {
+    return originalPath;
+  }
+  // CopyFileIfDifferent is idempotent and tolerant of two concurrent CMake
+  // processes staging the same probe source at the same time — both writers
+  // produce byte-identical destinations.
+  if (!cmSystemTools::CopyFileIfDifferent(originalPath, canonicalPath)) {
+    return originalPath;
+  }
+  return canonicalPath;
+}
+
 std::string ReprobuildSafeId(std::string value)
 {
   // Canonicalise CMake TryCompile random tokens BEFORE the [^A-Za-z0-9_.-]
@@ -2578,6 +2691,23 @@ void cmGlobalReprobuildGenerator::WriteProviderMetadata()
           sourcePath =
             ReprobuildConfigFullPath(binaryDir, sourcePath, config, true);
           sourceArg = cmStrCat(binaryDir, "/", sourcePath);
+        }
+        // TryCompile test sources live under each project's per-invocation
+        // <binary_dir>/CMakeFiles/CMakeScratch/TryCompile-<random>/ scratch
+        // dir, so projects with byte-identical probe content compile-hash
+        // to distinct strong-fingerprint inputs and never share the action
+        // cache. Stage the source through a content-addressed path under
+        // the user-level reprobuild store so two projects asking the same
+        // CMake check actually hit. The path move is symmetric — both
+        // action.Inputs and the compiler-argv entry sourceArg adopt the
+        // canonical path so weak and strong fingerprints both line up.
+        if (this->GetCMakeInstance()->GetIsInTryCompile()) {
+          std::string const canonicalPath =
+            ReprobuildCanonicaliseTryCompileSourcePath(sourceArg);
+          if (canonicalPath != sourceArg) {
+            sourcePath = canonicalPath;
+            sourceArg = canonicalPath;
+          }
         }
 
         std::vector<std::string> args;
