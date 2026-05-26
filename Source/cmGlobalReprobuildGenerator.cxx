@@ -1849,20 +1849,35 @@ static void ReprobuildAppendTryCompileAction(std::string& out,
   AppendString(out, ReprobuildCommandStatsId(action.Id));
 }
 
-// Writes ``trycompile.rbsz`` next to ``reprobuild.nim`` for stereotyped
-// try_compile() projects. The engine routes any work-dir containing this
-// marker to the pre-built ``repro-cmake-trycompile-provider`` binary
-// (Provider-Compile-Tiering.md §"2a"), skipping the ~2 s per-project
-// provider compile. Returns true on success; on failure the generator
-// continues with just ``reprobuild.nim`` (the slow path) — emission is a
-// pure optimisation, not load-bearing for correctness.
+// Describes one build target (or aggregate) in the v2 metadata envelope.
+struct ReprobuildTryCompileTargetDescriptor
+{
+  std::string Name;
+  std::vector<std::string> ActionIds;
+  std::vector<std::string> ChildTargets;
+  bool IsAggregate = false;
+};
+
+// Writes ``trycompile.rbsz`` (legacy name retained — also used for main
+// CMake-generated projects under Tier 2c) next to ``reprobuild.nim``. The
+// engine routes any work-dir containing this marker to the pre-built
+// ``repro-cmake-trycompile-provider`` binary, skipping the per-project
+// provider compile entirely. Returns true on success; on failure the
+// generator continues with just ``reprobuild.nim`` (the slow path) —
+// emission is a pure optimisation, not load-bearing for correctness.
+//
+// v1 envelopes (TryCompile single-target form) are still written for
+// stereotyped try_compile() probes. v2 envelopes carry the main project's
+// multi-target shape — including aggregates and the default target — so
+// the direct provider can synthesise the full build graph without
+// compiling per-project reprobuild.nim.
 static bool ReprobuildWriteTryCompileMetadata(
   std::string const& path,
   std::vector<std::string> const& usedTools,
   std::vector<ReprobuildPool> const& pools,
   std::vector<ReprobuildAction const*> const& actions,
-  std::string const& targetName,
-  std::vector<std::string> const& targetActionIds)
+  std::vector<ReprobuildTryCompileTargetDescriptor> const& targets,
+  std::string const& defaultTargetName)
 {
   using namespace ReprobuildTryCompileEnvelope;
   std::string payload;
@@ -1876,11 +1891,17 @@ static bool ReprobuildWriteTryCompileMetadata(
   for (auto const* action : actions) {
     ReprobuildAppendTryCompileAction(payload, *action);
   }
-  AppendString(payload, targetName);
-  AppendStringSeq(payload, targetActionIds);
+  AppendU32Le(payload, static_cast<std::uint32_t>(targets.size()));
+  for (auto const& target : targets) {
+    AppendString(payload, target.Name);
+    AppendStringSeq(payload, target.ActionIds);
+    AppendStringSeq(payload, target.ChildTargets);
+    AppendBool(payload, target.IsAggregate);
+  }
+  AppendString(payload, defaultTargetName);
 
   std::string envelope = "RBCT";
-  AppendU16Le(envelope, 1);
+  AppendU16Le(envelope, 2);
   AppendU32Le(envelope, static_cast<std::uint32_t>(payload.size()));
   envelope.append(payload);
 
@@ -3114,19 +3135,39 @@ void cmGlobalReprobuildGenerator::WriteProviderMetadata()
         }
         usedTools.insert(action.ToolId);
         action.Args = args;
-        // Tier 2a: inside try_compile() the compiler binary is fully
-        // resolved from CMAKE_<LANG>_COMPILER (which CMake's TryCompile
-        // mechanism inherits from the parent configure), so the action
-        // is self-contained and does not need a typed tool profile. Lift
-        // it to inline-exec so the direct provider can emit the build
-        // graph without going through tool resolution.
-        if (this->GetCMakeInstance()->GetIsInTryCompile() &&
-            lang != "Fortran") {
+        // Tier 2a + 2c: lift every C/CXX compile action to inline-exec.
+        // The compiler binary is fully resolved by CMake's language
+        // detection (CMAKE_<LANG>_COMPILER), so the action is
+        // self-contained and does not need a typed tool profile. This
+        // makes the action runnable by the direct provider without going
+        // through resolveAndWriteIdentity, AND lets the slow-path
+        // engine skip per-action tool-profile lookups for compiles.
+        // Fortran is excluded because its scan/dyndep machinery still
+        // assumes tool-profile lookup.
+        if (lang != "Fortran") {
           std::string const compilerPath =
             mf->GetSafeDefinition(ReprobuildCompilerVar(lang));
           if (!compilerPath.empty()) {
             action.Inline = true;
             action.InlineArgv.clear();
+            // If a per-target RULE_LAUNCH_COMPILE launcher was configured,
+            // prepend its argv. The wrapper script the slow path writes
+            // (ReprobuildWriteLaunchedWrapper) effectively runs
+            // ``<launcher_argv> <compiler> "$@"`` — inline-exec mirrors
+            // that with the launcher argv directly in the action's argv.
+            if (!launcher.empty()) {
+              std::vector<std::string> launcherInline;
+              if (launcher.find(';') != std::string::npos) {
+                cmList launcherList{ launcher };
+                launcherInline.assign(launcherList.begin(),
+                                      launcherList.end());
+              } else {
+                ReprobuildAppendParsed(launcherInline, launcher);
+              }
+              for (std::string const& part : launcherInline) {
+                action.InlineArgv.push_back(part);
+              }
+            }
             action.InlineArgv.push_back(compilerPath);
             for (std::string const& arg : args) {
               action.InlineArgv.push_back(arg);
@@ -3920,24 +3961,6 @@ void cmGlobalReprobuildGenerator::WriteProviderMetadata()
         if (declareOutputs) {
           target.LinkAction.Outputs = { realOutput };
         }
-        // Tier 2a: TryCompile link uses the same absolute compiler/linker
-        // CMAKE_<LANG>_COMPILER as the compile step, so lift to inline-exec
-        // for the same reason — the direct provider needs the action to
-        // be self-contained.
-        if (this->GetCMakeInstance()->GetIsInTryCompile()) {
-          cmMakefile const* linkMf = lg->GetMakefile();
-          std::string const linkerPath =
-            linkMf->GetSafeDefinition(ReprobuildCompilerVar(linkLang));
-          if (!linkerPath.empty()) {
-            target.LinkAction.Inline = true;
-            target.LinkAction.InlineArgv.clear();
-            target.LinkAction.InlineArgv.push_back(linkerPath);
-            for (std::string const& arg : linkArgs) {
-              target.LinkAction.InlineArgv.push_back(arg);
-            }
-            target.LinkAction.InlineCwd = binaryDir;
-          }
-        }
         if (gt->HasImportLibrary(config)) {
           std::string const importOutput = ReprobuildRelativeTo(
             binaryDir,
@@ -3979,6 +4002,26 @@ void cmGlobalReprobuildGenerator::WriteProviderMetadata()
           ReprobuildAppendCleanFile(cleanFiles, binaryDir,
                                     target.LinkAction.Depfile);
           sawLinkDepfile = true;
+        }
+        // Tier 2a + 2c: lift the link action to inline-exec. The compiler
+        // path is fully resolved (CMAKE_<LANG>_COMPILER) and the action is
+        // self-contained. Build InlineArgv from target.LinkAction.Args
+        // AFTER the HasImportLibrary block above has appended its
+        // -Wl,--out-implib flag, so InlineArgv stays a faithful copy of
+        // the final argv list.
+        {
+          cmMakefile const* linkMf = lg->GetMakefile();
+          std::string const linkerPath =
+            linkMf->GetSafeDefinition(ReprobuildCompilerVar(linkLang));
+          if (!linkerPath.empty()) {
+            target.LinkAction.Inline = true;
+            target.LinkAction.InlineArgv.clear();
+            target.LinkAction.InlineArgv.push_back(linkerPath);
+            for (std::string const& arg : target.LinkAction.Args) {
+              target.LinkAction.InlineArgv.push_back(arg);
+            }
+            target.LinkAction.InlineCwd = binaryDir;
+          }
         }
       }
       if (!declareOutputs) {
@@ -4982,73 +5025,101 @@ void cmGlobalReprobuildGenerator::WriteProviderMetadata()
   launcherState << "targets=all,default," << cmJoin(targetNames, ",")
                 << "\n";
 
-  // Tier 2a: emit ``trycompile.rbsz`` next to ``reprobuild.nim`` for
-  // stereotyped try_compile() projects. The engine recognises the marker
-  // and dispatches the pre-built ``repro-cmake-trycompile-provider`` binary
-  // instead of compiling the per-project provider — saving ~2 s per probe.
-  // Reprobuild.nim is still emitted for the fallback path (older repro
-  // binaries / missing direct provider artifact).
-  // Per Provider-Compile-Tiering.md §"2a — repro-cmake-trycompile-provider".
-  if (this->GetCMakeInstance()->GetIsInTryCompile()) {
-    // The single concrete target of a try_compile() invocation. CMake
-    // always generates exactly one non-utility build target per probe.
-    ReprobuildTarget const* tryCompileTarget = nullptr;
-    for (ReprobuildTarget const& target : buildTargets) {
+  // Tier 2a + 2c: emit ``trycompile.rbsz`` next to ``reprobuild.nim`` for
+  // every CMake-generated project. The engine routes any work-dir
+  // containing this marker to the pre-built
+  // ``repro-cmake-trycompile-provider`` binary, skipping the per-project
+  // provider compile entirely.
+  //
+  // Multi-config builds emit `reprobuild.nim` only — they exercise the
+  // cross-config aggregate logic that the direct provider does not yet
+  // implement, so the slow path remains the source of truth there.
+  //
+  // Per Provider-Compile-Tiering.md §"2a/2c".
+  if (!multiConfig) {
+    std::vector<std::string> directUsedTools(usedTools.begin(),
+                                              usedTools.end());
+    std::vector<ReprobuildAction const*> directActions;
+    auto pushAction = [&](ReprobuildAction const& action) {
+      directActions.push_back(&action);
+    };
+
+    // Collect every action attached to each build target, in the same
+    // declaration order ``writeAction`` uses when emitting reprobuild.nim.
+    // Skipping the loop's action-list construction would let the direct
+    // provider miss pre-build / pre-link / symlink / post-build steps that
+    // CMake legitimately attaches to library targets.
+    std::vector<ReprobuildTryCompileTargetDescriptor> directTargets;
+    auto pushTarget = [&](ReprobuildTarget const& target) {
+      ReprobuildTryCompileTargetDescriptor descriptor;
+      descriptor.Name = target.Name;
+      descriptor.IsAggregate = false;
       if (target.IsUtility) {
+        pushAction(target.UtilityAction);
+        descriptor.ActionIds.push_back(target.UtilityAction.Id);
+      } else {
+        for (ReprobuildAction const& action : target.CustomActions) {
+          pushAction(action);
+          descriptor.ActionIds.push_back(action.Id);
+        }
+        for (ReprobuildAction const& action : target.PreBuildActions) {
+          pushAction(action);
+          descriptor.ActionIds.push_back(action.Id);
+        }
+        for (ReprobuildAction const& action : target.CompileActions) {
+          pushAction(action);
+          descriptor.ActionIds.push_back(action.Id);
+        }
+        for (ReprobuildAction const& action : target.PreLinkActions) {
+          pushAction(action);
+          descriptor.ActionIds.push_back(action.Id);
+        }
+        if (target.HasLinkAction) {
+          pushAction(target.LinkAction);
+          descriptor.ActionIds.push_back(target.LinkAction.Id);
+        }
+        for (ReprobuildAction const& action : target.SymlinkActions) {
+          pushAction(action);
+          descriptor.ActionIds.push_back(action.Id);
+        }
+        for (ReprobuildAction const& action : target.PostBuildActions) {
+          pushAction(action);
+          descriptor.ActionIds.push_back(action.Id);
+        }
+      }
+      directTargets.push_back(std::move(descriptor));
+    };
+    for (ReprobuildTarget const& target : buildTargets) {
+      pushTarget(target);
+    }
+
+    // The synthetic "all" aggregate matches the
+    // ``aggregate("all", targets = @[...])`` block in reprobuild.nim.
+    ReprobuildTryCompileTargetDescriptor allDescriptor;
+    allDescriptor.Name = "all";
+    allDescriptor.IsAggregate = true;
+    for (ReprobuildTarget const& target : buildTargets) {
+      if (!target.IncludeInAll) {
         continue;
       }
-      tryCompileTarget = &target;
-      break;
+      allDescriptor.ChildTargets.push_back(target.Name);
     }
-    if (tryCompileTarget != nullptr) {
-      std::vector<std::string> tryCompileUsedTools(usedTools.begin(),
-                                                    usedTools.end());
-      std::vector<ReprobuildAction const*> tryCompileActions;
-      std::vector<std::string> tryCompileActionIds;
-      auto pushAction = [&](ReprobuildAction const& action) {
-        tryCompileActions.push_back(&action);
-        tryCompileActionIds.push_back(action.Id);
-      };
-      for (ReprobuildAction const& action : tryCompileTarget->CustomActions) {
-        pushAction(action);
-      }
-      for (ReprobuildAction const& action :
-           tryCompileTarget->PreBuildActions) {
-        pushAction(action);
-      }
-      for (ReprobuildAction const& action :
-           tryCompileTarget->CompileActions) {
-        pushAction(action);
-      }
-      for (ReprobuildAction const& action :
-           tryCompileTarget->PreLinkActions) {
-        pushAction(action);
-      }
-      if (tryCompileTarget->HasLinkAction) {
-        pushAction(tryCompileTarget->LinkAction);
-      }
-      for (ReprobuildAction const& action :
-           tryCompileTarget->SymlinkActions) {
-        pushAction(action);
-      }
-      for (ReprobuildAction const& action :
-           tryCompileTarget->PostBuildActions) {
-        pushAction(action);
-      }
-      std::string const tryCompileMetadataFile =
-        cmStrCat(binaryDir, "/trycompile.rbsz");
-      if (!ReprobuildWriteTryCompileMetadata(
-            tryCompileMetadataFile, tryCompileUsedTools, pools,
-            tryCompileActions, tryCompileTarget->Name,
-            tryCompileActionIds)) {
-        // Best-effort: log a non-fatal message and continue. The
-        // reprobuild.nim slow-path remains available.
-        this->GetCMakeInstance()->IssueMessage(
-          MessageType::WARNING,
-          cmStrCat("Could not write Reprobuild trycompile metadata "
-                   "(falling back to per-project provider compile): ",
-                   tryCompileMetadataFile));
-      }
+    directTargets.push_back(std::move(allDescriptor));
+
+    std::string const defaultTargetName = "all";
+
+    std::string const tryCompileMetadataFile =
+      cmStrCat(binaryDir, "/trycompile.rbsz");
+    if (!ReprobuildWriteTryCompileMetadata(
+          tryCompileMetadataFile, directUsedTools, pools, directActions,
+          directTargets, defaultTargetName)) {
+      // Best-effort: log a non-fatal message and continue. The
+      // reprobuild.nim slow-path remains available.
+      this->GetCMakeInstance()->IssueMessage(
+        MessageType::WARNING,
+        cmStrCat("Could not write Reprobuild trycompile metadata "
+                 "(falling back to per-project provider compile): ",
+                 tryCompileMetadataFile));
     }
   }
 }
