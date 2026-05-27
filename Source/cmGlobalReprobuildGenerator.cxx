@@ -1723,7 +1723,106 @@ void cmGlobalReprobuildGenerator::Generate()
     return;
   }
 
+  // M19: Multi-config outer try_compile probes (e.g. check_type_size,
+  // check_struct_has_member) inject a $<UPPER_CASE:$<CONFIG>> suffix into the
+  // file(GENERATE) call CMake writes in the inner try_compile project's
+  // CMakeLists.txt (cmCoreTryCompile.cxx ~line 981). Reprobuild's inner-build
+  // path runs as a single-config UnixMakefile-derived generator (see
+  // GenerateBuildCommand's BuildTryCompile::Yes branch which delegates to a
+  // native make program), so the inner project's $<CONFIG> resolves to an
+  // empty string and the per-config location file is written as
+  // "<target>__loc" (two underscores) instead of "<target>_<UPPER_CONFIG>_loc".
+  //
+  // The outer cmCoreTryCompile::FindOutputFile then looks for
+  // "<target>_<UPPER_CONFIG>_loc" (with the empty-config fallback resolving
+  // to "DEBUG"), fails to find it, and the COPY_FILE probe reports
+  // "Unable to find the recorded try_compile output location". For example
+  // zlib's CheckTypeSize off64_t probe fails with a missing
+  // cmTC_<hash>_DEBUG_loc file.
+  //
+  // Fix: after the inner generate writes the empty-config "<target>__loc"
+  // files, mirror each one to the per-config path the outer expects so the
+  // COPY_FILE family of probes finds the recorded output location.
+  this->WriteTryCompilePerConfigLocFiles();
+
   this->WriteProviderMetadata();
+}
+
+void cmGlobalReprobuildGenerator::WriteTryCompilePerConfigLocFiles()
+{
+  // Only relevant inside a try_compile-spawned inner cmake instance.
+  cmake* cm = this->GetCMakeInstance();
+  if (!cm || !cm->GetIsInTryCompile()) {
+    return;
+  }
+  if (this->LocalGenerators.empty()) {
+    return;
+  }
+
+  // The outer cmake added the $<UPPER_CASE:$<CONFIG>> genex only when the
+  // outer generator was multi-config. The inner Reprobuild generator's
+  // IsMultiConfig() is cache-driven and the multi-config cache entries are
+  // not propagated to inner projects, so the inner project sees itself as
+  // single-config — file(GENERATE) wrote "<target>__loc" with an empty
+  // config. Detect that case by checking for the empty-config _loc files on
+  // disk; if none exist (e.g. outer was single-config and no perConfigGenex
+  // was added), there is nothing to mirror.
+  std::string const binaryDir = cm->GetHomeOutputDirectory();
+  if (binaryDir.empty()) {
+    return;
+  }
+
+  // Resolve the per-config suffix the outer cmCoreTryCompile::FindOutputFile
+  // will look for. Mirror CMake's logic: the suffix is
+  // UpperCase(CMAKE_TRY_COMPILE_CONFIGURATION) when that variable is set on
+  // the outer (which cmMakefile::TryCompile copies into the inner cache as
+  // CMAKE_BUILD_TYPE), else the literal "DEBUG" fallback
+  // (cmCoreTryCompile.cxx's TryCompileDefaultConfig).
+  std::string config =
+    this->LocalGenerators.front()->GetMakefile()->GetSafeDefinition(
+      "CMAKE_BUILD_TYPE");
+  if (config.empty()) {
+    config = "DEBUG";
+  } else {
+    config = cmSystemTools::UpperCase(config);
+  }
+
+  // Iterate every target in every local generator (inner try_compile
+  // projects are typically a single executable, but be defensive — any
+  // CMake probe could in principle declare additional helper targets).
+  std::set<std::string> seenTargets;
+  for (auto const& lg : this->LocalGenerators) {
+    for (auto const& gtPtr : lg->GetGeneratorTargets()) {
+      cmGeneratorTarget* gt = gtPtr.get();
+      if (!gt) {
+        continue;
+      }
+      std::string const& name = gt->GetName();
+      if (name.empty() || !seenTargets.insert(name).second) {
+        continue;
+      }
+      // file(GENERATE)'s OUTPUT in the inner project is
+      // "${CMAKE_BINARY_DIR}/<target>_$<UPPER_CASE:$<CONFIG>>_loc" — with the
+      // genex resolving to empty in the single-config inner project, this is
+      // "<binaryDir>/<target>__loc". Skip targets that have no source _loc
+      // (e.g. INTERFACE / UTILITY targets that try_compile never tags).
+      std::string const sourcePath =
+        cmStrCat(binaryDir, '/', name, "__loc");
+      if (!cmSystemTools::FileExists(sourcePath, true)) {
+        continue;
+      }
+      std::string const destPath =
+        cmStrCat(binaryDir, '/', name, '_', config, "_loc");
+      if (sourcePath == destPath) {
+        continue;
+      }
+      // CopyFileAlways overwrites stale per-config _loc files left over from
+      // previous probes that landed in the same scratch dir (try_compile
+      // mints a fresh scratch dir per invocation, but cmTC_<hash> directory
+      // reuse can happen for stereotyped probes via try_compile caching).
+      cmSystemTools::CopyFileAlways(sourcePath, destPath);
+    }
+  }
 }
 
 void cmGlobalReprobuildGenerator::PrimeProviderMetadata()

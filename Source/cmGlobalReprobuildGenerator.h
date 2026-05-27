@@ -82,6 +82,7 @@ public:
 
 private:
   void WriteProviderMetadata();
+  void WriteTryCompilePerConfigLocFiles();
 
   std::set<std::string> CrossConfigs;
   std::set<std::string> DefaultConfigs;
