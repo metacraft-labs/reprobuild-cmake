@@ -1849,13 +1849,25 @@ static void ReprobuildAppendTryCompileAction(std::string& out,
   AppendString(out, ReprobuildCommandStatsId(action.Id));
 }
 
-// Describes one build target (or aggregate) in the v2 metadata envelope.
+// Describes one build target (or aggregate) in the v2/v3 metadata envelope.
 struct ReprobuildTryCompileTargetDescriptor
 {
   std::string Name;
   std::vector<std::string> ActionIds;
   std::vector<std::string> ChildTargets;
   bool IsAggregate = false;
+};
+
+// v3 only: describes a per-config or cross-config aggregate emitted by
+// multi-config CMake builds. Mirrors ``CrossConfigTargetDef`` in
+// ``libs/repro_cmake_trycompile/src/repro_cmake_trycompile.nim`` — byte
+// layout must stay in lockstep with the Nim encoder.
+struct ReprobuildTryCompileCrossConfigDescriptor
+{
+  std::string Name;
+  std::string ConfigName;
+  std::string BaseName;
+  std::vector<std::string> ChildTargets;
 };
 
 // Writes ``trycompile.rbsz`` (legacy name retained — also used for main
@@ -1870,14 +1882,24 @@ struct ReprobuildTryCompileTargetDescriptor
 // stereotyped try_compile() probes. v2 envelopes carry the main project's
 // multi-target shape — including aggregates and the default target — so
 // the direct provider can synthesise the full build graph without
-// compiling per-project reprobuild.nim.
+// compiling per-project reprobuild.nim. v3 extends v2 with cross-config
+// descriptors so multi-config CMake builds (CMAKE_CROSS_CONFIGS,
+// CMAKE_DEFAULT_CONFIGS) can also route through the direct provider.
+//
+// v2 readers MUST reject v3 (the cross-config target shape would
+// otherwise be invisible and the slow path would silently disappear);
+// the Nim decoder enforces that.
 static bool ReprobuildWriteTryCompileMetadata(
   std::string const& path,
   std::vector<std::string> const& usedTools,
   std::vector<ReprobuildPool> const& pools,
   std::vector<ReprobuildAction const*> const& actions,
   std::vector<ReprobuildTryCompileTargetDescriptor> const& targets,
-  std::string const& defaultTargetName)
+  std::string const& defaultTargetName,
+  std::vector<std::string> const& crossConfigs,
+  std::vector<ReprobuildTryCompileCrossConfigDescriptor> const&
+    crossConfigTargets,
+  std::vector<std::string> const& defaultConfigs)
 {
   using namespace ReprobuildTryCompileEnvelope;
   std::string payload;
@@ -1899,9 +1921,21 @@ static bool ReprobuildWriteTryCompileMetadata(
     AppendBool(payload, target.IsAggregate);
   }
   AppendString(payload, defaultTargetName);
+  // v3 trailer: cross-config descriptors. Mirrors the
+  // ``encodeTryCompileMetadata`` Nim encoder field-for-field.
+  AppendStringSeq(payload, crossConfigs);
+  AppendU32Le(payload,
+              static_cast<std::uint32_t>(crossConfigTargets.size()));
+  for (auto const& crossTarget : crossConfigTargets) {
+    AppendString(payload, crossTarget.Name);
+    AppendString(payload, crossTarget.ConfigName);
+    AppendString(payload, crossTarget.BaseName);
+    AppendStringSeq(payload, crossTarget.ChildTargets);
+  }
+  AppendStringSeq(payload, defaultConfigs);
 
   std::string envelope = "RBCT";
-  AppendU16Le(envelope, 2);
+  AppendU16Le(envelope, 3);
   AppendU32Le(envelope, static_cast<std::uint32_t>(payload.size()));
   envelope.append(payload);
 
@@ -5031,12 +5065,18 @@ void cmGlobalReprobuildGenerator::WriteProviderMetadata()
   // ``repro-cmake-trycompile-provider`` binary, skipping the per-project
   // provider compile entirely.
   //
-  // Multi-config builds emit `reprobuild.nim` only — they exercise the
-  // cross-config aggregate logic that the direct provider does not yet
-  // implement, so the slow path remains the source of truth there.
+  // Multi-config builds (``CMAKE_CROSS_CONFIGS`` /
+  // ``CMAKE_DEFAULT_CONFIGS``) emit a v3 envelope that carries the
+  // per-config and cross-config aggregates the slow path used to emit
+  // exclusively into ``reprobuild.nim``. Single-config still emits a v3
+  // envelope but with empty cross-config trailers (so v2 readers also
+  // reject it — the bump is observable per spec).
+  //
+  // ``reprobuild.nim`` is still written alongside ``trycompile.rbsz``
+  // so older ``repro`` binaries fall back transparently.
   //
   // Per Provider-Compile-Tiering.md §"2a/2c".
-  if (!multiConfig) {
+  {
     std::vector<std::string> directUsedTools(usedTools.begin(),
                                               usedTools.end());
     std::vector<ReprobuildAction const*> directActions;
@@ -5093,26 +5133,190 @@ void cmGlobalReprobuildGenerator::WriteProviderMetadata()
       pushTarget(target);
     }
 
-    // The synthetic "all" aggregate matches the
-    // ``aggregate("all", targets = @[...])`` block in reprobuild.nim.
-    ReprobuildTryCompileTargetDescriptor allDescriptor;
-    allDescriptor.Name = "all";
-    allDescriptor.IsAggregate = true;
-    for (ReprobuildTarget const& target : buildTargets) {
-      if (!target.IncludeInAll) {
-        continue;
-      }
-      allDescriptor.ChildTargets.push_back(target.Name);
-    }
-    directTargets.push_back(std::move(allDescriptor));
+    // v3 cross-config descriptors. Empty in single-config builds — that
+    // path's "all" aggregate still goes into ``directTargets`` below.
+    std::vector<std::string> envelopeCrossConfigs;
+    std::vector<ReprobuildTryCompileCrossConfigDescriptor>
+      crossConfigDescriptors;
+    std::vector<std::string> envelopeDefaultConfigs;
+    std::string defaultTargetName = "all";
 
-    std::string const defaultTargetName = "all";
+    if (multiConfig) {
+      envelopeCrossConfigs = configs;
+      envelopeDefaultConfigs = std::vector<std::string>(
+        this->DefaultConfigs.begin(), this->DefaultConfigs.end());
+
+      // Mirror the per-config "all:<Config>" aggregate the slow path
+      // emits into ``reprobuild.nim``. Each entry references the
+      // per-config build targets in ``directTargets``.
+      for (std::string const& config : configs) {
+        ReprobuildTryCompileCrossConfigDescriptor descriptor;
+        descriptor.Name = cmStrCat("all:", config);
+        descriptor.ConfigName = config;
+        descriptor.BaseName.clear();
+        for (ReprobuildTarget const& target : buildTargets) {
+          if (!target.IncludeInAll || target.OutputConfig != config ||
+              target.IsCrossConfig) {
+            continue;
+          }
+          descriptor.ChildTargets.push_back(target.Name);
+        }
+        crossConfigDescriptors.push_back(std::move(descriptor));
+      }
+
+      // Per-base-name aggregates. Group config-qualified targets by
+      // BaseName, then emit either CrossConfigs-fanout descriptors (one
+      // per command-config plus the unsuffixed cross-config rollup) or
+      // a per-config-config plus a default-config rollup, mirroring the
+      // slow-path branches above.
+      using TargetConfigKey =
+        std::tuple<std::string, std::string, std::string>;
+      std::map<TargetConfigKey, std::string> targetNamesByConfig;
+      std::map<std::string, std::vector<ReprobuildTarget const*>>
+        nativeTargetsByBase;
+      for (ReprobuildTarget const& target : buildTargets) {
+        if (!target.BaseName.empty()) {
+          targetNamesByConfig.emplace(
+            TargetConfigKey{ target.BaseName, target.OutputConfig,
+                             target.CommandConfig },
+            target.Name);
+          if (!target.IsCrossConfig) {
+            nativeTargetsByBase[target.BaseName].push_back(&target);
+          }
+        }
+      }
+      auto commandConfigTargetName =
+        [&](std::string const& baseName, std::string const& outputConfig,
+            std::string const& commandConfig) -> std::string {
+        auto const it = targetNamesByConfig.find(
+          TargetConfigKey{ baseName, outputConfig, commandConfig });
+        if (it != targetNamesByConfig.end()) {
+          return it->second;
+        }
+        return "";
+      };
+
+      for (auto const& entry : nativeTargetsByBase) {
+        if (!this->CrossConfigs.empty()) {
+          for (std::string const& commandConfig : configs) {
+            ReprobuildTryCompileCrossConfigDescriptor descriptor;
+            descriptor.Name =
+              cmStrCat(entry.first, ":all:", commandConfig);
+            descriptor.ConfigName = commandConfig;
+            descriptor.BaseName = entry.first;
+            for (std::string const& outputConfig : this->CrossConfigs) {
+              std::string const targetName = commandConfigTargetName(
+                entry.first, outputConfig, commandConfig);
+              if (targetName.empty()) {
+                continue;
+              }
+              descriptor.ChildTargets.push_back(targetName);
+            }
+            crossConfigDescriptors.push_back(std::move(descriptor));
+          }
+
+          ReprobuildTryCompileCrossConfigDescriptor allDescriptor;
+          allDescriptor.Name = cmStrCat(entry.first, ":all");
+          allDescriptor.ConfigName.clear();
+          allDescriptor.BaseName = entry.first;
+          for (std::string const& outputConfig : this->CrossConfigs) {
+            std::string const targetName = commandConfigTargetName(
+              entry.first, outputConfig, this->DefaultFileConfig);
+            if (targetName.empty()) {
+              continue;
+            }
+            allDescriptor.ChildTargets.push_back(targetName);
+          }
+          crossConfigDescriptors.push_back(std::move(allDescriptor));
+          continue;
+        }
+
+        for (std::string const& commandConfig : configs) {
+          ReprobuildTryCompileCrossConfigDescriptor descriptor;
+          descriptor.Name = cmStrCat(entry.first, ":all:", commandConfig);
+          descriptor.ConfigName = commandConfig;
+          descriptor.BaseName = entry.first;
+          for (ReprobuildTarget const* target : entry.second) {
+            descriptor.ChildTargets.push_back(target->Name);
+          }
+          crossConfigDescriptors.push_back(std::move(descriptor));
+        }
+
+        ReprobuildTryCompileCrossConfigDescriptor allDescriptor;
+        allDescriptor.Name = cmStrCat(entry.first, ":all");
+        allDescriptor.ConfigName.clear();
+        allDescriptor.BaseName = entry.first;
+        for (ReprobuildTarget const* target : entry.second) {
+          allDescriptor.ChildTargets.push_back(target->Name);
+        }
+        crossConfigDescriptors.push_back(std::move(allDescriptor));
+      }
+
+      // Per-base-name default-config rollup (the unsuffixed ``<base>``
+      // target). The slow path emits this in a separate loop AFTER the
+      // per-base-name aggregates regardless of CrossConfigs — mirror that
+      // here so v3 envelopes carry the same set of aggregate names.
+      for (auto const& entry : nativeTargetsByBase) {
+        ReprobuildTryCompileCrossConfigDescriptor defaultDescriptor;
+        defaultDescriptor.Name = entry.first;
+        defaultDescriptor.ConfigName.clear();
+        defaultDescriptor.BaseName = entry.first;
+        for (std::string const& outputConfig : this->DefaultConfigs) {
+          std::string const targetName = commandConfigTargetName(
+            entry.first, outputConfig, this->DefaultFileConfig);
+          if (targetName.empty()) {
+            continue;
+          }
+          defaultDescriptor.ChildTargets.push_back(targetName);
+        }
+        crossConfigDescriptors.push_back(std::move(defaultDescriptor));
+      }
+
+      // Top-level cross-config ``all`` rollup mirroring the slow path's
+      // ``allTarget = aggregate("all", targets = @[...])``. The slow
+      // path enumerates ``(DefaultConfigs × nativeAllTargets)`` so the
+      // ``all`` aggregate references the leaf per-config build targets
+      // directly. We match that shape here.
+      ReprobuildTryCompileCrossConfigDescriptor crossAllDescriptor;
+      crossAllDescriptor.Name = "all";
+      crossAllDescriptor.ConfigName.clear();
+      crossAllDescriptor.BaseName.clear();
+      for (std::string const& config : this->DefaultConfigs) {
+        for (ReprobuildTarget const& target : buildTargets) {
+          if (!target.IncludeInAll || target.IsCrossConfig ||
+              target.OutputConfig != config || target.BaseName.empty()) {
+            continue;
+          }
+          std::string const targetName = commandConfigTargetName(
+            target.BaseName, config, this->DefaultFileConfig);
+          if (targetName.empty()) {
+            continue;
+          }
+          crossAllDescriptor.ChildTargets.push_back(targetName);
+        }
+      }
+      crossConfigDescriptors.push_back(std::move(crossAllDescriptor));
+    } else {
+      // Single-config: the synthetic "all" aggregate matches the
+      // ``aggregate("all", targets = @[...])`` block in reprobuild.nim.
+      ReprobuildTryCompileTargetDescriptor allDescriptor;
+      allDescriptor.Name = "all";
+      allDescriptor.IsAggregate = true;
+      for (ReprobuildTarget const& target : buildTargets) {
+        if (!target.IncludeInAll) {
+          continue;
+        }
+        allDescriptor.ChildTargets.push_back(target.Name);
+      }
+      directTargets.push_back(std::move(allDescriptor));
+    }
 
     std::string const tryCompileMetadataFile =
       cmStrCat(binaryDir, "/trycompile.rbsz");
     if (!ReprobuildWriteTryCompileMetadata(
           tryCompileMetadataFile, directUsedTools, pools, directActions,
-          directTargets, defaultTargetName)) {
+          directTargets, defaultTargetName, envelopeCrossConfigs,
+          crossConfigDescriptors, envelopeDefaultConfigs)) {
       // Best-effort: log a non-fatal message and continue. The
       // reprobuild.nim slow-path remains available.
       this->GetCMakeInstance()->IssueMessage(
