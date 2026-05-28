@@ -812,6 +812,11 @@ std::string ReprobuildConfigFullPath(std::string const& binaryDir,
                                      std::string const& fullPath,
                                      std::string const& config,
                                      bool multiConfig);
+std::string ReprobuildCustomCommandPath(std::string const& binaryDir,
+                                        std::string const& baseDir,
+                                        std::string const& path);
+std::string ReprobuildCustomCommandFullPath(std::string const& binaryDir,
+                                            std::string const& fullPath);
 
 std::string ReprobuildSwiftCompileModeName(cmSwiftCompileMode mode)
 {
@@ -1317,6 +1322,40 @@ std::string ReprobuildConfigFullPath(std::string const& binaryDir,
 {
   std::string rel = ReprobuildRelativeTo(binaryDir, fullPath);
   return ReprobuildConfigPath(rel, config, multiConfig);
+}
+
+// M27: Path resolver for ``add_custom_command`` OUTPUT/BYPRODUCTS/DEPENDS
+// and for ``add_library(... external.obj)`` source paths whose file is
+// produced by a user-controlled COMMAND argv (i.e. an attached custom
+// command). For these paths Reprobuild must NOT add a per-config
+// subdirectory prefix: the user-controlled COMMAND writes to the literal
+// path the user specified for OUTPUT, and any other Reprobuild emission
+// that references the same artifact (the link-line external-object input,
+// the clean-files list, the dep-graph input edge of a downstream custom
+// command) has to agree with that literal path. If the user wants
+// per-config outputs they must include ``$<CONFIG>`` (or another genex
+// that varies by config) in the OUTPUT path explicitly — exactly how the
+// stock Visual Studio, Xcode and Ninja Multi-Config generators behave.
+//
+// Before M27 we passed these paths through ``ReprobuildConfigPath``,
+// which unconditionally prepended ``<config>/`` to any path that did not
+// already start with the config name. That created a mismatch with the
+// COMMAND argv: e.g. zlib's MinGW resource-compile step emits
+// ``windres -o ${CMAKE_CURRENT_BINARY_DIR}/zlib1rc.obj`` (writing to
+// ``<binDir>/zlib1rc.obj``) but the OUTPUT declaration and the link-line
+// external-object input both resolved to ``<binDir>/Debug/zlib1rc.obj``,
+// breaking the multi-config link with "no such file or directory".
+std::string ReprobuildCustomCommandPath(std::string const& binaryDir,
+                                        std::string const& baseDir,
+                                        std::string const& path)
+{
+  return ReprobuildOutputPath(binaryDir, baseDir, path);
+}
+
+std::string ReprobuildCustomCommandFullPath(std::string const& binaryDir,
+                                            std::string const& fullPath)
+{
+  return ReprobuildRelativeTo(binaryDir, fullPath);
 }
 
 bool ReprobuildListSubsetWithAll(std::set<std::string> const& all,
@@ -2083,6 +2122,20 @@ void cmGlobalReprobuildGenerator::WriteProviderMetadata()
   std::map<std::string, std::set<std::string>> cleanFilesByConfig;
   std::set<std::string> usedLanguages;
   std::set<std::string> usedTools;
+  // M27: dedup custom-command output claims across configs. A custom
+  // command whose OUTPUT path is config-independent (the typical zlib
+  // ``add_custom_command(OUTPUT ${CMAKE_CURRENT_BINARY_DIR}/zlib1rc.obj)``
+  // case) is emitted twice under Reprobuild's multi-config configPairs
+  // loop — once for ``app:Debug`` and once for ``app:Release``. Both
+  // emissions declare the same Outputs entry, which makes the fragment
+  // validator reject the manifest with ``duplicate owned effect claim``.
+  // We mirror Ninja Multi-Config's ``SeenCustomCommand`` registry by
+  // tracking which OUTPUT paths have already been claimed; subsequent
+  // emissions remain in the graph as no-op sequencing actions but do
+  // NOT re-claim the artifact. Downstream consumers reach the artifact
+  // through their ``Inputs`` (the literal artifact path), which the
+  // engine resolves to whichever action actually claims the output.
+  std::set<std::string> emittedCustomOutputs;
   std::string const toolPortabilityMode =
     this->LocalGenerators.empty()
     ? std::string()
@@ -2285,44 +2338,35 @@ void cmGlobalReprobuildGenerator::WriteProviderMetadata()
             utilityDepfile = ReprobuildCustomDepfilePath(binaryDir, lg.get(),
                                                          ccg);
           }
+          // M27: custom-command OUTPUT/BYPRODUCTS/DEPENDS are NOT
+          // config-prefixed. The user-controlled COMMAND argv writes to
+          // the path the user specified for OUTPUT; any other reference to
+          // the same artifact must agree with that literal path. Outputs
+          // are also deduplicated across configs so the fragment
+          // validator does not reject the manifest when a single utility
+          // command is fanned out over multiple configurations.
           for (std::string const& output : ccg.GetOutputs()) {
-            utilityOutputs.push_back(ReprobuildConfigPath(
-              ReprobuildOutputPath(binaryDir, lg->GetCurrentBinaryDirectory(),
-                                   output),
-              config, multiConfig));
-            ReprobuildAppendCleanFile(cleanFiles,
-                                      binaryDir,
-                                      ReprobuildConfigPath(
-                                        ReprobuildOutputPath(
-                                          binaryDir,
-                                          lg->GetCurrentBinaryDirectory(),
-                                          output),
-                                        config, multiConfig));
+            std::string const outRel = ReprobuildCustomCommandPath(
+              binaryDir, lg->GetCurrentBinaryDirectory(), output);
+            if (emittedCustomOutputs.insert(outRel).second) {
+              utilityOutputs.push_back(outRel);
+            }
+            ReprobuildAppendCleanFile(cleanFiles, binaryDir, outRel);
           }
           for (std::string const& byproduct : ccg.GetByproducts()) {
-            utilityOutputs.push_back(ReprobuildConfigPath(
-              ReprobuildOutputPath(binaryDir, lg->GetCurrentBinaryDirectory(),
-                                   byproduct),
-              config, multiConfig));
-            ReprobuildAppendCleanFile(cleanFiles,
-                                      binaryDir,
-                                      ReprobuildConfigPath(
-                                        ReprobuildOutputPath(
-                                          binaryDir,
-                                          lg->GetCurrentBinaryDirectory(),
-                                          byproduct),
-                                        config, multiConfig));
+            std::string const byRel = ReprobuildCustomCommandPath(
+              binaryDir, lg->GetCurrentBinaryDirectory(), byproduct);
+            if (emittedCustomOutputs.insert(byRel).second) {
+              utilityOutputs.push_back(byRel);
+            }
+            ReprobuildAppendCleanFile(cleanFiles, binaryDir, byRel);
           }
         for (std::string const& dep : ccg.GetDepends()) {
           std::string realDep;
           if (lg->GetRealDependency(dep, ccg.GetOutputConfig(), realDep,
                                     cc.GetCMP0212Status())) {
-              utilityInputs.push_back(ReprobuildConfigPath(
-                ReprobuildOutputPath(binaryDir, lg->GetCurrentBinaryDirectory(),
-                                     realDep),
-                configPair.IsCrossConfig ? commandConfig
-                                         : ccg.GetOutputConfig(),
-                multiConfig));
+              utilityInputs.push_back(ReprobuildCustomCommandPath(
+                binaryDir, lg->GetCurrentBinaryDirectory(), realDep));
           }
         }
           if (cc.GetUsesTerminal()) {
@@ -2497,13 +2541,14 @@ void cmGlobalReprobuildGenerator::WriteProviderMetadata()
         }
 
         ReprobuildAction custom;
+        // M27: custom-command OUTPUT/BYPRODUCTS/DEPENDS are NOT
+        // config-prefixed (see ReprobuildCustomCommandPath rationale).
         std::string const primaryOutput =
           ccg.GetOutputs().empty()
           ? cmStrCat("custom-", gt->GetName(), "-", customIndex)
-          : ReprobuildConfigPath(
-              ReprobuildOutputPath(binaryDir, lg->GetCurrentBinaryDirectory(),
-                                   ccg.GetOutputs().front()),
-              config, multiConfig);
+          : ReprobuildCustomCommandPath(
+              binaryDir, lg->GetCurrentBinaryDirectory(),
+              ccg.GetOutputs().front());
         custom.Id =
           ReprobuildSafeId(cmStrCat("custom-command-", gt->GetName(), "-",
                                     primaryOutput, configSuffix));
@@ -2513,47 +2558,42 @@ void cmGlobalReprobuildGenerator::WriteProviderMetadata()
           ReprobuildSafeId(cmStrCat("reprobuild-cmake-", custom.Var));
         custom.Pool = cc->GetUsesTerminal() ? "console" : cc->GetJobPool();
         custom.Cacheable = declareOutputs;
+        // M27: dedup OUTPUT/BYPRODUCT claims across configs. The same
+        // unprefixed binary-tree path may be reached twice (once per
+        // ``configPair``) — the second emission must NOT re-claim the
+        // artifact. We still keep the action wired for sequencing so any
+        // Deps that reference the per-config custom-command Id continue
+        // to resolve.
         for (std::string const& output : ccg.GetOutputs()) {
-          if (declareOutputs) {
-            custom.Outputs.push_back(ReprobuildConfigPath(
-              ReprobuildOutputPath(binaryDir, lg->GetCurrentBinaryDirectory(),
-                                   output),
-              config, multiConfig));
+          std::string const outRel = ReprobuildCustomCommandPath(
+            binaryDir, lg->GetCurrentBinaryDirectory(), output);
+          if (declareOutputs && emittedCustomOutputs.insert(outRel).second) {
+            custom.Outputs.push_back(outRel);
           }
-          ReprobuildAppendCleanFile(cleanFiles,
-                                    binaryDir,
-                                    ReprobuildConfigPath(
-                                      ReprobuildOutputPath(
-                                        binaryDir,
-                                        lg->GetCurrentBinaryDirectory(),
-                                        output),
-                                      config, multiConfig));
+          ReprobuildAppendCleanFile(cleanFiles, binaryDir, outRel);
         }
         for (std::string const& byproduct : ccg.GetByproducts()) {
-          if (declareOutputs) {
-            custom.Outputs.push_back(ReprobuildConfigPath(
-              ReprobuildOutputPath(binaryDir, lg->GetCurrentBinaryDirectory(),
-                                   byproduct),
-              config, multiConfig));
+          std::string const byRel = ReprobuildCustomCommandPath(
+            binaryDir, lg->GetCurrentBinaryDirectory(), byproduct);
+          if (declareOutputs && emittedCustomOutputs.insert(byRel).second) {
+            custom.Outputs.push_back(byRel);
           }
-          ReprobuildAppendCleanFile(cleanFiles,
-                                    binaryDir,
-                                    ReprobuildConfigPath(
-                                      ReprobuildOutputPath(
-                                        binaryDir,
-                                        lg->GetCurrentBinaryDirectory(),
-                                        byproduct),
-                                      config, multiConfig));
+          ReprobuildAppendCleanFile(cleanFiles, binaryDir, byRel);
+        }
+        // If every Output was deduplicated away the action no longer
+        // produces any artifact and must not be advertised as cacheable
+        // either — the fragment validator would otherwise reject an
+        // action whose claims are missing but whose declared depfile
+        // expects to be populated by a fresh run.
+        if (custom.Outputs.empty()) {
+          custom.Cacheable = false;
         }
         for (std::string const& dep : ccg.GetDepends()) {
           std::string realDep;
           if (lg->GetRealDependency(dep, ccg.GetOutputConfig(), realDep,
                                     cc->GetCMP0212Status())) {
-            custom.Inputs.push_back(ReprobuildConfigPath(
-              ReprobuildOutputPath(binaryDir, lg->GetCurrentBinaryDirectory(),
-                                   realDep),
-              configPair.IsCrossConfig ? commandConfig : ccg.GetOutputConfig(),
-              multiConfig));
+            custom.Inputs.push_back(ReprobuildCustomCommandPath(
+              binaryDir, lg->GetCurrentBinaryDirectory(), realDep));
           }
         }
         for (auto const& utility : ccg.GetUtilities()) {
@@ -2970,9 +3010,29 @@ void cmGlobalReprobuildGenerator::WriteProviderMetadata()
         std::string sourcePath = source->GetFullPath();
         std::string sourceArg = sourcePath;
         std::string const binaryPrefix = cmStrCat(binaryDir, "/");
+        // M27: when a binary-tree source file is produced by an attached
+        // ``add_custom_command`` whose OUTPUT path is config-independent,
+        // the COMMAND argv writes to the literal user-specified path.
+        // The compile input must agree — otherwise gcc opens a path that
+        // does not exist (the ``<binDir>/<config>/<file>`` rewrite below
+        // is what the broken path looked like before the fix). We use
+        // the same ``emittedCustomOutputs`` set the custom-command
+        // emission populates for dedup: anything claimed there is the
+        // canonical unprefixed location the COMMAND writes to.
+        bool sourceLivesAtUnprefixedPath = false;
         if (multiConfig && sourcePath.rfind(binaryPrefix, 0) == 0) {
+          std::string const sourceRel =
+            ReprobuildRelativeTo(binaryDir, sourcePath);
+          if (emittedCustomOutputs.count(sourceRel) > 0) {
+            sourceLivesAtUnprefixedPath = true;
+            sourcePath = sourceRel;
+          }
+        }
+        if (multiConfig && !sourceLivesAtUnprefixedPath &&
+            source->GetFullPath().rfind(binaryPrefix, 0) == 0) {
           sourcePath =
-            ReprobuildConfigFullPath(binaryDir, sourcePath, config, true);
+            ReprobuildConfigFullPath(binaryDir, source->GetFullPath(),
+                                     config, true);
           sourceArg = cmStrCat(binaryDir, "/", sourcePath);
         }
         // TryCompile test sources live under each project's per-invocation
@@ -3899,6 +3959,24 @@ void cmGlobalReprobuildGenerator::WriteProviderMetadata()
         }
       };
 
+      // M27: external objects whose underlying source file is produced by
+      // an attached ``add_custom_command`` must use the literal path the
+      // command writes to (no per-config subdir). Reprobuild does NOT
+      // rewrite the COMMAND argv, so the on-disk path is exactly what the
+      // user spelled in OUTPUT. Other external objects (raw .obj source
+      // files added as ``add_library`` inputs that Reprobuild does NOT
+      // build itself) likewise live at the literal path the user provided
+      // — there is no Reprobuild-controlled per-config artifact for them.
+      // Either way the right link-line input is the unprefixed path. We
+      // continue to call ``ReprobuildConfigFullPath`` for object-library
+      // outputs above (handled via ``appendLinkedTarget`` — those DO live
+      // under ``<config>/`` because Reprobuild itself writes them).
+      auto appendExternalObjectLinkInput =
+        [&](cmSourceFile const* sf) {
+          ReprobuildAppendUnique(
+            linkObjects,
+            ReprobuildCustomCommandFullPath(binaryDir, sf->GetFullPath()));
+        };
       std::vector<cmSourceFile const*> externalObjects;
       gt->GetExternalObjects(externalObjects, config);
       for (cmSourceFile const* externalObject : externalObjects) {
@@ -3906,10 +3984,7 @@ void cmGlobalReprobuildGenerator::WriteProviderMetadata()
         if (!objLib.empty()) {
           appendLinkedTarget(lg->FindGeneratorTargetToUse(objLib), true);
         } else {
-          ReprobuildAppendUnique(
-            linkObjects,
-            ReprobuildConfigFullPath(binaryDir, externalObject->GetFullPath(),
-                                     config, multiConfig));
+          appendExternalObjectLinkInput(externalObject);
         }
       }
       if (cmComputeLinkInformation* cli = gt->GetLinkInformation(config)) {
@@ -3921,11 +3996,7 @@ void cmGlobalReprobuildGenerator::WriteProviderMetadata()
             if (!objLib.empty()) {
               appendLinkedTarget(lg->FindGeneratorTargetToUse(objLib), true);
             } else {
-              ReprobuildAppendUnique(
-                linkObjects,
-                ReprobuildConfigFullPath(binaryDir,
-                                         item.ObjectSource->GetFullPath(),
-                                         config, multiConfig));
+              appendExternalObjectLinkInput(item.ObjectSource);
             }
           }
         }
@@ -4312,30 +4383,26 @@ void cmGlobalReprobuildGenerator::WriteProviderMetadata()
         ReprobuildAppendCleanFile(cleanFiles,
                                   lg->GetCurrentBinaryDirectory(), cleanFile);
       }
+      // M27: clean files generated from custom-command OUTPUT/BYPRODUCTS
+      // use the literal user-specified path (no config prefix) — must
+      // agree with the corresponding ``custom.Outputs`` declarations and
+      // with where the COMMAND argv actually writes the artifact.
       std::vector<cmSourceFile const*> customCommands;
       gt->GetCustomCommands(customCommands, config);
       for (cmSourceFile const* sf : customCommands) {
         cmCustomCommandGenerator ccg(*sf->GetCustomCommand(), commandConfig,
                                      lg.get(), false, config);
         for (std::string const& customOutput : ccg.GetOutputs()) {
-          ReprobuildAppendCleanFile(cleanFiles,
-                                    binaryDir,
-                                    ReprobuildConfigPath(
-                                      ReprobuildOutputPath(
-                                        binaryDir,
-                                        lg->GetCurrentBinaryDirectory(),
-                                        customOutput),
-                                      config, multiConfig));
+          ReprobuildAppendCleanFile(
+            cleanFiles, binaryDir,
+            ReprobuildCustomCommandPath(
+              binaryDir, lg->GetCurrentBinaryDirectory(), customOutput));
         }
         for (std::string const& byproduct : ccg.GetByproducts()) {
-          ReprobuildAppendCleanFile(cleanFiles,
-                                    binaryDir,
-                                    ReprobuildConfigPath(
-                                      ReprobuildOutputPath(
-                                        binaryDir,
-                                        lg->GetCurrentBinaryDirectory(),
-                                        byproduct),
-                                      config, multiConfig));
+          ReprobuildAppendCleanFile(
+            cleanFiles, binaryDir,
+            ReprobuildCustomCommandPath(
+              binaryDir, lg->GetCurrentBinaryDirectory(), byproduct));
         }
       }
       std::vector<cmCustomCommand> buildEventCommands =
@@ -4346,14 +4413,10 @@ void cmGlobalReprobuildGenerator::WriteProviderMetadata()
         cmCustomCommandGenerator ccg(cc, commandConfig, lg.get(), false,
                                      config);
         for (std::string const& byproduct : ccg.GetByproducts()) {
-          ReprobuildAppendCleanFile(cleanFiles,
-                                    binaryDir,
-                                    ReprobuildConfigPath(
-                                      ReprobuildOutputPath(
-                                        binaryDir,
-                                        lg->GetCurrentBinaryDirectory(),
-                                        byproduct),
-                                      config, multiConfig));
+          ReprobuildAppendCleanFile(
+            cleanFiles, binaryDir,
+            ReprobuildCustomCommandPath(
+              binaryDir, lg->GetCurrentBinaryDirectory(), byproduct));
         }
       }
       buildTargets.push_back(std::move(target));

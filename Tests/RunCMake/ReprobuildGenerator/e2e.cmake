@@ -896,6 +896,45 @@ function(write_multi_config_project source_dir project_name)
     "int main(void) { puts(SIDE_CONFIG); return 0; }\n")
 endfunction()
 
+function(write_multi_config_unprefixed_custom_command_project source_dir project_name)
+  # M27 regression fixture. Mirrors zlib's MinGW resource-compile pattern:
+  # an ``add_custom_command(OUTPUT <binDir>/<file>)`` with NO ``$<CONFIG>``
+  # in the path. Both Debug and Release builds must succeed even though
+  # the custom command writes to the same unprefixed binary-dir path for
+  # both configurations — exactly how Ninja Multi-Config, Visual Studio
+  # and Xcode behave when the user does not opt into per-config outputs.
+  # Before M27 the Reprobuild generator unconditionally rewrote OUTPUT to
+  # ``<config>/<file>``, but the COMMAND argv still wrote to the literal
+  # unprefixed path, so the link step looked for ``Debug/<file>`` and
+  # failed with "no such file or directory".
+  file(REMOVE_RECURSE "${source_dir}")
+  file(MAKE_DIRECTORY "${source_dir}")
+  # The COMMAND uses ``cmake -P write_gen.cmake`` instead of ``cmake -E
+  # echo > file`` because the Reprobuild engine's inline-exec path does
+  # NOT interpret shell redirection — ``>`` and the filename would just
+  # be appended to echo's positional args. ``cmake -P`` keeps the COMMAND
+  # a single self-contained call that produces the file at ``OUT``.
+  file(WRITE "${source_dir}/write_gen.cmake"
+    "file(WRITE \"\${OUT}\" \"int generated_value(void) { return 42; }\\n\")\n")
+  file(WRITE "${source_dir}/CMakeLists.txt"
+    "cmake_minimum_required(VERSION 3.20)\n"
+    "project(${project_name} C)\n"
+    "set(gen_c \"\${CMAKE_CURRENT_BINARY_DIR}/generated.c\")\n"
+    "add_custom_command(OUTPUT \"\${gen_c}\"\n"
+    "  COMMAND \"\${CMAKE_COMMAND}\" -DOUT=\${gen_c} -P \"${source_dir}/write_gen.cmake\"\n"
+    "  VERBATIM)\n"
+    "set_source_files_properties(\"\${gen_c}\" PROPERTIES GENERATED 1)\n"
+    "add_executable(app main.c \"\${gen_c}\")\n"
+    "target_compile_definitions(app PRIVATE $<$<CONFIG:Debug>:APP_CONFIG=\\\"debug\\\"> $<$<CONFIG:Release>:APP_CONFIG=\\\"release\\\">)\n")
+  file(WRITE "${source_dir}/main.c"
+    "#include <stdio.h>\n"
+    "#ifndef APP_CONFIG\n"
+    "#  define APP_CONFIG \"missing\"\n"
+    "#endif\n"
+    "int generated_value(void);\n"
+    "int main(void) { puts(APP_CONFIG); return generated_value() == 42 ? 0 : 1; }\n")
+endfunction()
+
 function(write_cross_config_generated_source_project source_dir project_name)
   file(REMOVE_RECURSE "${source_dir}")
   file(MAKE_DIRECTORY "${source_dir}")
@@ -2650,6 +2689,71 @@ elseif(TEST_MODE STREQUAL "multi_config_target_selection")
   assert_not_contains("${order_output}" "link-app-Debug status=asSucceeded launched=true" "default-order build output")
   assert_file_exists("${order_binary_dir}/Release/app" "implicit Release app")
   assert_file_not_exists("${order_binary_dir}/Debug/app" "implicit default should not build Debug app")
+elseif(TEST_MODE STREQUAL "multi_config_unprefixed_custom_command")
+  # M27 regression gate. ``add_custom_command(OUTPUT <binDir>/generated.c)``
+  # without ``$<CONFIG>`` must build under both Debug and Release. The
+  # provider must declare the custom-command OUTPUT and the link-line
+  # external-object input at the literal (unprefixed) path the COMMAND
+  # writes to. Before M27 the OUTPUT and link-line both got an erroneous
+  # ``Debug/``/``Release/`` prefix while the COMMAND argv wrote to the
+  # unprefixed path, so the link step looked for a file that did not
+  # exist and the build failed.
+  set(unprefixed_source_dir "${TEST_BINARY_ROOT}/unprefixed-src")
+  set(unprefixed_binary_dir "${TEST_BINARY_ROOT}/unprefixed-build")
+  write_multi_config_unprefixed_custom_command_project(
+    "${unprefixed_source_dir}" ReprobuildUnprefixedCustomCommand)
+  run_configure("${unprefixed_source_dir}" "${unprefixed_binary_dir}" TRUE ""
+    "-DCMAKE_CONFIGURATION_TYPES=Debug\\;Release"
+    "-DCMAKE_DEFAULT_BUILD_TYPE=Debug"
+    "-DCMAKE_DEFAULT_CONFIGS=Debug")
+
+  # Generated reprobuild.nim must reference the custom-command output at
+  # the literal unprefixed path. The graph emits a ``custom-command-app-…``
+  # action whose Outputs entry should be ``generated.c`` (no ``Debug/``
+  # or ``Release/`` prefix). This is the load-bearing assertion: a
+  # passing build alone could hide a regression if the engine masked the
+  # path mismatch by falling back to the unprefixed file silently.
+  file(READ "${unprefixed_binary_dir}/reprobuild.nim" unprefixed_provider)
+  assert_contains("${unprefixed_provider}"
+    "custom-command-app-generated.c"
+    "M27 unprefixed custom-command action id")
+  if(unprefixed_provider MATCHES "custom-command-app-Debug_generated.c")
+    message(FATAL_ERROR
+      "M27 regression: provider still config-prefixes the unprefixed "
+      "custom-command output. Expected the OUTPUT to land at "
+      "``generated.c`` (matching where the COMMAND argv writes), not "
+      "``Debug/generated.c``.")
+  endif()
+  if(unprefixed_provider MATCHES "custom-command-app-Release_generated.c")
+    message(FATAL_ERROR
+      "M27 regression: provider still config-prefixes the unprefixed "
+      "custom-command output for the Release variant.")
+  endif()
+
+  start_runquota("${TEST_BINARY_ROOT}" runquota_socket runquota_pid)
+  run_build_config("${unprefixed_binary_dir}" "Debug" "app"
+    "${runquota_socket}" unprefixed_debug_output)
+  run_build_config("${unprefixed_binary_dir}" "Release" "app"
+    "${runquota_socket}" unprefixed_release_output)
+  stop_runquota("${runquota_pid}")
+  foreach(expected IN ITEMS
+      "selectedTarget: app:Debug"
+      "action: app:Debug status=asSucceeded launched=true")
+    assert_contains("${unprefixed_debug_output}" "${expected}"
+      "M27 Debug build output")
+  endforeach()
+  foreach(expected IN ITEMS
+      "selectedTarget: app:Release"
+      "action: app:Release status=asSucceeded launched=true")
+    assert_contains("${unprefixed_release_output}" "${expected}"
+      "M27 Release build output")
+  endforeach()
+  assert_file_exists("${unprefixed_binary_dir}/generated.c"
+    "M27 unprefixed custom command writes to literal binary-dir path")
+  assert_file_exists("${unprefixed_binary_dir}/Debug/app"
+    "M27 Debug app link succeeded against unprefixed custom-command output")
+  assert_file_exists("${unprefixed_binary_dir}/Release/app"
+    "M27 Release app link succeeded against unprefixed custom-command output")
 elseif(TEST_MODE STREQUAL "cross_config_generated_source")
   set(cross_source_dir "${TEST_BINARY_ROOT}/cross-src")
   set(cross_binary_dir "${TEST_BINARY_ROOT}/cross-build")

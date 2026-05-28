@@ -530,6 +530,21 @@ add_test(NAME e2e_cmake_reprobuild_cross_config_generated_source
     -DTEST_REPROBUILD_REPRO=${_ReprobuildBin}
     -DTEST_RUNQUOTAD=${_RunQuotaDaemonBin}
     -P ${_ReprobuildGeneratorTestDir}/e2e.cmake)
+# M27: ``add_custom_command(OUTPUT <binDir>/<file>)`` without ``$<CONFIG>``
+# must build cleanly under multi-config. The OUTPUT declaration and the
+# link-line external-object input both have to agree with the literal
+# unprefixed path the user-controlled COMMAND argv writes to.
+add_test(NAME e2e_cmake_reprobuild_multi_config_unprefixed_custom_command
+  COMMAND ${CMAKE_CMAKE_COMMAND}
+    -DCMAKE_COMMAND=${CMAKE_CMAKE_COMMAND}
+    -DTEST_MODE=multi_config_unprefixed_custom_command
+    -DTEST_BINARY_ROOT=${_ReprobuildGeneratorTestBin}/multi-config-unprefixed-custom-command
+    -DTEST_C_COMPILER=${CMAKE_C_COMPILER}
+    -DTEST_REPROBUILD_SOURCE_ROOT=${_ReprobuildSourceRoot}
+    -DTEST_REPROBUILD_REPO=${_ReprobuildSourceRoot}
+    -DTEST_REPROBUILD_REPRO=${_ReprobuildBin}
+    -DTEST_RUNQUOTAD=${_RunQuotaDaemonBin}
+    -P ${_ReprobuildGeneratorTestDir}/e2e.cmake)
 add_test(NAME e2e_cmake_reprobuild_language_profile_matrix
   COMMAND ${CMAKE_CMAKE_COMMAND}
     -DCMAKE_COMMAND=${CMAKE_CMAKE_COMMAND}
