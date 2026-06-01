@@ -3281,6 +3281,13 @@ int cmake::Generate()
   // variables created during Generate are saved. (Specifically target GUIDs
   // for the Visual Studio and Xcode generators.)
   this->SaveCache(this->GetHomeOutputDirectory());
+#if !defined(CMAKE_BOOTSTRAP)
+  // The Reprobuild generator and its implementation file are only
+  // wired into the post-bootstrap cmake build (the bootstrap source
+  // list and the generator-registration block at NewFactory()
+  // already gate them out). Without this guard the bootstrap link
+  // pulls in a vtable + PrimeProviderMetadata symbol that does not
+  // exist in the bootstrap object set.
   if (auto* reprobuildGenerator =
         dynamic_cast<cmGlobalReprobuildGenerator*>(
           this->GlobalGenerator.get())) {
@@ -3289,6 +3296,7 @@ int cmake::Generate()
       return -1;
     }
   }
+#endif
 
 #if !defined(CMAKE_BOOTSTRAP)
   this->GlobalGenerator->WriteInstallJson();

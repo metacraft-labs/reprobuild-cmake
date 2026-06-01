@@ -687,6 +687,14 @@ int do_build(int ac, char const* const* av)
 #endif
 }
 
+#ifndef CMAKE_BOOTSTRAP
+// The bootstrap cmake build doesn't expose
+// cmSystemTools::GetEnvironmentVariables (it's gated by
+// `#ifndef CMAKE_BOOTSTRAP` in cmSystemTools.h), so this entry point —
+// which spawns child processes with a mutated environment vector —
+// only compiles against the post-bootstrap cmake. The `--reprobuild-
+// launch` subcommand is dispatched from main() inside a matching
+// `#ifndef CMAKE_BOOTSTRAP` guard.
 int do_reprobuild_launch(int ac, char const* const* av)
 {
   if (ac < 3) {
@@ -866,6 +874,7 @@ int do_reprobuild_launch(int ac, char const* const* av)
   }
   return 0;
 }
+#endif
 
 bool parse_default_directory_permissions(std::string const& permissions,
                                          std::string& parsedPermissionsVar)
@@ -1311,9 +1320,11 @@ int main(int ac, char const* const* av)
     if (strcmp(av[1], "--build") == 0) {
       return do_build(ac, av);
     }
+#ifndef CMAKE_BOOTSTRAP
     if (strcmp(av[1], "--reprobuild-launch") == 0) {
       return do_reprobuild_launch(ac, av);
     }
+#endif
     if (strcmp(av[1], "--install") == 0) {
       return do_install(ac, av);
     }
