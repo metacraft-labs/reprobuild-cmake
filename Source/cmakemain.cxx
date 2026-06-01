@@ -848,7 +848,8 @@ int do_reprobuild_launch(int ac, char const* const* av)
   for (std::string const& target : selectedTargets) {
     std::vector<std::string> command = {
       repro, "build", "--tool-provisioning=path",
-      cmStrCat("--work-root=", providerDir)
+      cmStrCat("--work-root=", providerDir),
+      "--log=actions"
     };
     if (!target.empty()) {
       command.insert(command.begin() + 2, cmStrCat(buildDir, "#", target));

@@ -5597,6 +5597,8 @@ cmGlobalReprobuildGenerator::GenerateBuildCommand(
       makeCommand.Add("--progress=none");
       makeCommand.Add("--report=none");
       makeCommand.Add("--log=quiet");
+    } else {
+      makeCommand.Add("--log=actions");
     }
     commands.emplace_back(std::move(makeCommand));
   }
