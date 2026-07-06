@@ -66,7 +66,10 @@
 #  include <CoreFoundation/CFString.h>
 #  include <CoreFoundation/CFURL.h>
 #  include <CoreFoundation/CFUUID.h>
-#  if !TARGET_OS_IPHONE
+#  ifndef __has_extension
+#    define __has_extension(x) 0
+#  endif
+#  if !TARGET_OS_IPHONE && __has_extension(blocks)
 #    define HAVE_APPLICATION_SERVICES
 #    include <ApplicationServices/ApplicationServices.h>
 #  endif

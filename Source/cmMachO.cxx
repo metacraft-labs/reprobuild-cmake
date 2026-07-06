@@ -15,7 +15,7 @@
 #include <mach-o/arch.h>
 #include <mach-o/fat.h>
 #include <mach-o/loader.h>
-#if __MAC_OS_X_VERSION_MIN_REQUIRED >= 130000
+#if defined(__clang__) && __MAC_OS_X_VERSION_MIN_REQUIRED >= 130000
 #  include <mach-o/utils.h>
 #endif
 
@@ -373,7 +373,7 @@ cmMachO::StringList cmMachO::GetArchitectures() const
   if (Valid() && !this->Headers.empty()) {
     for (auto const& header : this->Headers) {
       char const* archName = "unknown";
-#if __MAC_OS_X_VERSION_MIN_REQUIRED >= 130000
+#if defined(__clang__) && __MAC_OS_X_VERSION_MIN_REQUIRED >= 130000
       if (__builtin_available(macOS 13.0, *)) {
         archName = (header.CpuType & CPU_TYPE_ARM)
           ? macho_arch_name_for_cpu_type(header.CpuType, header.CpuSubType)
