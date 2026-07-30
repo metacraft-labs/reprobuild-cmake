@@ -1935,7 +1935,8 @@ void cmGlobalReprobuildGenerator::PrimeProviderMetadata()
     "--prepare-only",
     "--skip-cmake-regeneration",
     "--progress=none",
-    "--report=none",
+    "--measure=none",
+    "--no-write-report",
     "--log=quiet",
   };
 
@@ -5595,7 +5596,8 @@ cmGlobalReprobuildGenerator::GenerateBuildCommand(
                              "/CMakeFiles/reprobuild"));
     if (isInTryCompile == BuildTryCompile::Yes) {
       makeCommand.Add("--progress=none");
-      makeCommand.Add("--report=none");
+      makeCommand.Add("--measure=none");
+      makeCommand.Add("--no-write-report");
       makeCommand.Add("--log=quiet");
     } else {
       makeCommand.Add("--log=actions");

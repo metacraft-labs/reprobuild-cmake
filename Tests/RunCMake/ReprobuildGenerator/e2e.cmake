@@ -355,7 +355,8 @@ function(prepare_reprobuild_provider binary_dir target)
       --prepare-only
       --skip-cmake-regeneration
       --progress=none
-      --report=none
+      --measure=none
+      --no-write-report
       --log=quiet)
   execute_process(
     COMMAND ${command}
