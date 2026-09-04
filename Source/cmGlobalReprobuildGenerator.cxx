@@ -3379,9 +3379,31 @@ void cmGlobalReprobuildGenerator::WriteProviderMetadata()
           cm::append(action.Outputs, languageByproducts);
         } else {
           action.Cacheable = false;
-          for (ReprobuildAction const& custom : target.CustomActions) {
-            ReprobuildAppendUnique(action.Deps, custom.Id);
-          }
+        }
+        // ORDER AGAINST THIS TARGET'S CUSTOM COMMANDS, ALWAYS -- this used to
+        // live in the `else` above, so it applied only when the action did
+        // NOT declare its outputs (`declareOutputs` is `!IsCrossConfig`, i.e.
+        // false only in the cross-config case). In the ordinary
+        // single-config build, which is nearly every build, a compile action
+        // was emitted with no ordering edge to the commands generating its
+        // own sources.
+        //
+        // WHY THAT IS NOT CAUGHT BY THE DEPFILE. A source that includes a
+        // GENERATED header has no recorded dependency on it until a depfile
+        // exists, and no depfile exists until the source has compiled once.
+        // So on a clean build nothing orders the compile after the generator:
+        // `-j1` passes because the generator happens to be scheduled first,
+        // and `-j8` races and fails with the generated header "not found".
+        // Green on a developer's machine, intermittently red in CI.
+        //
+        // Ninja does not have this problem because CMake emits an explicit
+        // order-only (`||`) edge from every object in a target to that
+        // target's custom commands. This is that edge. It is unconditional
+        // because the ordering requirement does not depend on whether the
+        // action declares outputs or is cacheable -- only on the fact that
+        // something in this target may generate a source this compile reads.
+        for (ReprobuildAction const& custom : target.CustomActions) {
+          ReprobuildAppendUnique(action.Deps, custom.Id);
         }
         if (declareOutputs && lang != "Fortran") {
           action.Depfile = depRel;
