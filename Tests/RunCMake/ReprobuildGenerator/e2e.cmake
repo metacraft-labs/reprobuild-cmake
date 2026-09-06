@@ -875,6 +875,48 @@ function(write_generated_source_project source_dir project_name)
     "int main(void) { return generated_value() == 42 ? 0 : 1; }\n")
 endfunction()
 
+# A target whose custom command writes BOTH a generated source and a
+# generated header, plus:
+#   * ``main.c``  -- #includes the generated header, so its dependency on
+#                    the generator is discoverable only from the depfile,
+#                    which does not exist on a clean build;
+#   * ``plain.c`` -- includes nothing generated, so it is the canary for
+#                    over-invalidation: it must stay a cache hit when the
+#                    generated files change.
+function(write_generated_header_project source_dir project_name)
+  file(REMOVE_RECURSE "${source_dir}")
+  file(MAKE_DIRECTORY "${source_dir}")
+  file(WRITE "${source_dir}/generate.cmake"
+    "file(READ \"\${INPUT}\" value)\n"
+    "string(STRIP \"\${value}\" value)\n"
+    "file(WRITE \"\${OUT_H}\"\n"
+    "  \"#pragma once\\n\"\n"
+    "  \"#define GENERATED_VALUE \${value}\\n\"\n"
+    "  \"int generated_value(void);\\n\")\n"
+    "file(WRITE \"\${OUT_C}\"\n"
+    "  \"#include \\\"generated.h\\\"\\n\"\n"
+    "  \"int generated_value(void) { return GENERATED_VALUE; }\\n\")\n")
+  file(WRITE "${source_dir}/CMakeLists.txt"
+    "cmake_minimum_required(VERSION 3.20)\n"
+    "project(${project_name} C)\n"
+    "set(generated_c \"\${CMAKE_CURRENT_BINARY_DIR}/generated.c\")\n"
+    "set(generated_h \"\${CMAKE_CURRENT_BINARY_DIR}/generated.h\")\n"
+    "add_custom_command(OUTPUT \"\${generated_c}\" \"\${generated_h}\"\n"
+    "  COMMAND \"\${CMAKE_COMMAND}\" -DINPUT=${source_dir}/number.txt -DOUT_C=\${generated_c} -DOUT_H=\${generated_h} -P \"${source_dir}/generate.cmake\"\n"
+    "  DEPENDS \"${source_dir}/number.txt\" \"${source_dir}/generate.cmake\"\n"
+    "  VERBATIM)\n"
+    "add_executable(genorder main.c plain.c \"\${generated_c}\")\n"
+    "target_include_directories(genorder PRIVATE \"\${CMAKE_CURRENT_BINARY_DIR}\")\n")
+  file(WRITE "${source_dir}/number.txt" "42\n")
+  file(WRITE "${source_dir}/main.c"
+    "#include \"generated.h\"\n"
+    "int plain_value(void);\n"
+    "int main(void) { return generated_value() == GENERATED_VALUE &&\n"
+    "                        plain_value() == 7 ? 0 : 1; }\n")
+  file(WRITE "${source_dir}/plain.c"
+    "int plain_value(void) { return 7; }\n")
+endfunction()
+
 function(write_multi_config_project source_dir project_name)
   file(REMOVE_RECURSE "${source_dir}")
   file(MAKE_DIRECTORY "${source_dir}")
@@ -2582,6 +2624,94 @@ elseif(TEST_MODE STREQUAL "generated_source_custom_command")
   file(READ "${gen_report_path}" gen_report)
   assert_contains("${gen_report}" "\"id\": \"custom-command-genapp" "generated source report")
   assert_contains("${gen_report}" "\"id\": \"compile-genapp" "generated source report")
+elseif(TEST_MODE STREQUAL "generated_header_order_only")
+  # Regression gate for the generated-header scheduling race.
+  #
+  # ``main.c`` #includes a header written by an add_custom_command. That
+  # dependency is discoverable only from the compiler depfile, which does
+  # not exist on a clean build, so without an explicit ordering edge the
+  # object races the generator. Note that ``cmake --build --parallel N``
+  # is deliberately not forwarded by this generator (GenerateBuildCommand
+  # discards ``jobs``); the engine schedules at its own default frontier,
+  # so a build here is always a concurrent build.
+  #
+  # The gate has two halves. The structural half is deterministic and
+  # cannot pass by luck. The behavioural half runs ORDER_ONLY_BUILDS
+  # independent clean builds; measured on the unfixed generator, 23 of 25
+  # clean builds of an equivalent project failed with "'generated.h' file
+  # not found", so even at the lower bound of the 95% CI for that rate
+  # (~0.75) the chance of eight consecutive accidental passes is ~1e-5.
+  set(ORDER_ONLY_BUILDS 8)
+  set(order_source_dir "${TEST_BINARY_ROOT}/order-src")
+  write_generated_header_project("${order_source_dir}" ReprobuildGeneratedHeaderOrder)
+  run_configure("${order_source_dir}" "${TEST_BINARY_ROOT}/order-build-1" TRUE "")
+  file(READ "${TEST_BINARY_ROOT}/order-build-1/reprobuild.nim" order_provider)
+
+  # Structural half: every object in the target -- both the one that
+  # includes the generated header and the one that does not -- carries an
+  # ordering edge to the custom command, and neither declares a generated
+  # file as a content input.
+  foreach(object IN ITEMS main plain)
+    string(REGEX MATCH
+      "buildAction\\(\"compile-genorder-CMakeFiles_genorder.dir_${object}.c.o\"[^\n]*"
+      order_action "${order_provider}")
+    if("${order_action}" STREQUAL "")
+      message(FATAL_ERROR
+        "generated header order-only: no compile action for ${object}.c\n${order_provider}")
+    endif()
+    # The ordering edge. ``deps`` is the only place this action can name
+    # another action id, so finding it on the line means the edge exists.
+    assert_contains("${order_action}"
+      "\"custom-command-genorder-generated.c\""
+      "generated header order-only edge for ${object}.c")
+    # ... and it must be an *ordering* edge, not a content input. The
+    # declared inputs must still be exactly the object's own source, so
+    # that changing a generated file the object does not read cannot
+    # invalidate it. This is what rules out the trivially-satisfying
+    # "declare every generated file as an input" implementation.
+    assert_contains("${order_action}"
+      "inputs = @[\"${order_source_dir}/${object}.c\"], outputs"
+      "generated files must not become content inputs of ${object}.c")
+  endforeach()
+
+  # Behavioural half: repeated clean builds under parallelism. Each
+  # iteration uses a distinct binary directory so the action cache from a
+  # previous iteration cannot turn the compiles into cache hits and hide
+  # the race.
+  start_runquota("${TEST_BINARY_ROOT}" order_socket order_pid)
+  foreach(iteration RANGE 1 ${ORDER_ONLY_BUILDS})
+    set(order_binary_dir "${TEST_BINARY_ROOT}/order-build-${iteration}")
+    if(NOT iteration EQUAL 1)
+      run_configure("${order_source_dir}" "${order_binary_dir}" TRUE "")
+    endif()
+    run_build("${order_binary_dir}" "genorder" "${order_socket}" order_output)
+    assert_contains("${order_output}" "compile-genorder-CMakeFiles_genorder.dir_main.c.o status=asSucceeded"
+      "generated header order-only build ${iteration}")
+    execute_process(COMMAND "${order_binary_dir}/genorder" RESULT_VARIABLE order_result)
+    if(NOT order_result EQUAL 0)
+      message(FATAL_ERROR
+        "generated header order-only executable failed with ${order_result} (build ${iteration})")
+    endif()
+  endforeach()
+
+  # Cost half: the ordering edge must not drag unrelated objects into the
+  # blast radius. Changing the seed rewrites both generated files, so the
+  # producing custom command re-runs -- that is asserted first, otherwise
+  # the check below would be vacuously true -- and ``plain.c``, which
+  # reads neither generated file, must still not be re-executed. An
+  # ordering edge leaves it alone; a content dependency would not.
+  # Whether the engine reports the skip as asUpToDate or asCacheHit
+  # depends on which of the two non-execution paths it takes, and both
+  # satisfy the invariant, so accept either.
+  file(WRITE "${order_source_dir}/number.txt" "43\n")
+  run_build("${order_binary_dir}" "genorder" "${order_socket}" order_rebuild)
+  stop_runquota("${order_pid}")
+  assert_contains("${order_rebuild}" "custom-command-genorder-generated.c status=asSucceeded launched=true"
+    "generated header order-only rebuild must re-run the generator")
+  assert_contains_any("${order_rebuild}"
+    "generated header order-only rebuild must not over-invalidate plain.c"
+    "compile-genorder-CMakeFiles_genorder.dir_plain.c.o status=asUpToDate launched=false"
+    "compile-genorder-CMakeFiles_genorder.dir_plain.c.o status=asCacheHit launched=false")
 elseif(TEST_MODE STREQUAL "custom_depfile_hidden_input")
   set(depcc_source_dir "${TEST_BINARY_ROOT}/custom-dep-src")
   set(depcc_binary_dir "${TEST_BINARY_ROOT}/custom-dep-build")

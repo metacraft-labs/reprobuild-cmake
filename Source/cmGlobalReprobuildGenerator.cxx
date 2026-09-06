@@ -2523,6 +2523,15 @@ void cmGlobalReprobuildGenerator::WriteProviderMetadata()
       std::vector<cmSourceFile const*> customCommandSources;
       gt->GetCustomCommands(customCommandSources, config);
       std::set<cmCustomCommand const*> emittedCustomCommands;
+      // Ids of this target's add_custom_command actions, in emission
+      // order. Every object compiled for the target takes an order-only
+      // dependency on all of them, mirroring the Ninja generator's
+      // ``cmake_object_order_depends_target_<tgt>`` phony (see
+      // cmNinjaTargetGenerator::WriteObjectBuildStatements). Kept
+      // separate from ``target.CustomActions`` because that vector also
+      // accumulates scanner, dyndep and CUDA device-link actions whose
+      // ordering relative to the compiles is established elsewhere.
+      std::vector<std::string> objectOrderDependIds;
       unsigned int customIndex = 0;
       for (cmSourceFile const* customSource : customCommandSources) {
         cmCustomCommand const* cc = customSource->GetCustomCommand();
@@ -2650,6 +2659,7 @@ void cmGlobalReprobuildGenerator::WriteProviderMetadata()
           }
           usedTools.insert(custom.ToolId);
         }
+        objectOrderDependIds.push_back(custom.Id);
         target.CustomActions.push_back(std::move(custom));
         ++customIndex;
       }
@@ -3380,6 +3390,26 @@ void cmGlobalReprobuildGenerator::WriteProviderMetadata()
           for (ReprobuildAction const& custom : target.CustomActions) {
             ReprobuildAppendUnique(action.Deps, custom.Id);
           }
+        }
+        // Order-only edge from every object in the target to every
+        // add_custom_command that produces sources for the target.
+        //
+        // A generated header is only ever discoverable from the compiler
+        // depfile, and on a clean build that depfile does not exist yet,
+        // so nothing else in the emitted graph constrains an object that
+        // #includes a generated header against the command that writes
+        // it. Objects whose *source* is generated get the edge for free
+        // through output/input inference; objects that merely include a
+        // generated header do not, and used to race the generator --
+        // green at -j1 by scheduling accident, red under parallelism.
+        //
+        // ``deps`` is Reprobuild's order-only channel: entries are action
+        // ids, they seed the scheduler's predecessor counts and take no
+        // part in the weak or strong fingerprint, so this constrains
+        // ordering without making every generated file a content input of
+        // every object in the target.
+        for (std::string const& customId : objectOrderDependIds) {
+          ReprobuildAppendUnique(action.Deps, customId);
         }
         if (declareOutputs && lang != "Fortran") {
           action.Depfile = depRel;
