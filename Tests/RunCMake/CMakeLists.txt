@@ -417,6 +417,17 @@ add_test(NAME e2e_cmake_reprobuild_generated_source_custom_command
     -DTEST_REPROBUILD_REPRO=${_ReprobuildBin}
     -DTEST_RUNQUOTAD=${_RunQuotaDaemonBin}
     -P ${_ReprobuildGeneratorTestDir}/e2e.cmake)
+add_test(NAME e2e_cmake_reprobuild_generated_header_order_only
+  COMMAND ${CMAKE_CMAKE_COMMAND}
+    -DCMAKE_COMMAND=${CMAKE_CMAKE_COMMAND}
+    -DTEST_MODE=generated_header_order_only
+    -DTEST_BINARY_ROOT=${_ReprobuildGeneratorTestBin}/generated-header-order-only
+    -DTEST_C_COMPILER=${CMAKE_C_COMPILER}
+    -DTEST_REPROBUILD_SOURCE_ROOT=${_ReprobuildSourceRoot}
+    -DTEST_REPROBUILD_REPO=${_ReprobuildSourceRoot}
+    -DTEST_REPROBUILD_REPRO=${_ReprobuildBin}
+    -DTEST_RUNQUOTAD=${_RunQuotaDaemonBin}
+    -P ${_ReprobuildGeneratorTestDir}/e2e.cmake)
 add_test(NAME e2e_cmake_reprobuild_custom_depfile_hidden_input
   COMMAND ${CMAKE_CMAKE_COMMAND}
     -DCMAKE_COMMAND=${CMAKE_CMAKE_COMMAND}
