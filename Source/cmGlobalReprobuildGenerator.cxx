@@ -288,7 +288,7 @@ std::string ReprobuildCanonicaliseTryCompileSourcePath(
 //
 // Format (little-endian, length-prefixed):
 //   magic        "RBCT"
-//   version      u16  (= 1)
+//   version      u16  (= 4; see AppendU16Le below)
 //   payloadLen   u32
 //   payload {
 //     usedTools  : string-seq
@@ -296,7 +296,15 @@ std::string ReprobuildCanonicaliseTryCompileSourcePath(
 //     actions    : u32 count + each TryCompileAction
 //     targetName : string
 //     targetActionIds : string-seq
+//     -- v2+ appends further fields; see the Nim decoder for the
+//        version-gated tail (v3 adds the cross-config target model).
 //   }
+//
+// The version is a HARD GATE, not a hint: the decoder rejects anything
+// above ``TryCompileMetadataVersion`` outright (currently 4, accepting
+// 1-4). A `repro` older than the envelope this generator writes fails
+// the configure with "unsupported trycompile.rbsz version", so the two
+// sides must be bumped together.
 //
 // TryCompileAction matches the Nim decoder's struct field-for-field.
 namespace ReprobuildTryCompileEnvelope {
