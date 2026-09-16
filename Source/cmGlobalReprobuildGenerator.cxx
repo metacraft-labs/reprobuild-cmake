@@ -491,6 +491,196 @@ std::string ReprobuildCompilerVar(std::string const& lang)
   return cmStrCat("CMAKE_", lang, "_COMPILER");
 }
 
+// ---------------------------------------------------------------------------
+// The DECLARED action `PATH`.
+//
+// Every build edge this generator emits used to run with the developer's
+// login `PATH`, inherited. Reprobuild's own census on the zlib benchmark
+// read `PATH: 0 hermetic (keyed by value), 37 inherited (passthrough)` --
+// 37 of 37. Three things follow from that, worst first:
+//
+//   1. REPRODUCIBILITY. Two developers with different login `PATH`s record
+//      different input sets for the same action, so the same source tree
+//      produces different cache keys and no entry is ever shared. That is
+//      the property Reprobuild exists to provide.
+//   2. COST. The search space is the developer's, not the project's. One
+//      stale entry (`/home/zahary/.pixi/bin`, under the macOS autofs
+//      `/home` map) cost ~14 ms per no-op build, 27% of the measured
+//      parity gap against Ninja -- because `clang` probes every `PATH`
+//      entry for its linker driver `arm64-apple-darwin-ld` and every miss
+//      is recorded as an observed input of `link-*`. Ninja pays none of
+//      it: it records the files it USED, not the ones it searched.
+//   3. CORRECTNESS. An action's search space depends on who ran it, so a
+//      build can succeed for one developer and fail for another on `PATH`
+//      ordering alone.
+//
+// The value below is DERIVED FROM WHAT CMAKE ALREADY RESOLVED -- the
+// compiler for each enabled language and the binutils family CMake found
+// during `CMakeFindBinUtils` -- rather than invented. `cmake` itself is on
+// it because custom commands routinely call `${CMAKE_COMMAND} -E`, and the
+// generator's own wrapper directory is on it because that is where the
+// `*.repro-tool-profile` sidecars the engine resolves live.
+//
+// WHAT HAPPENS WHEN A TOOL IS NOT ON IT: the spawn fails loudly, and in
+// no case does it fall back to the ambient `PATH`. The no-fallback half is
+// the load-bearing one and it is verified two ways --
+// `prependPathDirsToArgvEnv` reads `if pathSeen: pathValue else:
+// getEnv("PATH")`, so a declaration sets `pathSeen` and the host value is
+// never read; and `launchChildEnv`'s passthrough block skips every name
+// the action declares. A fallback would defeat the whole point, because it
+// would be exactly the unkeyed channel this closes.
+//
+// AN EARLIER REVISION OF THIS COMMENT CLAIMED A MEASURED DIAGNOSTIC HERE
+// (a `posix_spawn failed` / `dsymutil command failed` pair, from limiting
+// `PATH` to the clang wrapper directory alone). IT DOES NOT REPRODUCE, and
+// the reason is worth keeping: the engine prepends the tool directories the
+// solved graph resolved at launch time, on top of whatever this value
+// declares, so narrowing this value alone does not narrow what the child
+// actually searches. Measured under that configuration the link SUCCEEDS
+// and probes exactly three directories -- this one plus two graph-resolved
+// ones -- and nothing from the caller's `PATH`.
+//
+// So do not treat this value as the child's whole search path, and do not
+// reintroduce a "measured" failure example without re-running it: the one
+// that was here read as evidence and was not.
+//
+// ESCAPE HATCHES, all opt-in, all read from the cache/`CMakeLists.txt`:
+//
+//   REPROBUILD_CMAKE_ACTION_PATH        replace the derived value outright
+//   REPROBUILD_CMAKE_ACTION_PATH_EXTRA  append directories to it
+//   REPROBUILD_CMAKE_INHERIT_PATH       declare nothing (pre-change
+//                                       behaviour: actions inherit and say
+//                                       so via passthrough)
+//
+// Opting out is VISIBLE rather than silent: it puts the project back in
+// the `inherited (passthrough)` column of the build header's env census,
+// which is the same line that made this defect findable in the first
+// place.
+char const ReprobuildActionPathVar[] = "REPROBUILD_CMAKE_ACTION_PATH";
+char const ReprobuildActionPathExtraVar[] =
+  "REPROBUILD_CMAKE_ACTION_PATH_EXTRA";
+char const ReprobuildInheritPathVar[] = "REPROBUILD_CMAKE_INHERIT_PATH";
+
+char ReprobuildPathListSeparator()
+{
+#ifdef _WIN32
+  return ';';
+#else
+  return ':';
+#endif
+}
+
+// Add `dir` to `dirs` if it is a usable, not-already-present directory.
+// Rejects the empty string, CMake's `*-NOTFOUND` sentinel, and relative
+// paths -- a relative entry on `PATH` resolves against the action's CWD,
+// which would reintroduce exactly the caller-dependence this removes.
+void ReprobuildAddPathDir(std::vector<std::string>& dirs,
+                          std::string const& dir)
+{
+  if (dir.empty() || cmIsNOTFOUND(dir)) {
+    return;
+  }
+  if (!cmSystemTools::FileIsFullPath(dir)) {
+    return;
+  }
+  std::string normalized = dir;
+  // Strip a trailing slash so `<d>` and `<d>/` cannot both be emitted.
+  while (normalized.size() > 1 &&
+         (normalized.back() == '/' || normalized.back() == '\\')) {
+    normalized.pop_back();
+  }
+  if (std::find(dirs.begin(), dirs.end(), normalized) != dirs.end()) {
+    return;
+  }
+  dirs.push_back(normalized);
+}
+
+// Add the directory holding the program named by cache/definition `var`.
+void ReprobuildAddProgramDir(std::vector<std::string>& dirs, cmMakefile* mf,
+                             std::string const& var)
+{
+  std::string const program = mf->GetSafeDefinition(var);
+  if (program.empty() || cmIsNOTFOUND(program)) {
+    return;
+  }
+  ReprobuildAddPathDir(dirs, cmSystemTools::GetFilenamePath(program));
+}
+
+// The toolchain-probe variables CMake fills in during language enablement
+// (`CMakeFindBinUtils.cmake` and friends). Every one of these is a path
+// CMake itself resolved, so the resulting `PATH` is a function of the
+// configured toolchain rather than of the shell that ran `cmake`.
+char const* const ReprobuildBinUtilVars[] = {
+  "CMAKE_LINKER",      "CMAKE_AR",        "CMAKE_RANLIB",
+  "CMAKE_STRIP",       "CMAKE_NM",        "CMAKE_OBJCOPY",
+  "CMAKE_OBJDUMP",     "CMAKE_ADDR2LINE", "CMAKE_READELF",
+  "CMAKE_DLLTOOL",     "CMAKE_MT",        "CMAKE_RC_COMPILER",
+  "CMAKE_INSTALL_NAME_TOOL",              "CMAKE_TAPI",
+  "CMAKE_LINKER_LINK", "CMAKE_LINKER_LLD",
+};
+
+// The whole declared `PATH` for this project's actions, or the empty
+// string when the project opted back into inheritance.
+std::string ReprobuildDeclaredActionPath(
+  cmMakefile* mf, std::set<std::string> const& usedLanguages,
+  std::string const& wrapperDir, std::string const& cmakeCommand)
+{
+  if (mf->IsOn(ReprobuildInheritPathVar)) {
+    return std::string();
+  }
+
+  std::vector<std::string> dirs;
+  std::string const explicitPath = mf->GetSafeDefinition(
+    ReprobuildActionPathVar);
+  if (!explicitPath.empty()) {
+    // Verbatim: a project that spells the search path out owns it, and
+    // silently appending to it would make the declaration a half-truth.
+    for (std::string const& entry :
+         cmTokenize(explicitPath, ReprobuildPathListSeparator(),
+                    cmTokenizerMode::New)) {
+      ReprobuildAddPathDir(dirs, entry);
+    }
+  } else {
+    ReprobuildAddPathDir(dirs, wrapperDir);
+    for (std::string const& lang : usedLanguages) {
+      ReprobuildAddProgramDir(dirs, mf, ReprobuildCompilerVar(lang));
+      ReprobuildAddProgramDir(dirs, mf,
+                              cmStrCat("CMAKE_", lang, "_COMPILER_AR"));
+      ReprobuildAddProgramDir(dirs, mf,
+                              cmStrCat("CMAKE_", lang, "_COMPILER_RANLIB"));
+      ReprobuildAddProgramDir(dirs, mf,
+                              cmStrCat("CMAKE_", lang, "_COMPILER_LINKER"));
+    }
+    for (char const* var : ReprobuildBinUtilVars) {
+      ReprobuildAddProgramDir(dirs, mf, var);
+    }
+    if (!cmakeCommand.empty()) {
+      ReprobuildAddPathDir(dirs, cmSystemTools::GetFilenamePath(cmakeCommand));
+    }
+  }
+
+  std::string const extra = mf->GetSafeDefinition(
+    ReprobuildActionPathExtraVar);
+  if (!extra.empty()) {
+    // A CMake list (`;`-separated) so `set(... "a;b")` and
+    // `list(APPEND ...)` both work; on Windows that is also the native
+    // PATH separator, so both spellings land the same way.
+    for (std::string const& entry :
+         cmTokenize(extra, ';', cmTokenizerMode::New)) {
+      ReprobuildAddPathDir(dirs, entry);
+    }
+  }
+
+  std::string result;
+  for (std::string const& dir : dirs) {
+    if (!result.empty()) {
+      result.push_back(ReprobuildPathListSeparator());
+    }
+    result += dir;
+  }
+  return result;
+}
+
 std::string ReprobuildToolId(std::string const& lang)
 {
   if (lang == "CUDA") {
@@ -2025,9 +2215,17 @@ struct ReprobuildTryCompileCrossConfigDescriptor
 // descriptors so multi-config CMake builds (CMAKE_CROSS_CONFIGS,
 // CMAKE_DEFAULT_CONFIGS) can also route through the direct provider.
 //
-// v2 readers MUST reject v3 (the cross-config target shape would
-// otherwise be invisible and the slow path would silently disappear);
-// the Nim decoder enforces that.
+// v4 adds `actionEnv`: the environment entries every action in the
+// envelope declares, `KEY=VALUE`, applied uniformly by the direct
+// provider. Today it carries exactly one entry, the declared `PATH` --
+// see `ReprobuildDeclaredActionPath`. It is a PAYLOAD-level field rather
+// than a per-action one on purpose: the claim being made is "every edge
+// of this project runs with this search path", and a per-action field is
+// a field some future action-construction site can forget to set.
+//
+// A reader of version N MUST reject version N+1 (the cross-config target
+// shape, and now the env, would otherwise be invisible and the slow path
+// would silently disappear); the Nim decoder enforces that.
 static bool ReprobuildWriteTryCompileMetadata(
   std::string const& path,
   std::vector<std::string> const& usedTools,
@@ -2038,7 +2236,8 @@ static bool ReprobuildWriteTryCompileMetadata(
   std::vector<std::string> const& crossConfigs,
   std::vector<ReprobuildTryCompileCrossConfigDescriptor> const&
     crossConfigTargets,
-  std::vector<std::string> const& defaultConfigs)
+  std::vector<std::string> const& defaultConfigs,
+  std::vector<std::string> const& actionEnv)
 {
   using namespace ReprobuildTryCompileEnvelope;
   std::string payload;
@@ -2072,9 +2271,11 @@ static bool ReprobuildWriteTryCompileMetadata(
     AppendStringSeq(payload, crossTarget.ChildTargets);
   }
   AppendStringSeq(payload, defaultConfigs);
+  // v4 trailer: the env every action declares.
+  AppendStringSeq(payload, actionEnv);
 
   std::string envelope = "RBCT";
-  AppendU16Le(envelope, 3);
+  AppendU16Le(envelope, 4);
   AppendU32Le(envelope, static_cast<std::uint32_t>(payload.size()));
   envelope.append(payload);
 
@@ -4706,6 +4907,23 @@ void cmGlobalReprobuildGenerator::WriteProviderMetadata()
   // one direct `cmake -E (cmake_symlink_library|create_symlink) …` call.
   // No wrappers, no synthetic packages, no entries in `uses:`.
 
+  // The declared action `PATH` -- see `ReprobuildDeclaredActionPath` for
+  // where the directories come from and what happens when one is missing.
+  //
+  // Computed ONCE, here, and consumed by BOTH emitters below
+  // (`writeAction` for `reprobuild.nim`, the envelope trailer for
+  // `trycompile.rbsz`). One value with two write sites is the only shape
+  // in which no future action-construction site can forget to carry it:
+  // this function constructs `ReprobuildAction` values in dozens of
+  // places — compiles, links, symlinks, pre-build / pre-link /
+  // post-build events, custom commands, dyndep and module scans, device
+  // links, utility targets — and a per-action field would have to be set
+  // at every one of them. The sibling defect in `repro_cli_support` was
+  // exactly this shape: a fourth lowering site ~400 lines from the other
+  // three was missed by a sweep of "the lowering sites".
+  std::string const declaredActionPath = ReprobuildDeclaredActionPath(
+    rootMf, usedLanguages, wrapperDir, cmSystemTools::GetCMakeCommand());
+
   std::set<std::string> allCleanFiles;
   for (auto const& entry : cleanFilesByConfig) {
     allCleanFiles.insert(entry.second.begin(), entry.second.end());
@@ -4917,7 +5135,8 @@ void cmGlobalReprobuildGenerator::WriteProviderMetadata()
     provider << "    discard buildPool(" << ReprobuildEscape(pool.Name)
              << ", " << pool.Capacity << "'u32)\n";
   }
-  auto writeAction = [&provider](ReprobuildAction const& action) {
+  auto writeAction = [&provider,
+                      &declaredActionPath](ReprobuildAction const& action) {
     provider << "    let " << action.Var << " = buildAction("
              << ReprobuildEscape(action.Id) << ", ";
     if (action.Inline) {
@@ -4956,6 +5175,15 @@ void cmGlobalReprobuildGenerator::WriteProviderMetadata()
                << ReprobuildEscape(action.DynamicDepsFile);
     }
     provider << ", cacheable = " << (action.Cacheable ? "true" : "false");
+    if (!declaredActionPath.empty()) {
+      // DECLARED, not inherited. The engine keys a `PATH` an action
+      // declares BY VALUE (`keyedOnActionEnvironment` renders a declared
+      // variable's bytes into the key; a passthrough one contributes only
+      // its NAME), which is exactly the difference between "this edge ran
+      // with some search path" and "this edge ran with THIS search path".
+      provider << ", env = @[(\"PATH\", "
+               << ReprobuildEscape(declaredActionPath) << ")]";
+    }
     provider << ", commandStatsId = "
              << ReprobuildEscape(ReprobuildCommandStatsId(action.Id))
              << ")\n";
@@ -5498,10 +5726,20 @@ void cmGlobalReprobuildGenerator::WriteProviderMetadata()
 
     std::string const tryCompileMetadataFile =
       cmStrCat(binaryDir, "/trycompile.rbsz");
+    // The SAME `declaredActionPath` the slow-path `writeAction` emits.
+    // Both emitters read one variable; a divergence between the two
+    // would mean the direct provider and the compiled provider disagreed
+    // about what an action's environment is, and they are cached under
+    // different keys, so the disagreement would be invisible.
+    std::vector<std::string> directActionEnv;
+    if (!declaredActionPath.empty()) {
+      directActionEnv.push_back(cmStrCat("PATH=", declaredActionPath));
+    }
     if (!ReprobuildWriteTryCompileMetadata(
           tryCompileMetadataFile, directUsedTools, pools, directActions,
           directTargets, defaultTargetName, envelopeCrossConfigs,
-          crossConfigDescriptors, envelopeDefaultConfigs)) {
+          crossConfigDescriptors, envelopeDefaultConfigs,
+          directActionEnv)) {
       // Best-effort: log a non-fatal message and continue. The
       // reprobuild.nim slow-path remains available.
       this->GetCMakeInstance()->IssueMessage(
