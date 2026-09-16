@@ -239,6 +239,16 @@ add_test(NAME e2e_cmake_reprobuild_generator_configure_smoke
     -DTEST_BINARY_ROOT=${_ReprobuildGeneratorTestBin}/configure
     -DTEST_C_COMPILER=${CMAKE_C_COMPILER}
     -DTEST_CXX_COMPILER=${CMAKE_CXX_COMPILER}
+    # `run_configure` primes the provider by invoking the CLI, and falls
+    # back to whatever `repro` is first on `$PATH` when this is unset --
+    # on a developer machine, an INSTALLED release whose `trycompile.rbsz`
+    # reader predates the envelope version this generator writes. The
+    # envelope's version gate then refuses it and the failure surfaces as
+    # a generator failure. Every other Reprobuild e2e test below already
+    # pins the CLI; this one did not, which made the whole `configure`
+    # mode -- and so every provider-text assertion in
+    # `check_provider_metadata` -- unrunnable here.
+    -DTEST_REPROBUILD_REPRO=${_ReprobuildBin}
     -P ${_ReprobuildGeneratorTestDir}/e2e.cmake)
 add_test(NAME e2e_cmake_reprobuild_hello_c_build
   COMMAND ${CMAKE_CMAKE_COMMAND}

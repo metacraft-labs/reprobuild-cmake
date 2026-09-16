@@ -191,6 +191,15 @@ function(check_provider_metadata binary_dir source_dir)
       "buildAction(\"compile-hello"
       "buildAction(\"link-hello"
       "makeDepfilePolicy("
+      # Assert the depfile-less branch's policy BY NAME. Every action
+      # without a depfile must ask the engine to MONITOR it; the
+      # generator must never emit a "trust the declared inputs and mark
+      # the action complete" policy. Naming the identifier here means a
+      # future removal or rename in reprobuild breaks this test rather
+      # than a developer's build: that is exactly how
+      # `declaredOnlyDependencyPolicy` -- deleted upstream as an
+      # unapproved soundness hole -- survived here undetected.
+      "dependencyPolicy = automaticMonitorPolicy()"
       "target(\"hello\""
       "aggregate(\"all\""
       "exportTarget(\"default\", allTarget)"
@@ -199,6 +208,21 @@ function(check_provider_metadata binary_dir source_dir)
     if(found EQUAL -1)
       message(FATAL_ERROR
         "Generated provider missing '${expected}'.\n"
+        "provider:\n${provider}")
+    endif()
+  endforeach()
+
+  # Complete-on-declared-inputs policies are REMOVED from reprobuild and
+  # must not reappear in generated output. An action with no monitorable
+  # evidence declares a depfile or is marked non-cacheable; it is never
+  # completed on its statically declared inputs.
+  foreach(forbidden IN ITEMS
+      "declaredOnlyDependencyPolicy"
+      "trustedDeclaredInputsPolicy")
+    string(FIND "${provider}" "${forbidden}" found)
+    if(NOT found EQUAL -1)
+      message(FATAL_ERROR
+        "Generated provider emits removed policy '${forbidden}'.\n"
         "provider:\n${provider}")
     endif()
   endforeach()

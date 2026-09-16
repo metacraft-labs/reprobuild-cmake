@@ -288,7 +288,7 @@ std::string ReprobuildCanonicaliseTryCompileSourcePath(
 //
 // Format (little-endian, length-prefixed):
 //   magic        "RBCT"
-//   version      u16  (= 1)
+//   version      u16  (= 4; see AppendU16Le below)
 //   payloadLen   u32
 //   payload {
 //     usedTools  : string-seq
@@ -296,7 +296,15 @@ std::string ReprobuildCanonicaliseTryCompileSourcePath(
 //     actions    : u32 count + each TryCompileAction
 //     targetName : string
 //     targetActionIds : string-seq
+//     -- v2+ appends further fields; see the Nim decoder for the
+//        version-gated tail (v3 adds the cross-config target model).
 //   }
+//
+// The version is a HARD GATE, not a hint: the decoder rejects anything
+// above ``TryCompileMetadataVersion`` outright (currently 4, accepting
+// 1-4). A `repro` older than the envelope this generator writes fails
+// the configure with "unsupported trycompile.rbsz version", so the two
+// sides must be bumped together.
 //
 // TryCompileAction matches the Nim decoder's struct field-for-field.
 namespace ReprobuildTryCompileEnvelope {
@@ -5174,7 +5182,21 @@ void cmGlobalReprobuildGenerator::WriteProviderMetadata()
                << ", dependencyPolicy = makeDepfilePolicy("
                << ReprobuildEscape(action.Depfile) << ")";
     } else {
-      provider << ", dependencyPolicy = declaredOnlyDependencyPolicy()";
+      // `automaticMonitorPolicy` is the spec baseline for opaque tools
+      // (Reprobuild-Development M17), and it is what the in-tree
+      // `c_cpp_cmake` convention emits for exactly these edges. The
+      // engine monitors the process's real read-set instead of trusting
+      // the statically declared `inputs` above.
+      //
+      // This used to emit `declaredOnlyDependencyPolicy()`, which
+      // reprobuild REMOVED as an unapproved soundness hole: it did no
+      // runtime monitoring yet still marked the action complete and
+      // cacheable, so a changed input silently skipped a rebuild. Do
+      // not reintroduce a declared-only policy here -- an action with
+      // no monitorable evidence must declare a depfile (the branch
+      // above) or be marked non-cacheable, never be completed on its
+      // declared inputs.
+      provider << ", dependencyPolicy = automaticMonitorPolicy()";
     }
     if (!action.DynamicDepsFile.empty()) {
       provider << ", dynamicDepsFile = "
