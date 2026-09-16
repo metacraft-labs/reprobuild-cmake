@@ -80,7 +80,32 @@ endfunction()
 
 function(run_configure source_dir binary_dir expect_success expected_error)
   file(REMOVE_RECURSE "${binary_dir}")
+  # `REPROBUILD_REPRO` PINS THE CLI TO THE WORKSPACE BUILD, and it has to
+  # be set here and not only in `run_build` below.
+  #
+  # A Reprobuild configure primes the provider by invoking the CLI
+  # itself, and `ReprobuildFindCliOnPath()` falls back to whatever
+  # `repro` is first on `$PATH` when the variable is unset. On a
+  # developer machine with an INSTALLED reprobuild that is the installed
+  # one, so the generator under test was paired with a CLI from some
+  # other release.
+  #
+  # MEASURED, and the reason this is no longer left implicit: with the
+  # `trycompile.rbsz` envelope at v4 and `~/.nix-profile/bin/repro`
+  # shipping a v3 reader, `response_file_identity` failed at configure
+  # with `repro-cmake-trycompile-provider: unsupported trycompile.rbsz
+  # version: 4`. That is the envelope's version gate working exactly as
+  # specified — a reader must refuse an envelope it cannot fully see —
+  # reported as a test failure of the generator. Every other helper in
+  # this file already passed the variable; this one did not.
+  set(configure_env)
+  if(DEFINED TEST_REPROBUILD_REPRO AND
+     NOT "${TEST_REPROBUILD_REPRO}" STREQUAL "")
+    set(configure_env
+      "${CMAKE_COMMAND}" -E env "REPROBUILD_REPRO=${TEST_REPROBUILD_REPRO}")
+  endif()
   set(command
+    ${configure_env}
     "${CMAKE_COMMAND}"
     -S "${source_dir}"
     -B "${binary_dir}"
