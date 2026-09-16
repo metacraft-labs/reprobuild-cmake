@@ -2212,6 +2212,26 @@ elseif(TEST_MODE STREQUAL "hello_c_build")
   stop_runquota("${runquota_pid}")
   assert_contains("${all_output}" "selectedTarget: all" "all target build output")
   assert_contains("${explicit_default_output}" "selectedTarget: default" "explicit default target build output")
+elseif(TEST_MODE STREQUAL "post_build_self_reference")
+  file(APPEND "${source_dir}/CMakeLists.txt"
+    "add_custom_command(TARGET hello POST_BUILD\n"
+    "  COMMAND \"$<TARGET_FILE:hello>\" \"${binary_dir}/post-build-ran.txt\" VERBATIM)\n")
+  file(WRITE "${source_dir}/main.c"
+    "#include <stdio.h>\n"
+    "int main(int argc, char **argv) {\n"
+    "  if (argc != 2) return 1;\n"
+    "  FILE *out = fopen(argv[1], \"w\");\n"
+    "  if (!out) return 2;\n"
+    "  fputs(\"post-build executed\\n\", out);\n"
+    "  return fclose(out) == 0 ? 0 : 3;\n}\n")
+  run_configure("${source_dir}" "${binary_dir}" TRUE "")
+  start_runquota("${TEST_BINARY_ROOT}" runquota_socket runquota_pid)
+  run_build("${binary_dir}" "hello" "${runquota_socket}" build_output)
+  stop_runquota("${runquota_pid}")
+  file(READ "${binary_dir}/post-build-ran.txt" post_build_output)
+  if(NOT post_build_output STREQUAL "post-build executed\n")
+    message(FATAL_ERROR "The target's POST_BUILD executable did not run")
+  endif()
 elseif(TEST_MODE STREQUAL "hyphen_target_build")
   set(hyphen_source_dir "${TEST_BINARY_ROOT}/hyphen-src")
   set(hyphen_binary_dir "${TEST_BINARY_ROOT}/hyphen-build")

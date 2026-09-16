@@ -4723,6 +4723,12 @@ void cmGlobalReprobuildGenerator::WriteProviderMetadata()
       std::string const depTargetName =
         ReprobuildTargetName(depName, target.OutputConfig,
                              target.CommandConfig, multiConfig);
+      // A build event may name its own TARGET_FILE. Its position in the
+      // target's action chain already orders that reference; feeding the
+      // terminal action back into the initial actions creates a cycle.
+      if (depTargetName == target.Name) {
+        continue;
+      }
       auto const it = targetTerminals.find(depTargetName);
       if (it != targetTerminals.end()) {
         cm::append(deps, it->second);
