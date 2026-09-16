@@ -521,21 +521,28 @@ std::string ReprobuildCompilerVar(std::string const& lang)
 // generator's own wrapper directory is on it because that is where the
 // `*.repro-tool-profile` sidecars the engine resolves live.
 //
-// WHAT HAPPENS WHEN A TOOL IS NOT ON IT: the spawn fails loudly.
-// MEASURED on this machine, linking with `PATH` limited to the clang
-// wrapper directory alone:
+// WHAT HAPPENS WHEN A TOOL IS NOT ON IT: the spawn fails loudly, and in
+// no case does it fall back to the ambient `PATH`. The no-fallback half is
+// the load-bearing one and it is verified two ways --
+// `prependPathDirsToArgvEnv` reads `if pathSeen: pathValue else:
+// getEnv("PATH")`, so a declaration sets `pathSeen` and the host value is
+// never read; and `launchChildEnv`'s passthrough block skips every name
+// the action declares. A fallback would defeat the whole point, because it
+// would be exactly the unkeyed channel this closes.
 //
-//   clang: error: unable to execute command: posix_spawn failed: No such
-//          file or directory
-//   clang: error: dsymutil command failed with exit code 1
+// AN EARLIER REVISION OF THIS COMMENT CLAIMED A MEASURED DIAGNOSTIC HERE
+// (a `posix_spawn failed` / `dsymutil command failed` pair, from limiting
+// `PATH` to the clang wrapper directory alone). IT DOES NOT REPRODUCE, and
+// the reason is worth keeping: the engine prepends the tool directories the
+// solved graph resolved at launch time, on top of whatever this value
+// declares, so narrowing this value alone does not narrow what the child
+// actually searches. Measured under that configuration the link SUCCEEDS
+// and probes exactly three directories -- this one plus two graph-resolved
+// ones -- and nothing from the caller's `PATH`.
 //
-// `-g` on Apple platforms runs `dsymutil`, which lives beside
-// `install_name_tool` in cctools rather than beside `clang`. Adding the
-// directory CMake resolved `CMAKE_INSTALL_NAME_TOOL` into makes the same
-// link succeed. That is the intended failure mode: a missing directory is
-// a diagnosable error, never a silent fall back to the ambient `PATH` --
-// falling back would defeat the whole point, because the fallback would
-// be exactly the unkeyed channel this closes.
+// So do not treat this value as the child's whole search path, and do not
+// reintroduce a "measured" failure example without re-running it: the one
+// that was here read as evidence and was not.
 //
 // ESCAPE HATCHES, all opt-in, all read from the cache/`CMakeLists.txt`:
 //
