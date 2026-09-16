@@ -5168,7 +5168,21 @@ void cmGlobalReprobuildGenerator::WriteProviderMetadata()
                << ", dependencyPolicy = makeDepfilePolicy("
                << ReprobuildEscape(action.Depfile) << ")";
     } else {
-      provider << ", dependencyPolicy = declaredOnlyDependencyPolicy()";
+      // `automaticMonitorPolicy` is the spec baseline for opaque tools
+      // (Reprobuild-Development M17), and it is what the in-tree
+      // `c_cpp_cmake` convention emits for exactly these edges. The
+      // engine monitors the process's real read-set instead of trusting
+      // the statically declared `inputs` above.
+      //
+      // This used to emit `declaredOnlyDependencyPolicy()`, which
+      // reprobuild REMOVED as an unapproved soundness hole: it did no
+      // runtime monitoring yet still marked the action complete and
+      // cacheable, so a changed input silently skipped a rebuild. Do
+      // not reintroduce a declared-only policy here -- an action with
+      // no monitorable evidence must declare a depfile (the branch
+      // above) or be marked non-cacheable, never be completed on its
+      // declared inputs.
+      provider << ", dependencyPolicy = automaticMonitorPolicy()";
     }
     if (!action.DynamicDepsFile.empty()) {
       provider << ", dynamicDepsFile = "
