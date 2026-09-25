@@ -1,8 +1,22 @@
 import repro_project_dsl
+import repro_dsl_stdlib/foreign_env
 import repro_dsl_stdlib/packages/sh
+import repro_dsl_stdlib/packages/gcc
+import repro_dsl_stdlib/packages/make
 
 package reprobuild_cmake:
-  defaultToolProvisioning "path"
+  defaultToolProvisioning path
+
+  uses:
+    "gcc"
+    "make"
+    "sh"
+
+  devEnv:
+    when defined(posix):
+      useFlakeDevShell()
+    else:
+      activity "default"
 
   executable cmake:
     name: "cmake"
