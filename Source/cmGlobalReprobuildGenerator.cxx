@@ -16,6 +16,7 @@
 #include <cm/memory>
 #include <cmext/algorithm>
 
+#include "cmsys/Directory.hxx"
 #include "cmsys/FStream.hxx"
 
 #include "cmComputeLinkInformation.h"
@@ -224,6 +225,61 @@ std::string ReprobuildSharedStoreRoot()
   }
   return std::string();
 #endif
+}
+
+// Whether a TryCompile source may be compiled from a copy in the store's
+// canonical-source directory (below) without changing what the compiler
+// sees. A copy differs from the original only in the directory it sits in,
+// and that directory is where the compiler looks first for a quoted
+// #include (likewise a Fortran INCLUDE line or an assembler .include). So a
+// copy is only equivalent when the source refers to nothing beside it:
+//
+//  - Only sources the try_compile wrote into its own binary (scratch) dir are
+//    candidates: SOURCE_FROM_CONTENT / _VAR / _FILE, which is how every
+//    CMake check module hands over its generated probe. Theirs is the only
+//    path that changes with each configure. A source given by path keeps it:
+//    ${CMAKE_ROOT}/Modules/CMakeCCompilerABI.c already has the same path in
+//    every project configured by this CMake, and it includes
+//    CMakeCompilerABI.h from its own directory -- copying it alone made the
+//    compiler ABI probe fail on every configure, leaving CMAKE_SIZEOF_VOID_P
+//    and the implicit include/link directories unset. The same goes for a
+//    source in a project's tree or a project-mode try_compile.
+//  - A scratch source that mentions the name of anything else in the scratch
+//    dir is not staged either: one try_compile can write several sources
+//    there, and one may include another. The test is a plain, case-folded
+//    substring match on the file's bytes, so it holds for every language and
+//    errs only towards compiling the source where it is.
+bool ReprobuildTryCompileSourceIsRelocatable(std::string const& sourcePath,
+                                             std::string const& scratchDir)
+{
+  std::string const sourceDir = cmSystemTools::GetFilenamePath(sourcePath);
+  if (scratchDir.empty() ||
+      !cmSystemTools::ComparePath(sourceDir, scratchDir)) {
+    return false;
+  }
+  cmsys::ifstream in(sourcePath.c_str(), std::ios::in | std::ios::binary);
+  if (!in) {
+    return false;
+  }
+  std::ostringstream contentStream;
+  contentStream << in.rdbuf();
+  std::string const content = cmSystemTools::LowerCase(contentStream.str());
+  std::string const sourceName =
+    cmSystemTools::LowerCase(cmSystemTools::GetFilenameName(sourcePath));
+  cmsys::Directory dir;
+  if (!dir.Load(sourceDir)) {
+    return false;
+  }
+  for (unsigned long i = 0; i < dir.GetNumberOfFiles(); ++i) {
+    std::string const name = cmSystemTools::LowerCase(dir.GetFile(i));
+    if (name == "." || name == ".." || name == sourceName) {
+      continue;
+    }
+    if (content.find(name) != std::string::npos) {
+      return false;
+    }
+  }
+  return true;
 }
 
 // Stage a TryCompile test source through a content-addressed canonical
@@ -3254,7 +3310,11 @@ void cmGlobalReprobuildGenerator::WriteProviderMetadata()
         // CMake check actually hit. The path move is symmetric — both
         // action.Inputs and the compiler-argv entry sourceArg adopt the
         // canonical path so weak and strong fingerprints both line up.
-        if (this->GetCMakeInstance()->GetIsInTryCompile()) {
+        // Only a source that needs nothing beside it is moved; see
+        // ReprobuildTryCompileSourceIsRelocatable.
+        if (this->GetCMakeInstance()->GetIsInTryCompile() &&
+            ReprobuildTryCompileSourceIsRelocatable(source->GetFullPath(),
+                                                    binaryDir)) {
           std::string const canonicalPath =
             ReprobuildCanonicaliseTryCompileSourcePath(sourceArg);
           if (canonicalPath != sourceArg) {

@@ -78,6 +78,49 @@ function(write_source_flags_subdir_link_project source_dir project_name)
     "int main(void) { return nested_value() == 42 ? 0 : 1; }\n")
 endfunction()
 
+# A project whose configure exercises the try_compile sources the generator
+# may move to the store's canonical-source directory: the compiler ABI probe
+# (a ${CMAKE_ROOT}/Modules source that includes a header beside it), a
+# self-contained check_include_file probe, and two user probes that include a
+# file from their own directory -- one written into the try_compile scratch
+# dir (try_compile takes only compilable sources there, so the included file
+# is a .c that defines nothing), one in the project's source tree. Every probe must compile exactly as
+# it would under any other generator.
+function(write_trycompile_source_staging_project source_dir project_name)
+  file(REMOVE_RECURSE "${source_dir}")
+  file(MAKE_DIRECTORY "${source_dir}/probe")
+  file(WRITE "${source_dir}/CMakeLists.txt"
+    "cmake_minimum_required(VERSION 3.25)\n"
+    "project(${project_name} C)\n")
+  file(APPEND "${source_dir}/CMakeLists.txt" [=[
+include(CheckIncludeFile)
+check_include_file(stddef.h STAGING_HAVE_STDDEF_H)
+try_compile(STAGING_SCRATCH_SIBLING_OK
+  SOURCE_FROM_CONTENT staging_sibling_value.c "#define STAGING_SIBLING_VALUE 0\n"
+  SOURCE_FROM_CONTENT staging_sibling.c "#include \"staging_sibling_value.c\"\nint main(void) { return STAGING_SIBLING_VALUE; }\n"
+  OUTPUT_VARIABLE STAGING_SCRATCH_SIBLING_LOG)
+try_compile(STAGING_SOURCE_DIR_SIBLING_OK
+  SOURCES "${CMAKE_CURRENT_SOURCE_DIR}/probe/staging_outside.c"
+  OUTPUT_VARIABLE STAGING_SOURCE_DIR_SIBLING_LOG)
+file(WRITE "${CMAKE_BINARY_DIR}/staging-results.txt"
+  "C_ABI_COMPILED=${CMAKE_C_ABI_COMPILED}\n"
+  "C_SIZEOF_DATA_PTR=${CMAKE_C_SIZEOF_DATA_PTR}\n"
+  "SIZEOF_VOID_P=${CMAKE_SIZEOF_VOID_P}\n"
+  "HAVE_STDDEF_H=${STAGING_HAVE_STDDEF_H}\n"
+  "SCRATCH_SIBLING_OK=${STAGING_SCRATCH_SIBLING_OK}\n"
+  "SOURCE_DIR_SIBLING_OK=${STAGING_SOURCE_DIR_SIBLING_OK}\n")
+file(WRITE "${CMAKE_BINARY_DIR}/staging-logs.txt"
+  "${STAGING_SCRATCH_SIBLING_LOG}\n----\n${STAGING_SOURCE_DIR_SIBLING_LOG}\n")
+add_executable(hello main.c)
+]=])
+  file(WRITE "${source_dir}/probe/staging_outside.h"
+    "#define STAGING_OUTSIDE_VALUE 0\n")
+  file(WRITE "${source_dir}/probe/staging_outside.c"
+    "#include \"staging_outside.h\"\n"
+    "int main(void) { return STAGING_OUTSIDE_VALUE; }\n")
+  file(WRITE "${source_dir}/main.c" "int main(void) { return 0; }\n")
+endfunction()
+
 function(run_configure source_dir binary_dir expect_success expected_error)
   file(REMOVE_RECURSE "${binary_dir}")
   # `REPROBUILD_REPRO` PINS THE CLI TO THE WORKSPACE BUILD, and it has to
@@ -2212,6 +2255,47 @@ if(TEST_MODE STREQUAL "configure")
       "default_configs=Debug"
       "targets=all,default,hello:Debug,hello:Release")
     assert_contains("${multi_metadata}" "${expected}" "multi-config configure metadata")
+  endforeach()
+elseif(TEST_MODE STREQUAL "trycompile_source_staging")
+  # The generator compiles a self-contained try_compile source from a
+  # content-addressed copy under the store, so its path does not depend on
+  # the configure's scratch dir. A copy only sees the files beside it, so a
+  # source that includes a neighbour must be compiled where it is: the
+  # compiler ABI probe (CMakeCCompilerABI.c includes CMakeCompilerABI.h) used
+  # to fail on every configure, leaving CMAKE_SIZEOF_VOID_P unset.
+  set(store_root "${TEST_BINARY_ROOT}/store")
+  set(staging_source_dir "${TEST_BINARY_ROOT}/staging-src")
+  set(staging_binary_dir "${TEST_BINARY_ROOT}/staging-build")
+  write_trycompile_source_staging_project("${staging_source_dir}" ReprobuildTryCompileStaging)
+  set(ENV{REPROBUILD_STORE_ROOT} "${store_root}")
+  run_configure("${staging_source_dir}" "${staging_binary_dir}" TRUE "")
+  unset(ENV{REPROBUILD_STORE_ROOT})
+
+  file(READ "${staging_binary_dir}/staging-results.txt" staging_results)
+  file(READ "${staging_binary_dir}/staging-logs.txt" staging_logs)
+  set(staging_label "try_compile results under the Reprobuild generator")
+  foreach(expected IN ITEMS
+      "C_ABI_COMPILED=TRUE"
+      "HAVE_STDDEF_H=1"
+      "SCRATCH_SIBLING_OK=TRUE"
+      "SOURCE_DIR_SIBLING_OK=TRUE")
+    assert_contains("${staging_results}" "${expected}"
+      "${staging_label} (try_compile output:\n${staging_logs})")
+  endforeach()
+  assert_matches("${staging_results}" "C_SIZEOF_DATA_PTR=[48]\n" "${staging_label}")
+  assert_matches("${staging_results}" "SIZEOF_VOID_P=[48]\n" "${staging_label}")
+
+  # Staging must still happen for a probe that needs nothing beside it, and
+  # must not happen for one that does.
+  file(GLOB staged_sources RELATIVE "${store_root}/cmake-trycompile-sources"
+    "${store_root}/cmake-trycompile-sources/*/*")
+  set(staged_label "staged try_compile sources (${staged_sources})")
+  assert_matches("${staged_sources}" "(^|;)[0-9a-f]+/CheckIncludeFile\\.c(;|$)" "${staged_label}")
+  foreach(unexpected IN ITEMS
+      "/CMakeCCompilerABI.c"
+      "/staging_sibling.c"
+      "/staging_outside.c")
+    assert_not_contains("${staged_sources}" "${unexpected}" "${staged_label}")
   endforeach()
 elseif(TEST_MODE STREQUAL "hello_c_build")
   start_runquota("${TEST_BINARY_ROOT}" runquota_socket runquota_pid)
