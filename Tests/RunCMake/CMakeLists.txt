@@ -258,6 +258,14 @@ add_test(NAME e2e_cmake_reprobuild_trycompile_source_staging
     -DTEST_C_COMPILER=${CMAKE_C_COMPILER}
     -DTEST_REPROBUILD_REPRO=${_ReprobuildBin}
     -P ${_ReprobuildGeneratorTestDir}/e2e.cmake)
+add_test(NAME e2e_cmake_reprobuild_trycompile_compiler_output
+  COMMAND ${CMAKE_CMAKE_COMMAND}
+    -DCMAKE_COMMAND=${CMAKE_CMAKE_COMMAND}
+    -DTEST_MODE=trycompile_compiler_output
+    -DTEST_BINARY_ROOT=${_ReprobuildGeneratorTestBin}/trycompile-compiler-output
+    -DTEST_C_COMPILER=${CMAKE_C_COMPILER}
+    -DTEST_REPROBUILD_REPRO=${_ReprobuildBin}
+    -P ${_ReprobuildGeneratorTestDir}/e2e.cmake)
 add_test(NAME e2e_cmake_reprobuild_hello_c_build
   COMMAND ${CMAKE_CMAKE_COMMAND}
     -DCMAKE_COMMAND=${CMAKE_CMAKE_COMMAND}

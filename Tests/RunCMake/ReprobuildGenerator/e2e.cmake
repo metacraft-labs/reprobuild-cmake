@@ -121,6 +121,69 @@ add_executable(hello main.c)
   file(WRITE "${source_dir}/main.c" "int main(void) { return 0; }\n")
 endfunction()
 
+# A project that records what CMake learned from its try_compiles' build
+# output: the C implicit include/link directories and libraries (parsed from
+# the ABI probe's compiler `-v` output), and the OUTPUT_VARIABLE of a
+# succeeding try_compile whose source makes the compiler print a message.
+function(write_trycompile_compiler_output_project source_dir project_name)
+  file(REMOVE_RECURSE "${source_dir}")
+  file(MAKE_DIRECTORY "${source_dir}")
+  file(WRITE "${source_dir}/CMakeLists.txt"
+    "cmake_minimum_required(VERSION 3.25)\n"
+    "project(${project_name} C)\n")
+  file(APPEND "${source_dir}/CMakeLists.txt" [=[
+try_compile(OUTPUT_PROBE_OK
+  SOURCE_FROM_CONTENT output_probe.c
+    "#pragma message(\"reprobuild-trycompile-output-marker\")\nint main(void) { return 0; }\n"
+  OUTPUT_VARIABLE OUTPUT_PROBE_LOG)
+file(WRITE "${CMAKE_BINARY_DIR}/implicit-results.cmake"
+  "set(RESULT_C_COMPILER_ID [==[${CMAKE_C_COMPILER_ID}]==])\n"
+  "set(RESULT_C_SIMULATE_ID [==[${CMAKE_C_SIMULATE_ID}]==])\n"
+  "set(RESULT_IMPLICIT_INCLUDE_DIRECTORIES [==[${CMAKE_C_IMPLICIT_INCLUDE_DIRECTORIES}]==])\n"
+  "set(RESULT_IMPLICIT_LINK_DIRECTORIES [==[${CMAKE_C_IMPLICIT_LINK_DIRECTORIES}]==])\n"
+  "set(RESULT_IMPLICIT_LINK_LIBRARIES [==[${CMAKE_C_IMPLICIT_LINK_LIBRARIES}]==])\n"
+  "set(RESULT_OUTPUT_PROBE_OK [==[${OUTPUT_PROBE_OK}]==])\n"
+  "set(RESULT_OUTPUT_PROBE_LOG [==[${OUTPUT_PROBE_LOG}]==])\n")
+add_executable(hello main.c)
+]=])
+  file(WRITE "${source_dir}/main.c" "int main(void) { return 0; }\n")
+endfunction()
+
+# The directories a GNU-style C driver searches for `#include <...>`, as it
+# reports them itself under `-v`, normalised the way CMake normalises its
+# implicit include directories.
+function(compiler_reported_include_dirs compiler scratch_dir out_var)
+  file(WRITE "${scratch_dir}/empty.c" "")
+  execute_process(
+    COMMAND "${compiler}" -v -E "${scratch_dir}/empty.c"
+    WORKING_DIRECTORY "${scratch_dir}"
+    OUTPUT_QUIET
+    ERROR_VARIABLE verbose
+    RESULT_VARIABLE result)
+  if(NOT result EQUAL 0)
+    message(FATAL_ERROR "`${compiler} -v -E` failed (${result}):\n${verbose}")
+  endif()
+  string(REGEX REPLACE "\r?\n" ";" lines "${verbose}")
+  set(dirs "")
+  set(in_list FALSE)
+  foreach(line IN LISTS lines)
+    if(line MATCHES "^#include <\\.\\.\\.> search starts here:")
+      set(in_list TRUE)
+    elseif(line MATCHES "^End of search list\\.")
+      set(in_list FALSE)
+    elseif(in_list AND line MATCHES "^ (.*[^ ])")
+      set(dir "${CMAKE_MATCH_1}")
+      # macOS marks framework directories; they are not include dirs.
+      if(NOT dir MATCHES " \\(framework directory\\)$")
+        file(TO_CMAKE_PATH "${dir}" dir)
+        get_filename_component(dir "${dir}" ABSOLUTE)
+        list(APPEND dirs "${dir}")
+      endif()
+    endif()
+  endforeach()
+  set(${out_var} "${dirs}" PARENT_SCOPE)
+endfunction()
+
 function(run_configure source_dir binary_dir expect_success expected_error)
   file(REMOVE_RECURSE "${binary_dir}")
   # `REPROBUILD_REPRO` PINS THE CLI TO THE WORKSPACE BUILD, and it has to
@@ -2297,6 +2360,91 @@ elseif(TEST_MODE STREQUAL "trycompile_source_staging")
       "/staging_outside.c")
     assert_not_contains("${staged_sources}" "${unexpected}" "${staged_label}")
   endforeach()
+elseif(TEST_MODE STREQUAL "trycompile_compiler_output")
+  # CMake learns the compiler's implicit include and link directories and
+  # libraries by parsing the compiler's own `-v` output out of the ABI
+  # probe's build output, and `check_*` modules match a probe's warnings
+  # against FAIL_REGEX the same way. Under this generator that output held
+  # only the `repro build` command line, so all three came out empty where
+  # Ninja fills them. The generator now asks `repro build` for every
+  # action's output (`--action-output=all`).
+  set(output_source_dir "${TEST_BINARY_ROOT}/output-src")
+  set(output_binary_dir "${TEST_BINARY_ROOT}/output-build")
+  write_trycompile_compiler_output_project("${output_source_dir}" ReprobuildTryCompileOutput)
+  set(ENV{REPROBUILD_STORE_ROOT} "${TEST_BINARY_ROOT}/store")
+  run_configure("${output_source_dir}" "${output_binary_dir}" TRUE "")
+  unset(ENV{REPROBUILD_STORE_ROOT})
+  include("${output_binary_dir}/implicit-results.cmake")
+  set(output_label "C implicit information under the Reprobuild generator")
+  file(READ "${output_binary_dir}/CMakeFiles/CMakeConfigureLog.yaml" configure_log)
+
+  # A succeeding try_compile's OUTPUT_VARIABLE carries what the compiler
+  # printed. `#pragma message` prints on GCC, Clang and MSVC alike.
+  if(NOT RESULT_OUTPUT_PROBE_OK)
+    message(FATAL_ERROR "The output probe did not compile:\n${RESULT_OUTPUT_PROBE_LOG}")
+  endif()
+  assert_contains("${RESULT_OUTPUT_PROBE_LOG}" "reprobuild-trycompile-output-marker"
+    "OUTPUT_VARIABLE of a succeeding try_compile")
+  assert_contains("${RESULT_OUTPUT_PROBE_LOG}" "--action-output=all"
+    "the try_compile build command")
+
+  if(RESULT_C_COMPILER_ID MATCHES "^(GNU|Clang|AppleClang)$" AND
+     NOT RESULT_C_SIMULATE_ID STREQUAL "MSVC")
+    foreach(var IN ITEMS
+        RESULT_IMPLICIT_INCLUDE_DIRECTORIES
+        RESULT_IMPLICIT_LINK_DIRECTORIES
+        RESULT_IMPLICIT_LINK_LIBRARIES)
+      if("${${var}}" STREQUAL "")
+        message(FATAL_ERROR "${output_label}: ${var} is empty.\n"
+          "CMakeConfigureLog.yaml:\n${configure_log}")
+      endif()
+    endforeach()
+
+    # Every directory the compiler itself reports searching is one CMake
+    # recorded as implicit.
+    compiler_reported_include_dirs("${TEST_C_COMPILER}" "${TEST_BINARY_ROOT}" reported_dirs)
+    if(NOT reported_dirs)
+      message(FATAL_ERROR "`${TEST_C_COMPILER} -v` reported no include directories")
+    endif()
+    foreach(dir IN LISTS reported_dirs)
+      if(NOT dir IN_LIST RESULT_IMPLICIT_INCLUDE_DIRECTORIES)
+        message(FATAL_ERROR "${output_label}: the compiler searches '${dir}' "
+          "but CMAKE_C_IMPLICIT_INCLUDE_DIRECTORIES is "
+          "'${RESULT_IMPLICIT_INCLUDE_DIRECTORIES}' "
+          "(compiler reports '${reported_dirs}')")
+      endif()
+    endforeach()
+
+    # The compiler's own runtime library directory is an implicit link
+    # directory, and each recorded one exists.
+    if(RESULT_C_COMPILER_ID STREQUAL "GNU")
+      execute_process(
+        COMMAND "${TEST_C_COMPILER}" -print-libgcc-file-name
+        OUTPUT_VARIABLE libgcc
+        OUTPUT_STRIP_TRAILING_WHITESPACE
+        RESULT_VARIABLE libgcc_result)
+      if(libgcc_result EQUAL 0 AND EXISTS "${libgcc}")
+        get_filename_component(libgcc_dir "${libgcc}" DIRECTORY)
+        file(TO_CMAKE_PATH "${libgcc_dir}" libgcc_dir)
+        get_filename_component(libgcc_dir "${libgcc_dir}" ABSOLUTE)
+        if(NOT libgcc_dir IN_LIST RESULT_IMPLICIT_LINK_DIRECTORIES)
+          message(FATAL_ERROR "${output_label}: libgcc's directory '${libgcc_dir}' "
+            "is not in CMAKE_C_IMPLICIT_LINK_DIRECTORIES "
+            "'${RESULT_IMPLICIT_LINK_DIRECTORIES}'")
+        endif()
+      endif()
+      if(NOT "gcc" IN_LIST RESULT_IMPLICIT_LINK_LIBRARIES)
+        message(FATAL_ERROR "${output_label}: CMAKE_C_IMPLICIT_LINK_LIBRARIES "
+          "'${RESULT_IMPLICIT_LINK_LIBRARIES}' does not name gcc")
+      endif()
+    endif()
+    foreach(dir IN LISTS RESULT_IMPLICIT_LINK_DIRECTORIES)
+      if(NOT IS_DIRECTORY "${dir}")
+        message(FATAL_ERROR "${output_label}: implicit link directory '${dir}' "
+          "does not exist (all: '${RESULT_IMPLICIT_LINK_DIRECTORIES}')")
+      endif()
+    endforeach()
+  endif()
 elseif(TEST_MODE STREQUAL "hello_c_build")
   start_runquota("${TEST_BINARY_ROOT}" runquota_socket runquota_pid)
   run_build("${binary_dir}" "" "${runquota_socket}" default_output)

@@ -1755,6 +1755,33 @@ bool ReprobuildCliSupportsProviderPriming(std::string const& repro)
   return ok && ret == 0 &&
     output.find("\"provider-cache-priming\"") != std::string::npos;
 }
+
+// Whether `repro build` takes `--action-output=all`, which prints every
+// action's captured stdout and stderr, succeeded actions included. A
+// try_compile needs it: CMake reads the compiler's implicit include and link
+// directories out of the compiler's `-v` output in the build tool's output,
+// and without the flag a successful `repro build` prints none of it. A `repro`
+// that predates the flag would reject it and fail every try_compile, so it is
+// passed only when `repro capabilities` lists `build-action-output`. Asked
+// once per CLI path: every try_compile of a configure runs in this process.
+bool ReprobuildCliSupportsActionOutput(std::string const& repro)
+{
+  static std::map<std::string, bool> answers;
+  auto known = answers.find(repro);
+  if (known != answers.end()) {
+    return known->second;
+  }
+  std::vector<std::string> command = { repro, "capabilities",
+                                       "--format=json" };
+  std::string output;
+  int ret = 0;
+  bool const ok = cmSystemTools::RunSingleCommand(
+    command, &output, nullptr, &ret, nullptr, cmSystemTools::OUTPUT_NONE);
+  bool const supported = ok && ret == 0 &&
+    output.find("\"build-action-output\"") != std::string::npos;
+  answers.emplace(repro, supported);
+  return supported;
+}
 }
 
 cmGlobalReprobuildGenerator::cmGlobalReprobuildGenerator(cmake* cm)
@@ -5947,6 +5974,12 @@ cmGlobalReprobuildGenerator::GenerateBuildCommand(
       makeCommand.Add("--measure=none");
       makeCommand.Add("--no-write-report");
       makeCommand.Add("--log=quiet");
+      // The compiler's own output, which CMake parses for implicit
+      // directories and check_* FAIL_REGEX matching; see
+      // ReprobuildCliSupportsActionOutput.
+      if (ReprobuildCliSupportsActionOutput(repro)) {
+        makeCommand.Add("--action-output=all");
+      }
     } else {
       makeCommand.Add("--log=actions");
     }
