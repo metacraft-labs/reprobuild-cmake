@@ -25,16 +25,16 @@
 #include "cmCustomCommandGenerator.h"
 #include "cmDocumentationEntry.h"
 #include "cmFileSetMetadata.h"
-#include "cmGlobalGeneratorFactory.h"
 #include "cmGeneratorExpression.h"
 #include "cmGeneratorFileSet.h"
 #include "cmGeneratorFileSets.h"
 #include "cmGeneratorTarget.h"
-#include "cmLinkLineDeviceComputer.h"
+#include "cmGlobalGeneratorFactory.h"
 #include "cmLinkLineComputer.h"
+#include "cmLinkLineDeviceComputer.h"
+#include "cmList.h"
 #include "cmLocalGenerator.h"
 #include "cmLocalReprobuildGenerator.h"
-#include "cmList.h"
 #include "cmMakefile.h"
 #include "cmPolicies.h"
 #include "cmSourceFile.h"
@@ -181,7 +181,7 @@ std::string ReprobuildCanonicaliseTryCompileTokens(std::string const& input)
 //      - Linux:   $XDG_CACHE_HOME/repro, else $HOME/.cache/repro
 // Returns empty string if none can be resolved (e.g. no HOME) — callers
 // must treat that as "no shared store available" and fall back to per-project
-// paths rather than synthesising one.
+// paths rather than synthesizing one.
 std::string ReprobuildSharedStoreRoot()
 {
   if (cm::optional<std::string> v =
@@ -197,8 +197,7 @@ std::string ReprobuildSharedStoreRoot()
     }
   }
 #ifdef _WIN32
-  if (cm::optional<std::string> v =
-        cmSystemTools::GetEnvVar("LOCALAPPDATA")) {
+  if (cm::optional<std::string> v = cmSystemTools::GetEnvVar("LOCALAPPDATA")) {
     if (!v->empty()) {
       return cmStrCat(*v, "\\repro");
     }
@@ -293,15 +292,14 @@ bool ReprobuildTryCompileSourceIsRelocatable(std::string const& sourcePath,
 //
 // Failure modes (store root missing, source unreadable, copy fails) silently
 // fall back to the original per-project path — the canonical-source step is
-// a pure optimisation, never load-bearing.
+// a pure optimization, never load-bearing.
 //
 // Per Cache-Scope.milestones §"Cross-project reuse: canonical source path"
 // and Provider-Compile-Tiering.md §"Cache Scope".
 std::string ReprobuildCanonicaliseTryCompileSourcePath(
   std::string const& originalPath)
 {
-  if (originalPath.empty() ||
-      !cmSystemTools::FileExists(originalPath, true)) {
+  if (originalPath.empty() || !cmSystemTools::FileExists(originalPath, true)) {
     return originalPath;
   }
   std::string const storeRoot = ReprobuildSharedStoreRoot();
@@ -317,8 +315,7 @@ std::string ReprobuildCanonicaliseTryCompileSourcePath(
   // and keeps the resulting path short — relevant on Windows where the
   // compiler still has to spell the path on its command line.
   std::string const shortDigest = digest.substr(0, 32);
-  std::string const baseName =
-    cmSystemTools::GetFilenameName(originalPath);
+  std::string const baseName = cmSystemTools::GetFilenameName(originalPath);
   std::string const canonicalDir =
     cmStrCat(storeRoot, "/cmake-trycompile-sources/", shortDigest);
   std::string const canonicalPath = cmStrCat(canonicalDir, "/", baseName);
@@ -344,7 +341,7 @@ std::string ReprobuildCanonicaliseTryCompileSourcePath(
 //
 // Format (little-endian, length-prefixed):
 //   magic        "RBCT"
-//   version      u16  (= 4; see AppendU16Le below)
+//   version      u16  (= 5; see AppendU16Le below)
 //   payloadLen   u32
 //   payload {
 //     usedTools  : string-seq
@@ -357,8 +354,8 @@ std::string ReprobuildCanonicaliseTryCompileSourcePath(
 //   }
 //
 // The version is a HARD GATE, not a hint: the decoder rejects anything
-// above ``TryCompileMetadataVersion`` outright (currently 4, accepting
-// 1-4). A `repro` older than the envelope this generator writes fails
+// above ``TryCompileMetadataVersion`` outright (currently 5, accepting
+// 1-5). A `repro` older than the envelope this generator writes fails
 // the configure with "unsupported trycompile.rbsz version", so the two
 // sides must be bumped together.
 //
@@ -385,8 +382,7 @@ void AppendString(std::string& out, std::string const& s)
   out.append(s);
 }
 
-void AppendStringSeq(std::string& out,
-                     std::vector<std::string> const& items)
+void AppendStringSeq(std::string& out, std::vector<std::string> const& items)
 {
   AppendU32Le(out, static_cast<std::uint32_t>(items.size()));
   for (auto const& s : items) {
@@ -405,7 +401,7 @@ std::string ReprobuildSafeId(std::string value)
 {
   // Canonicalise CMake TryCompile random tokens BEFORE the [^A-Za-z0-9_.-]
   // replacement. The canonicalisation walks the literal "cmTC_<hex>"
-  // substrings; doing it before character normalisation keeps the match
+  // substrings; doing it before character normalization keeps the match
   // logic free of post-replacement quirks. Non-TryCompile inputs are
   // unchanged because they do not contain the sentinel + hex suffix
   // pattern.
@@ -436,8 +432,9 @@ std::string ReprobuildCommandStatsId(std::string const& id)
   }
   cmCryptoHash hash(cmCryptoHash::AlgoSHA256);
   std::string const suffix = hash.HashString(canonical).substr(0, 16);
-  return cmStrCat(canonical.substr(0, maxCommandStatsIdBytes - suffix.size() - 1),
-                  "-", suffix);
+  return cmStrCat(
+    canonical.substr(0, maxCommandStatsIdBytes - suffix.size() - 1), "-",
+    suffix);
 }
 
 std::string ReprobuildRspQuote(std::string const& value)
@@ -481,8 +478,7 @@ bool ReprobuildWriteResponseFile(std::string const& path,
   return true;
 }
 
-std::string ReprobuildNimIdent(std::string const& prefix,
-                               std::size_t index,
+std::string ReprobuildNimIdent(std::string const& prefix, std::size_t index,
                                std::string const& value)
 {
   std::string out = cmStrCat(prefix, index);
@@ -613,7 +609,7 @@ std::string ReprobuildCompilerVar(std::string const& lang)
 //   REPROBUILD_CMAKE_ACTION_PATH        replace the derived value outright
 //   REPROBUILD_CMAKE_ACTION_PATH_EXTRA  append directories to it
 //   REPROBUILD_CMAKE_INHERIT_PATH       declare nothing (pre-change
-//                                       behaviour: actions inherit and say
+//                                       behavior: actions inherit and say
 //                                       so via passthrough)
 //
 // Opting out is VISIBLE rather than silent: it puts the project back in
@@ -675,12 +671,22 @@ void ReprobuildAddProgramDir(std::vector<std::string>& dirs, cmMakefile* mf,
 // CMake itself resolved, so the resulting `PATH` is a function of the
 // configured toolchain rather than of the shell that ran `cmake`.
 char const* const ReprobuildBinUtilVars[] = {
-  "CMAKE_LINKER",      "CMAKE_AR",        "CMAKE_RANLIB",
-  "CMAKE_STRIP",       "CMAKE_NM",        "CMAKE_OBJCOPY",
-  "CMAKE_OBJDUMP",     "CMAKE_ADDR2LINE", "CMAKE_READELF",
-  "CMAKE_DLLTOOL",     "CMAKE_MT",        "CMAKE_RC_COMPILER",
-  "CMAKE_INSTALL_NAME_TOOL",              "CMAKE_TAPI",
-  "CMAKE_LINKER_LINK", "CMAKE_LINKER_LLD",
+  "CMAKE_LINKER",
+  "CMAKE_AR",
+  "CMAKE_RANLIB",
+  "CMAKE_STRIP",
+  "CMAKE_NM",
+  "CMAKE_OBJCOPY",
+  "CMAKE_OBJDUMP",
+  "CMAKE_ADDR2LINE",
+  "CMAKE_READELF",
+  "CMAKE_DLLTOOL",
+  "CMAKE_MT",
+  "CMAKE_RC_COMPILER",
+  "CMAKE_INSTALL_NAME_TOOL",
+  "CMAKE_TAPI",
+  "CMAKE_LINKER_LINK",
+  "CMAKE_LINKER_LLD",
 };
 
 // The whole declared `PATH` for this project's actions, or the empty
@@ -694,8 +700,8 @@ std::string ReprobuildDeclaredActionPath(
   }
 
   std::vector<std::string> dirs;
-  std::string const explicitPath = mf->GetSafeDefinition(
-    ReprobuildActionPathVar);
+  std::string const explicitPath =
+    mf->GetSafeDefinition(ReprobuildActionPathVar);
   if (!explicitPath.empty()) {
     // Verbatim: a project that spells the search path out owns it, and
     // silently appending to it would make the declaration a half-truth.
@@ -723,8 +729,8 @@ std::string ReprobuildDeclaredActionPath(
     }
   }
 
-  std::string const extra = mf->GetSafeDefinition(
-    ReprobuildActionPathExtraVar);
+  std::string const extra =
+    mf->GetSafeDefinition(ReprobuildActionPathExtraVar);
   if (!extra.empty()) {
     // A CMake list (`;`-separated) so `set(... "a;b")` and
     // `list(APPEND ...)` both work; on Windows that is also the native
@@ -869,8 +875,7 @@ bool ReprobuildWriteWrapper(std::string const& path,
     return false;
   }
   wrapper << "#!/bin/sh\n";
-  wrapper << "exec " << ReprobuildShellSingleQuote(executable)
-          << " \"$@\"\n";
+  wrapper << "exec " << ReprobuildShellSingleQuote(executable) << " \"$@\"\n";
   wrapper.close();
   return ReprobuildFinalizeWrapper(
     path, ReprobuildNativePassthroughBody({}, executable));
@@ -918,9 +923,9 @@ bool ReprobuildWriteToolProfile(std::string const& wrapperPath,
   if (!profile) {
     return false;
   }
-  std::string const executablePath =
-    executable.empty() ? wrapperPath
-                       : cmSystemTools::ToNormalizedPathOnDisk(executable);
+  std::string const executablePath = executable.empty()
+    ? wrapperPath
+    : cmSystemTools::ToNormalizedPathOnDisk(executable);
   std::string const storePath = ReprobuildNixStorePath(executablePath);
   bool const portable = portabilityMode == "nix" && !storePath.empty();
   std::string const installMethod = portable ? "nix" : "path";
@@ -937,7 +942,8 @@ bool ReprobuildWriteToolProfile(std::string const& wrapperPath,
           << "\n";
   profile << "declaredExecutablePath=" << declared << "\n";
   profile << "selectedStorePath=" << (portable ? storePath : "") << "\n";
-  profile << "lockIdentity=" << (portable ? storePath : executablePath) << "\n";
+  profile << "lockIdentity=" << (portable ? storePath : executablePath)
+          << "\n";
   profile << "realizationBoundary=" << (portable ? storePath : "") << "\n";
   profile << "pathSearchList=" << binDir << "\n";
   profile << "resolvedExecutablePath="
@@ -1000,8 +1006,7 @@ bool ReprobuildCompilerUsesMakeDepfile(cmMakefile const* mf,
   }
   std::string const id =
     mf->GetSafeDefinition(cmStrCat("CMAKE_", lang, "_COMPILER_ID"));
-  return id == "GNU" || id == "Clang" || id == "AppleClang" ||
-    id == "NVIDIA";
+  return id == "GNU" || id == "Clang" || id == "AppleClang" || id == "NVIDIA";
 }
 
 bool ReprobuildCompilerIsMsvc(cmMakefile const* mf, std::string const& lang)
@@ -1147,7 +1152,8 @@ std::string ReprobuildSwiftOutputMapPath(std::string const& binaryDir,
                                          std::string const& config,
                                          bool multiConfig)
 {
-  std::string const suffix = config.empty() ? std::string() : cmStrCat("/", config);
+  std::string const suffix =
+    config.empty() ? std::string() : cmStrCat("/", config);
   return ReprobuildConfigFullPath(
     binaryDir,
     cmStrCat(gt->GetSupportDirectory(), suffix, "/output-file-map.json"),
@@ -1161,7 +1167,8 @@ std::string ReprobuildSwiftDepsPath(std::string const& binaryDir,
 {
   if (source) {
     if (cmValue value = source->GetProperty("Swift_DEPENDENCIES_FILE")) {
-      return ReprobuildOutputPath(binaryDir, gt->Makefile->GetCurrentBinaryDirectory(), *value);
+      return ReprobuildOutputPath(
+        binaryDir, gt->Makefile->GetCurrentBinaryDirectory(), *value);
     }
   }
   return cmStrCat(objectRel, ".swiftdeps");
@@ -1174,15 +1181,15 @@ std::string ReprobuildSwiftDiagnosticsPath(std::string const& binaryDir,
 {
   if (source) {
     if (cmValue value = source->GetProperty("Swift_DIAGNOSTICS_FILE")) {
-      return ReprobuildOutputPath(binaryDir, gt->Makefile->GetCurrentBinaryDirectory(), *value);
+      return ReprobuildOutputPath(
+        binaryDir, gt->Makefile->GetCurrentBinaryDirectory(), *value);
     }
   }
   return cmStrCat(objectRel, ".dia");
 }
 
 bool ReprobuildWriteSwiftOutputMap(
-  std::string const& path, std::string const& binaryDir,
-  cmGeneratorTarget* gt,
+  std::string const& path, std::string const& binaryDir, cmGeneratorTarget* gt,
   std::vector<cmSourceFile const*> const& swiftSources,
   std::vector<std::string> const& objectRels, std::string const& config)
 {
@@ -1193,19 +1200,20 @@ bool ReprobuildWriteSwiftOutputMap(
   }
   std::string targetDepsPath;
   if (cmValue value = gt->GetProperty("Swift_DEPENDENCIES_FILE")) {
-    targetDepsPath =
-      ReprobuildOutputPath(binaryDir, gt->Makefile->GetCurrentBinaryDirectory(), *value);
+    targetDepsPath = ReprobuildOutputPath(
+      binaryDir, gt->Makefile->GetCurrentBinaryDirectory(), *value);
   } else {
-    std::string const suffix = config.empty() ? std::string() : cmStrCat("/", config);
-    targetDepsPath = ReprobuildRelativeTo(
-      binaryDir,
-      cmStrCat(gt->GetSupportDirectory(), suffix, "/", gt->GetName(),
-               ".swiftdeps"));
+    std::string const suffix =
+      config.empty() ? std::string() : cmStrCat("/", config);
+    targetDepsPath =
+      ReprobuildRelativeTo(binaryDir,
+                           cmStrCat(gt->GetSupportDirectory(), suffix, "/",
+                                    gt->GetName(), ".swiftdeps"));
   }
   out << "{\n"
       << "  \"\": {\n"
-      << "    \"swift-dependencies\": "
-      << ReprobuildJsonEscape(targetDepsPath) << "\n"
+      << "    \"swift-dependencies\": " << ReprobuildJsonEscape(targetDepsPath)
+      << "\n"
       << "  }";
   for (std::size_t i = 0; i < swiftSources.size(); ++i) {
     std::string const& objectRel = objectRels[i];
@@ -1213,8 +1221,7 @@ bool ReprobuildWriteSwiftOutputMap(
     out << ",\n  " << ReprobuildJsonEscape(swiftSources[i]->GetFullPath())
         << ": {\n"
         << "    \"object\": " << ReprobuildJsonEscape(objectRel) << ",\n"
-        << "    \"dependencies\": " << ReprobuildJsonEscape(depRel)
-        << ",\n"
+        << "    \"dependencies\": " << ReprobuildJsonEscape(depRel) << ",\n"
         << "    \"swift-dependencies\": "
         << ReprobuildJsonEscape(ReprobuildSwiftDepsPath(
              binaryDir, gt, swiftSources[i], objectRel))
@@ -1229,9 +1236,8 @@ bool ReprobuildWriteSwiftOutputMap(
   return true;
 }
 
-std::vector<std::string> ReprobuildEvaluateCleanFiles(cmLocalGenerator* lg,
-                                                      std::string const& config,
-                                                      cmValue value)
+std::vector<std::string> ReprobuildEvaluateCleanFiles(
+  cmLocalGenerator* lg, std::string const& config, cmValue value)
 {
   if (!value) {
     return {};
@@ -1256,9 +1262,9 @@ std::string ReprobuildCustomDepfilePath(std::string const& binaryDir,
   if (depfile.empty()) {
     return std::string();
   }
-  std::string const base =
-    ccg.GetWorkingDirectory().empty() ? lg->GetCurrentBinaryDirectory()
-                                      : ccg.GetWorkingDirectory();
+  std::string const base = ccg.GetWorkingDirectory().empty()
+    ? lg->GetCurrentBinaryDirectory()
+    : ccg.GetWorkingDirectory();
   return ReprobuildOutputPath(binaryDir, base, depfile);
 }
 
@@ -1269,8 +1275,8 @@ std::vector<std::string> ReprobuildCustomCommandLines(
   std::vector<std::string> commandLines;
   if (echoComment) {
     if (cm::optional<std::string> comment = ccg.GetComment()) {
-      commandLines.push_back(cmStrCat("echo ",
-                                      ReprobuildShellSingleQuote(*comment)));
+      commandLines.push_back(
+        cmStrCat("echo ", ReprobuildShellSingleQuote(*comment)));
     }
   }
   for (unsigned int i = 0; i < ccg.GetNumberOfCommands(); ++i) {
@@ -1387,8 +1393,8 @@ bool ReprobuildWriteTargetDependInfo(
       << ReprobuildJsonEscape(mf->GetCurrentBinaryDirectory()) << ",\n"
       << "  \"dir-cur-src\": "
       << ReprobuildJsonEscape(mf->GetCurrentSourceDirectory()) << ",\n"
-      << "  \"dir-top-bld\": " << ReprobuildJsonEscape(mf->GetHomeOutputDirectory())
-      << ",\n"
+      << "  \"dir-top-bld\": "
+      << ReprobuildJsonEscape(mf->GetHomeOutputDirectory()) << ",\n"
       << "  \"dir-top-src\": " << ReprobuildJsonEscape(mf->GetHomeDirectory())
       << ",\n"
       << "  \"include-dirs\": [";
@@ -1421,8 +1427,8 @@ bool ReprobuildWriteTargetDependInfo(
           << "      \"name\": "
           << ReprobuildJsonEscape(fs ? fs->GetName() : "modules") << ",\n"
           << "      \"relative-directory\": \"\",\n"
-          << "      \"source\": " << ReprobuildJsonEscape(source->GetFullPath())
-          << ",\n"
+          << "      \"source\": "
+          << ReprobuildJsonEscape(source->GetFullPath()) << ",\n"
           << "      \"type\": \"CXX_MODULES\",\n"
           << "      \"visibility\": \"PRIVATE\"\n"
           << "    }";
@@ -1445,6 +1451,7 @@ struct ReprobuildAction
   std::vector<std::string> Args;
   std::vector<std::string> Inputs;
   std::vector<std::string> Outputs;
+  std::vector<std::string> OptionalOutputs;
   std::vector<std::string> Deps;
   std::string Depfile;
   std::string DynamicDepsFile;
@@ -1563,8 +1570,7 @@ std::string ReprobuildConfigPath(std::string const& rel,
     if (cmHasPrefix(rel.substr(dirPos), cmStrCat(config, "/"))) {
       return rel;
     }
-    return cmStrCat(rel.substr(0, dirPos), config, "/",
-                    rel.substr(dirPos));
+    return cmStrCat(rel.substr(0, dirPos), config, "/", rel.substr(dirPos));
   }
   return cmStrCat(config, "/", rel);
 }
@@ -1698,8 +1704,8 @@ bool ReprobuildLooksLikeMakeProgram(std::string const& path)
     cmSystemTools::LowerCase(cmSystemTools::GetFilenameName(path));
   return name == "make" || name == "gmake" || name == "nmake" ||
     name == "nmake.exe" || name == "mingw32-make" ||
-    name == "mingw32-make.exe" || name == "wmake" ||
-    name == "wmake.exe" || name == "jom" || name == "jom.exe";
+    name == "mingw32-make.exe" || name == "wmake" || name == "wmake.exe" ||
+    name == "jom" || name == "jom.exe";
 }
 
 std::string ReprobuildCliFromEnv()
@@ -1854,14 +1860,15 @@ void cmGlobalReprobuildGenerator::EnableLanguage(
     // project explicitly adds them to a target; until that path needs
     // metadata support, leaving RC out of the source-language whitelist is
     // fine.
-    if (lang != "NONE" && lang != "C" && lang != "CXX" &&
-        lang != "Fortran" && lang != "CUDA" && lang != "ISPC" &&
-        lang != "Swift" && lang != "ASM" && lang != "RC") {
+    if (lang != "NONE" && lang != "C" && lang != "CXX" && lang != "Fortran" &&
+        lang != "CUDA" && lang != "ISPC" && lang != "Swift" && lang != "ASM" &&
+        lang != "RC") {
       mf->IssueMessage(
         MessageType::FATAL_ERROR,
-        cmStrCat("The Reprobuild generator supports only the C, CXX, "
-                 "Fortran, CUDA, ISPC, Swift, ASM, and RC languages; language '",
-                 lang, "' is not supported."));
+        cmStrCat(
+          "The Reprobuild generator supports only the C, CXX, "
+          "Fortran, CUDA, ISPC, Swift, ASM, and RC languages; language '",
+          lang, "' is not supported."));
       cmSystemTools::SetFatalErrorOccurred();
       return;
     }
@@ -1984,9 +1991,8 @@ bool cmGlobalReprobuildGenerator::InspectConfigTypeVariables()
     return false;
   }
 
-  cmList crossConfigsList{
-    this->Makefiles.front()->GetSafeDefinition("CMAKE_CROSS_CONFIGS")
-  };
+  cmList crossConfigsList{ this->Makefiles.front()->GetSafeDefinition(
+    "CMAKE_CROSS_CONFIGS") };
   std::set<std::string> crossConfigs;
   if (!ReprobuildListSubsetWithAll(configs, configs, crossConfigsList,
                                    crossConfigs)) {
@@ -2051,7 +2057,8 @@ void cmGlobalReprobuildGenerator::Generate()
   // GenerateBuildCommand's BuildTryCompile::Yes branch which delegates to a
   // native make program), so the inner project's $<CONFIG> resolves to an
   // empty string and the per-config location file is written as
-  // "<target>__loc" (two underscores) instead of "<target>_<UPPER_CONFIG>_loc".
+  // "<target>__loc" (two underscores) instead of
+  // "<target>_<UPPER_CONFIG>_loc".
   //
   // The outer cmCoreTryCompile::FindOutputFile then looks for
   // "<target>_<UPPER_CONFIG>_loc" (with the empty-config fallback resolving
@@ -2126,8 +2133,7 @@ void cmGlobalReprobuildGenerator::WriteTryCompilePerConfigLocFiles()
       // genex resolving to empty in the single-config inner project, this is
       // "<binaryDir>/<target>__loc". Skip targets that have no source _loc
       // (e.g. INTERFACE / UTILITY targets that try_compile never tags).
-      std::string const sourcePath =
-        cmStrCat(binaryDir, '/', name, "__loc");
+      std::string const sourcePath = cmStrCat(binaryDir, '/', name, "__loc");
       if (!cmSystemTools::FileExists(sourcePath, true)) {
         continue;
       }
@@ -2267,6 +2273,7 @@ static void ReprobuildAppendTryCompileAction(std::string& out,
   AppendString(out, action.DynamicDepsFile);
   AppendBool(out, action.Cacheable);
   AppendString(out, ReprobuildCommandStatsId(action.Id));
+  AppendStringSeq(out, action.OptionalOutputs);
 }
 
 // Describes one build target (or aggregate) in the v2/v3 metadata envelope.
@@ -2296,12 +2303,12 @@ struct ReprobuildTryCompileCrossConfigDescriptor
 // ``repro-cmake-trycompile-provider`` binary, skipping the per-project
 // provider compile entirely. Returns true on success; on failure the
 // generator continues with just ``reprobuild.nim`` (the slow path) —
-// emission is a pure optimisation, not load-bearing for correctness.
+// emission is a pure optimization, not load-bearing for correctness.
 //
 // v1 envelopes (TryCompile single-target form) are still written for
 // stereotyped try_compile() probes. v2 envelopes carry the main project's
 // multi-target shape — including aggregates and the default target — so
-// the direct provider can synthesise the full build graph without
+// the direct provider can synthesize the full build graph without
 // compiling per-project reprobuild.nim. v3 extends v2 with cross-config
 // descriptors so multi-config CMake builds (CMAKE_CROSS_CONFIGS,
 // CMAKE_DEFAULT_CONFIGS) can also route through the direct provider.
@@ -2314,12 +2321,14 @@ struct ReprobuildTryCompileCrossConfigDescriptor
 // of this project runs with this search path", and a per-action field is
 // a field some future action-construction site can forget to set.
 //
+// v5 appends each action's conditional output candidates after commandStatsId.
+// Older readers must not silently turn those paths into unrecorded byproducts.
+//
 // A reader of version N MUST reject version N+1 (the cross-config target
 // shape, and now the env, would otherwise be invisible and the slow path
 // would silently disappear); the Nim decoder enforces that.
 static bool ReprobuildWriteTryCompileMetadata(
-  std::string const& path,
-  std::vector<std::string> const& usedTools,
+  std::string const& path, std::vector<std::string> const& usedTools,
   std::vector<ReprobuildPool> const& pools,
   std::vector<ReprobuildAction const*> const& actions,
   std::vector<ReprobuildTryCompileTargetDescriptor> const& targets,
@@ -2353,8 +2362,7 @@ static bool ReprobuildWriteTryCompileMetadata(
   // v3 trailer: cross-config descriptors. Mirrors the
   // ``encodeTryCompileMetadata`` Nim encoder field-for-field.
   AppendStringSeq(payload, crossConfigs);
-  AppendU32Le(payload,
-              static_cast<std::uint32_t>(crossConfigTargets.size()));
+  AppendU32Le(payload, static_cast<std::uint32_t>(crossConfigTargets.size()));
   for (auto const& crossTarget : crossConfigTargets) {
     AppendString(payload, crossTarget.Name);
     AppendString(payload, crossTarget.ConfigName);
@@ -2366,7 +2374,7 @@ static bool ReprobuildWriteTryCompileMetadata(
   AppendStringSeq(payload, actionEnv);
 
   std::string envelope = "RBCT";
-  AppendU16Le(envelope, 4);
+  AppendU16Le(envelope, 5);
   AppendU32Le(envelope, static_cast<std::uint32_t>(payload.size()));
   envelope.append(payload);
 
@@ -2377,14 +2385,14 @@ static bool ReprobuildWriteTryCompileMetadata(
   if (!out) {
     return false;
   }
-  out.write(envelope.data(),
-            static_cast<std::streamsize>(envelope.size()));
+  out.write(envelope.data(), static_cast<std::streamsize>(envelope.size()));
   return out.good();
 }
 
 void cmGlobalReprobuildGenerator::WriteProviderMetadata()
 {
-  std::string const binaryDir = this->GetCMakeInstance()->GetHomeOutputDirectory();
+  std::string const binaryDir =
+    this->GetCMakeInstance()->GetHomeOutputDirectory();
   std::string const providerDir =
     cmStrCat(binaryDir, "/CMakeFiles/reprobuild");
   if (!cmSystemTools::MakeDirectory(providerDir)) {
@@ -2398,8 +2406,7 @@ void cmGlobalReprobuildGenerator::WriteProviderMetadata()
   if (!cmSystemTools::MakeDirectory(wrapperDir)) {
     this->GetCMakeInstance()->IssueMessage(
       MessageType::FATAL_ERROR,
-      cmStrCat("Could not create Reprobuild wrapper directory: ",
-               wrapperDir));
+      cmStrCat("Could not create Reprobuild wrapper directory: ", wrapperDir));
     return;
   }
   if (!cmSystemTools::MakeDirectory(cmStrCat(providerDir, "/deps"))) {
@@ -2429,8 +2436,7 @@ void cmGlobalReprobuildGenerator::WriteProviderMetadata()
   // through their ``Inputs`` (the literal artifact path), which the
   // engine resolves to whichever action actually claims the output.
   std::set<std::string> emittedCustomOutputs;
-  std::string const toolPortabilityMode =
-    this->LocalGenerators.empty()
+  std::string const toolPortabilityMode = this->LocalGenerators.empty()
     ? std::string()
     : this->LocalGenerators.front()->GetMakefile()->GetSafeDefinition(
         "REPROBUILD_CMAKE_TOOL_PORTABILITY");
@@ -2461,24 +2467,24 @@ void cmGlobalReprobuildGenerator::WriteProviderMetadata()
   }
   std::set<std::string> nativeCommandConfigTargets;
   if (multiConfig && !this->CrossConfigs.empty()) {
-    auto recordCommandConfigUtilities =
-      [&](cmLocalGenerator* lg, cmCustomCommand const& cc) {
-        for (std::string const& config : configs) {
-          cmCustomCommandGenerator ccg(cc, config, lg);
-          for (auto const& utility : ccg.GetUtilities()) {
-            if (!utility.Value.second) {
-              continue;
-            }
-            cmGeneratorTarget* utilityTarget =
-              lg->FindGeneratorTargetToUse(utility.Value.first);
-            if (utilityTarget &&
-                utilityTarget->GetType() == cmStateEnums::EXECUTABLE &&
-                !utilityTarget->IsImported()) {
-              nativeCommandConfigTargets.insert(utilityTarget->GetName());
-            }
+    auto recordCommandConfigUtilities = [&](cmLocalGenerator* lg,
+                                            cmCustomCommand const& cc) {
+      for (std::string const& config : configs) {
+        cmCustomCommandGenerator ccg(cc, config, lg);
+        for (auto const& utility : ccg.GetUtilities()) {
+          if (!utility.Value.second) {
+            continue;
+          }
+          cmGeneratorTarget* utilityTarget =
+            lg->FindGeneratorTargetToUse(utility.Value.first);
+          if (utilityTarget &&
+              utilityTarget->GetType() == cmStateEnums::EXECUTABLE &&
+              !utilityTarget->IsImported()) {
+            nativeCommandConfigTargets.insert(utilityTarget->GetName());
           }
         }
-      };
+      }
+    };
     for (auto const& lg : this->LocalGenerators) {
       for (auto const& gtPtr : lg->GetGeneratorTargets()) {
         cmGeneratorTarget* gt = gtPtr.get();
@@ -2517,8 +2523,8 @@ void cmGlobalReprobuildGenerator::WriteProviderMetadata()
           continue;
         }
         if (seenPairs.insert({ outputConfig, commandConfig }).second) {
-          configPairs.push_back(ReprobuildConfigPair{
-            outputConfig, commandConfig, true });
+          configPairs.push_back(
+            ReprobuildConfigPair{ outputConfig, commandConfig, true });
         }
       }
     }
@@ -2552,12 +2558,11 @@ void cmGlobalReprobuildGenerator::WriteProviderMetadata()
       if (end == entry.c_str() + eq + 1 || *end != '\0' || capacity == 0) {
         this->GetCMakeInstance()->IssueMessage(
           MessageType::FATAL_ERROR,
-          cmStrCat("Invalid Reprobuild JOB_POOLS capacity in '", entry,
-                   "'."));
+          cmStrCat("Invalid Reprobuild JOB_POOLS capacity in '", entry, "'."));
         return;
       }
-      pools.push_back(ReprobuildPool{
-        entry.substr(0, eq), static_cast<unsigned int>(capacity) });
+      pools.push_back(ReprobuildPool{ entry.substr(0, eq),
+                                      static_cast<unsigned int>(capacity) });
     }
   }
 
@@ -2601,89 +2606,179 @@ void cmGlobalReprobuildGenerator::WriteProviderMetadata()
           }
         };
       for (auto const& gtPtr : lg->GetGeneratorTargets()) {
-      cmGeneratorTarget* gt = gtPtr.get();
-      auto const type = gt->GetType();
-      if (type == cmStateEnums::INTERFACE_LIBRARY ||
-          type == cmStateEnums::GLOBAL_TARGET || type == cmStateEnums::UNKNOWN_LIBRARY) {
-        continue;
-      }
-      bool const isNativeCommandConfigTarget =
-        nativeCommandConfigTargets.count(gt->GetName()) > 0;
-      if (multiConfig && !this->CrossConfigs.empty()) {
-        if (configPair.IsCrossConfig && isNativeCommandConfigTarget) {
+        cmGeneratorTarget* gt = gtPtr.get();
+        auto const type = gt->GetType();
+        if (type == cmStateEnums::INTERFACE_LIBRARY ||
+            type == cmStateEnums::GLOBAL_TARGET ||
+            type == cmStateEnums::UNKNOWN_LIBRARY) {
           continue;
         }
-      }
-      if (type == cmStateEnums::UTILITY) {
-        std::vector<cmCustomCommand> utilityCommands =
-          gt->GetPreBuildCommands();
-        cm::append(utilityCommands, gt->GetPostBuildCommands());
-        std::vector<std::string> commandLines;
-        bool usesTerminal = false;
-        std::string jobPool;
-        std::vector<std::string> utilityInputs;
-        std::vector<std::string> utilityOutputs;
-        std::string utilityDepfile;
-        auto appendCustomCommand = [&](cmCustomCommand const& cc) {
-          cmCustomCommandGenerator ccg(cc, commandConfig, lg.get(), false,
-                                       config);
-          if (utilityDepfile.empty()) {
-            utilityDepfile = ReprobuildCustomDepfilePath(binaryDir, lg.get(),
-                                                         ccg);
+        bool const isNativeCommandConfigTarget =
+          nativeCommandConfigTargets.count(gt->GetName()) > 0;
+        if (multiConfig && !this->CrossConfigs.empty()) {
+          if (configPair.IsCrossConfig && isNativeCommandConfigTarget) {
+            continue;
           }
-          // M27: custom-command OUTPUT/BYPRODUCTS/DEPENDS are NOT
-          // config-prefixed. The user-controlled COMMAND argv writes to
-          // the path the user specified for OUTPUT; any other reference to
-          // the same artifact must agree with that literal path. Outputs
-          // are also deduplicated across configs so the fragment
-          // validator does not reject the manifest when a single utility
-          // command is fanned out over multiple configurations.
-          for (std::string const& output : ccg.GetOutputs()) {
-            std::string const outRel = ReprobuildCustomCommandPath(
-              binaryDir, lg->GetCurrentBinaryDirectory(), output);
-            if (emittedCustomOutputs.insert(outRel).second) {
-              utilityOutputs.push_back(outRel);
+        }
+        if (type == cmStateEnums::UTILITY) {
+          std::vector<cmCustomCommand> utilityCommands =
+            gt->GetPreBuildCommands();
+          cm::append(utilityCommands, gt->GetPostBuildCommands());
+          std::vector<std::string> commandLines;
+          bool usesTerminal = false;
+          std::string jobPool;
+          std::vector<std::string> utilityInputs;
+          std::vector<std::string> utilityOutputs;
+          std::string utilityDepfile;
+          auto appendCustomCommand = [&](cmCustomCommand const& cc) {
+            cmCustomCommandGenerator ccg(cc, commandConfig, lg.get(), false,
+                                         config);
+            if (utilityDepfile.empty()) {
+              utilityDepfile =
+                ReprobuildCustomDepfilePath(binaryDir, lg.get(), ccg);
             }
-            ReprobuildAppendCleanFile(cleanFiles, binaryDir, outRel);
-          }
-          for (std::string const& byproduct : ccg.GetByproducts()) {
-            std::string const byRel = ReprobuildCustomCommandPath(
-              binaryDir, lg->GetCurrentBinaryDirectory(), byproduct);
-            if (emittedCustomOutputs.insert(byRel).second) {
-              utilityOutputs.push_back(byRel);
+            // M27: custom-command OUTPUT/BYPRODUCTS/DEPENDS are NOT
+            // config-prefixed. The user-controlled COMMAND argv writes to
+            // the path the user specified for OUTPUT; any other reference to
+            // the same artifact must agree with that literal path. Outputs
+            // are also deduplicated across configs so the fragment
+            // validator does not reject the manifest when a single utility
+            // command is fanned out over multiple configurations.
+            for (std::string const& output : ccg.GetOutputs()) {
+              std::string const outRel = ReprobuildCustomCommandPath(
+                binaryDir, lg->GetCurrentBinaryDirectory(), output);
+              if (emittedCustomOutputs.insert(outRel).second) {
+                utilityOutputs.push_back(outRel);
+              }
+              ReprobuildAppendCleanFile(cleanFiles, binaryDir, outRel);
             }
-            ReprobuildAppendCleanFile(cleanFiles, binaryDir, byRel);
+            for (std::string const& byproduct : ccg.GetByproducts()) {
+              std::string const byRel = ReprobuildCustomCommandPath(
+                binaryDir, lg->GetCurrentBinaryDirectory(), byproduct);
+              if (emittedCustomOutputs.insert(byRel).second) {
+                utilityOutputs.push_back(byRel);
+              }
+              ReprobuildAppendCleanFile(cleanFiles, binaryDir, byRel);
+            }
+            for (std::string const& dep : ccg.GetDepends()) {
+              std::string realDep;
+              if (lg->GetRealDependency(dep, ccg.GetOutputConfig(), realDep,
+                                        cc.GetCMP0212Status())) {
+                utilityInputs.push_back(ReprobuildCustomCommandPath(
+                  binaryDir, lg->GetCurrentBinaryDirectory(), realDep));
+              }
+            }
+            if (cc.GetUsesTerminal()) {
+              usesTerminal = true;
+            } else if (jobPool.empty() && !cc.GetJobPool().empty()) {
+              jobPool = cc.GetJobPool();
+            }
+            cm::append(commandLines,
+                       ReprobuildCustomCommandLines(
+                         ccg, true, lg->GetCurrentBinaryDirectory()));
+            retargetCommandConfigExecutables(ccg, commandLines);
+          };
+          for (cmCustomCommand const& cc : utilityCommands) {
+            appendCustomCommand(cc);
           }
-        for (std::string const& dep : ccg.GetDepends()) {
-          std::string realDep;
-          if (lg->GetRealDependency(dep, ccg.GetOutputConfig(), realDep,
-                                    cc.GetCMP0212Status())) {
-              utilityInputs.push_back(ReprobuildCustomCommandPath(
-                binaryDir, lg->GetCurrentBinaryDirectory(), realDep));
+          std::vector<cmSourceFile*> utilitySources;
+          gt->GetSourceFiles(utilitySources, config);
+          for (cmSourceFile const* source : utilitySources) {
+            if (cmCustomCommand const* cc = source->GetCustomCommand()) {
+              appendCustomCommand(*cc);
+            }
           }
-        }
-          if (cc.GetUsesTerminal()) {
-            usesTerminal = true;
-          } else if (jobPool.empty() && !cc.GetJobPool().empty()) {
-            jobPool = cc.GetJobPool();
+          if (commandLines.empty()) {
+            continue;
           }
-          cm::append(commandLines,
-                     ReprobuildCustomCommandLines(
-                       ccg, true, lg->GetCurrentBinaryDirectory()));
-          retargetCommandConfigExecutables(ccg, commandLines);
-        };
-        for (cmCustomCommand const& cc : utilityCommands) {
-          appendCustomCommand(cc);
-        }
-        std::vector<cmSourceFile*> utilitySources;
-        gt->GetSourceFiles(utilitySources, config);
-        for (cmSourceFile const* source : utilitySources) {
-          if (cmCustomCommand const* cc = source->GetCustomCommand()) {
-            appendCustomCommand(*cc);
+
+          ReprobuildTarget target;
+          target.BaseName = gt->GetName();
+          target.Name = ReprobuildTargetName(gt->GetName(), config,
+                                             commandConfig, multiConfig);
+          target.OutputConfig = config;
+          target.CommandConfig = commandConfig;
+          target.IsCrossConfig = configPair.IsCrossConfig;
+          target.Var =
+            ReprobuildNimIdent("target", nextTargetVar++, target.Name);
+          target.IsUtility = true;
+          target.IncludeInAll = !configPair.IsCrossConfig &&
+            !gt->GetPropertyAsBool("EXCLUDE_FROM_ALL");
+          if (!configPair.IsCrossConfig) {
+            for (auto const& utility : gt->GetUtilities()) {
+              target.TargetDeps.push_back(utility.Value.first);
+            }
           }
-        }
-        if (commandLines.empty()) {
+          target.UtilityAction.Id =
+            ReprobuildSafeId(cmStrCat("custom-", gt->GetName(), configSuffix));
+          target.UtilityAction.Var = ReprobuildNimIdent(
+            "action", nextActionVar++, target.UtilityAction.Id);
+          target.UtilityAction.ToolId = ReprobuildSafeId(
+            cmStrCat("reprobuild-cmake-", target.UtilityAction.Var));
+          target.UtilityAction.Pool = usesTerminal ? "console" : jobPool;
+          target.UtilityAction.Inputs = utilityInputs;
+          if (declareOutputs) {
+            target.UtilityAction.Outputs = utilityOutputs;
+            target.UtilityAction.Depfile = utilityDepfile;
+          }
+          target.UtilityAction.Cacheable = false;
+          std::string const wrapperPath =
+            cmStrCat(wrapperDir, "/", target.UtilityAction.ToolId);
+          if (!ReprobuildWriteCommandScript(wrapperPath, "", commandLines)) {
+            this->GetCMakeInstance()->IssueMessage(
+              MessageType::FATAL_ERROR,
+              cmStrCat("Could not write Reprobuild custom target wrapper: ",
+                       wrapperPath));
+            return;
+          }
+          usedTools.insert(target.UtilityAction.ToolId);
+          buildTargets.push_back(std::move(target));
           continue;
+        }
+        if (type != cmStateEnums::EXECUTABLE &&
+            type != cmStateEnums::STATIC_LIBRARY &&
+            type != cmStateEnums::SHARED_LIBRARY &&
+            type != cmStateEnums::MODULE_LIBRARY &&
+            type != cmStateEnums::OBJECT_LIBRARY) {
+          this->GetCMakeInstance()->IssueMessage(
+            MessageType::FATAL_ERROR,
+            cmStrCat("The Reprobuild generator M4 slice supports executable, "
+                     "static library, shared library, module library, and "
+                     "object library targets; target '",
+                     gt->GetName(), "' has unsupported type ",
+                     cmState::GetTargetTypeName(type), "."));
+          return;
+        }
+
+        if (gt->IsImported()) {
+          continue;
+        }
+
+        if (!lg->GetMakefile()->IsOn("APPLE") &&
+            (gt->GetPropertyAsBool("MACOSX_BUNDLE") ||
+             gt->GetPropertyAsBool("FRAMEWORK") ||
+             gt->GetPropertyAsBool("BUNDLE"))) {
+          this->GetCMakeInstance()->IssueMessage(
+            MessageType::FATAL_ERROR,
+            cmStrCat(
+              "Reprobuild profile unavailable: Apple bundle, framework, "
+              "or CFBundle target '",
+              gt->GetName(), "' requires an Apple platform."));
+          return;
+        }
+
+        if (gt->IsAppBundleOnApple() || gt->IsFrameworkOnApple() ||
+            gt->IsCFBundleOnApple() || gt->IsArchivedAIXSharedLibrary()) {
+          if (gt->IsArchivedAIXSharedLibrary()) {
+            this->GetCMakeInstance()->IssueMessage(
+              MessageType::FATAL_ERROR,
+              cmStrCat("Reprobuild profile unavailable: archived AIX shared "
+                       "libraries are not supported by the current target "
+                       "profile; target '",
+                       gt->GetName(), "' has type ",
+                       cmState::GetTargetTypeName(type), "."));
+            return;
+          }
         }
 
         ReprobuildTarget target;
@@ -2693,2060 +2788,1997 @@ void cmGlobalReprobuildGenerator::WriteProviderMetadata()
         target.OutputConfig = config;
         target.CommandConfig = commandConfig;
         target.IsCrossConfig = configPair.IsCrossConfig;
-        target.Var = ReprobuildNimIdent("target", nextTargetVar++, target.Name);
-        target.IsUtility = true;
+        target.Var =
+          ReprobuildNimIdent("target", nextTargetVar++, target.Name);
         target.IncludeInAll = !configPair.IsCrossConfig &&
           !gt->GetPropertyAsBool("EXCLUDE_FROM_ALL");
+        target.HcrEnabled = ReprobuildTargetHcrEnabled(gt, lg->GetMakefile());
+        if (target.HcrEnabled) {
+          target.HcrProfile = "clang-gcc-debug-patchable-no-lto-v1";
+          if (type == cmStateEnums::STATIC_LIBRARY ||
+              type == cmStateEnums::OBJECT_LIBRARY) {
+            this->GetCMakeInstance()->IssueMessage(
+              MessageType::FATAL_ERROR,
+              cmStrCat("Reprobuild HCR profile unavailable for target '",
+                       gt->GetName(),
+                       "': HCR requires an executable, shared library, or "
+                       "module library link target, not ",
+                       cmState::GetTargetTypeName(type), "."));
+            return;
+          }
+          if (gt->GetPropertyAsBool("INTERPROCEDURAL_OPTIMIZATION")) {
+            this->GetCMakeInstance()->IssueMessage(
+              MessageType::FATAL_ERROR,
+              cmStrCat("Reprobuild HCR profile unavailable for target '",
+                       gt->GetName(),
+                       "': interprocedural optimization/LTO is incompatible "
+                       "with HCR object-to-link metadata."));
+            return;
+          }
+        }
         if (!configPair.IsCrossConfig) {
           for (auto const& utility : gt->GetUtilities()) {
             target.TargetDeps.push_back(utility.Value.first);
           }
         }
-        target.UtilityAction.Id =
-          ReprobuildSafeId(cmStrCat("custom-", gt->GetName(), configSuffix));
-        target.UtilityAction.Var = ReprobuildNimIdent(
-          "action", nextActionVar++, target.UtilityAction.Id);
-        target.UtilityAction.ToolId =
-          ReprobuildSafeId(cmStrCat("reprobuild-cmake-",
-                                    target.UtilityAction.Var));
-        target.UtilityAction.Pool = usesTerminal ? "console" : jobPool;
-        target.UtilityAction.Inputs = utilityInputs;
-        if (declareOutputs) {
-          target.UtilityAction.Outputs = utilityOutputs;
-          target.UtilityAction.Depfile = utilityDepfile;
-        }
-        target.UtilityAction.Cacheable = false;
-        std::string const wrapperPath =
-          cmStrCat(wrapperDir, "/", target.UtilityAction.ToolId);
-        if (!ReprobuildWriteCommandScript(wrapperPath, "", commandLines)) {
-          this->GetCMakeInstance()->IssueMessage(
-            MessageType::FATAL_ERROR,
-            cmStrCat("Could not write Reprobuild custom target wrapper: ",
-                     wrapperPath));
-          return;
-        }
-        usedTools.insert(target.UtilityAction.ToolId);
-        buildTargets.push_back(std::move(target));
-        continue;
-      }
-      if (type != cmStateEnums::EXECUTABLE &&
-          type != cmStateEnums::STATIC_LIBRARY &&
-          type != cmStateEnums::SHARED_LIBRARY &&
-          type != cmStateEnums::MODULE_LIBRARY &&
-          type != cmStateEnums::OBJECT_LIBRARY) {
-        this->GetCMakeInstance()->IssueMessage(
-          MessageType::FATAL_ERROR,
-          cmStrCat("The Reprobuild generator M4 slice supports executable, "
-                   "static library, shared library, module library, and "
-                   "object library targets; target '",
-                   gt->GetName(), "' has unsupported type ",
-                   cmState::GetTargetTypeName(type), "."));
-        return;
-      }
 
-      if (gt->IsImported()) {
-        continue;
-      }
-
-      if (!lg->GetMakefile()->IsOn("APPLE") &&
-          (gt->GetPropertyAsBool("MACOSX_BUNDLE") ||
-           gt->GetPropertyAsBool("FRAMEWORK") ||
-           gt->GetPropertyAsBool("BUNDLE"))) {
-        this->GetCMakeInstance()->IssueMessage(
-          MessageType::FATAL_ERROR,
-          cmStrCat("Reprobuild profile unavailable: Apple bundle, framework, "
-                   "or CFBundle target '",
-                   gt->GetName(), "' requires an Apple platform."));
-        return;
-      }
-
-      if (gt->IsAppBundleOnApple() || gt->IsFrameworkOnApple() ||
-          gt->IsCFBundleOnApple() || gt->IsArchivedAIXSharedLibrary()) {
-        if (gt->IsArchivedAIXSharedLibrary()) {
-          this->GetCMakeInstance()->IssueMessage(
-            MessageType::FATAL_ERROR,
-            cmStrCat("Reprobuild profile unavailable: archived AIX shared "
-                     "libraries are not supported by the current target "
-                     "profile; target '",
-                     gt->GetName(), "' has type ",
-                     cmState::GetTargetTypeName(type), "."));
-          return;
-        }
-      }
-
-      ReprobuildTarget target;
-      target.BaseName = gt->GetName();
-      target.Name = ReprobuildTargetName(gt->GetName(), config, commandConfig,
-                                         multiConfig);
-      target.OutputConfig = config;
-      target.CommandConfig = commandConfig;
-      target.IsCrossConfig = configPair.IsCrossConfig;
-      target.Var = ReprobuildNimIdent("target", nextTargetVar++, target.Name);
-      target.IncludeInAll = !configPair.IsCrossConfig &&
-        !gt->GetPropertyAsBool("EXCLUDE_FROM_ALL");
-      target.HcrEnabled = ReprobuildTargetHcrEnabled(gt, lg->GetMakefile());
-      if (target.HcrEnabled) {
-        target.HcrProfile = "clang-gcc-debug-patchable-no-lto-v1";
-        if (type == cmStateEnums::STATIC_LIBRARY ||
-            type == cmStateEnums::OBJECT_LIBRARY) {
-          this->GetCMakeInstance()->IssueMessage(
-            MessageType::FATAL_ERROR,
-            cmStrCat("Reprobuild HCR profile unavailable for target '",
-                     gt->GetName(),
-                     "': HCR requires an executable, shared library, or "
-                     "module library link target, not ",
-                     cmState::GetTargetTypeName(type), "."));
-          return;
-        }
-        if (gt->GetPropertyAsBool("INTERPROCEDURAL_OPTIMIZATION")) {
-          this->GetCMakeInstance()->IssueMessage(
-            MessageType::FATAL_ERROR,
-            cmStrCat("Reprobuild HCR profile unavailable for target '",
-                     gt->GetName(),
-                     "': interprocedural optimization/LTO is incompatible "
-                     "with HCR object-to-link metadata."));
-          return;
-        }
-      }
-      if (!configPair.IsCrossConfig) {
-        for (auto const& utility : gt->GetUtilities()) {
-          target.TargetDeps.push_back(utility.Value.first);
-        }
-      }
-
-      std::vector<cmSourceFile const*> customCommandSources;
-      gt->GetCustomCommands(customCommandSources, config);
-      std::set<cmCustomCommand const*> emittedCustomCommands;
-      unsigned int customIndex = 0;
-      for (cmSourceFile const* customSource : customCommandSources) {
-        cmCustomCommand const* cc = customSource->GetCustomCommand();
-        if (cc == nullptr || !emittedCustomCommands.insert(cc).second) {
-          continue;
-        }
-        cmCustomCommandGenerator ccg(*cc, commandConfig, lg.get(), false,
-                                     config);
-        std::vector<std::string> commandLines =
-          ReprobuildCustomCommandLines(
-            ccg, true, lg->GetCurrentBinaryDirectory());
-        retargetCommandConfigExecutables(ccg, commandLines);
-        if (commandLines.empty()) {
-          continue;
-        }
-
-        ReprobuildAction custom;
-        // M27: custom-command OUTPUT/BYPRODUCTS/DEPENDS are NOT
-        // config-prefixed (see ReprobuildCustomCommandPath rationale).
-        std::string const primaryOutput =
-          ccg.GetOutputs().empty()
-          ? cmStrCat("custom-", gt->GetName(), "-", customIndex)
-          : ReprobuildCustomCommandPath(
-              binaryDir, lg->GetCurrentBinaryDirectory(),
-              ccg.GetOutputs().front());
-        custom.Id =
-          ReprobuildSafeId(cmStrCat("custom-command-", gt->GetName(), "-",
-                                    primaryOutput, configSuffix));
-        custom.Var = ReprobuildNimIdent("action", nextActionVar++,
-                                        custom.Id);
-        custom.ToolId =
-          ReprobuildSafeId(cmStrCat("reprobuild-cmake-", custom.Var));
-        custom.Pool = cc->GetUsesTerminal() ? "console" : cc->GetJobPool();
-        custom.Cacheable = declareOutputs;
-        // M27: dedup OUTPUT/BYPRODUCT claims across configs. The same
-        // unprefixed binary-tree path may be reached twice (once per
-        // ``configPair``) — the second emission must NOT re-claim the
-        // artifact. We still keep the action wired for sequencing so any
-        // Deps that reference the per-config custom-command Id continue
-        // to resolve.
-        for (std::string const& output : ccg.GetOutputs()) {
-          std::string const outRel = ReprobuildCustomCommandPath(
-            binaryDir, lg->GetCurrentBinaryDirectory(), output);
-          if (declareOutputs && emittedCustomOutputs.insert(outRel).second) {
-            custom.Outputs.push_back(outRel);
-          }
-          ReprobuildAppendCleanFile(cleanFiles, binaryDir, outRel);
-        }
-        for (std::string const& byproduct : ccg.GetByproducts()) {
-          std::string const byRel = ReprobuildCustomCommandPath(
-            binaryDir, lg->GetCurrentBinaryDirectory(), byproduct);
-          if (declareOutputs && emittedCustomOutputs.insert(byRel).second) {
-            custom.Outputs.push_back(byRel);
-          }
-          ReprobuildAppendCleanFile(cleanFiles, binaryDir, byRel);
-        }
-        // If every Output was deduplicated away the action no longer
-        // produces any artifact and must not be advertised as cacheable
-        // either — the fragment validator would otherwise reject an
-        // action whose claims are missing but whose declared depfile
-        // expects to be populated by a fresh run.
-        if (custom.Outputs.empty()) {
-          custom.Cacheable = false;
-        }
-        for (std::string const& dep : ccg.GetDepends()) {
-          std::string realDep;
-          if (lg->GetRealDependency(dep, ccg.GetOutputConfig(), realDep,
-                                    cc->GetCMP0212Status())) {
-            custom.Inputs.push_back(ReprobuildCustomCommandPath(
-              binaryDir, lg->GetCurrentBinaryDirectory(), realDep));
-          }
-        }
-        for (auto const& utility : ccg.GetUtilities()) {
-          cmGeneratorTarget* utilityTarget =
-            lg->FindGeneratorTargetToUse(utility.Value.first);
-          if (utilityTarget &&
-              utilityTarget->GetType() == cmStateEnums::EXECUTABLE &&
-              !utilityTarget->IsImported()) {
-            std::string const depConfig =
-              utility.Value.second ? commandConfig : config;
-            ReprobuildAppendUnique(
-              custom.Deps,
-              ReprobuildSafeId(cmStrCat(
-                "link-", utilityTarget->GetName(),
-                ReprobuildConfigSuffix(depConfig, depConfig, multiConfig))));
-          }
-        }
-        if (declareOutputs) {
-          custom.Depfile = ReprobuildCustomDepfilePath(binaryDir, lg.get(), ccg);
-        }
-        if (!custom.Depfile.empty()) {
-          ReprobuildAppendCleanFile(cleanFiles, binaryDir, custom.Depfile);
-        }
-
-        // Inline-exec fast path: a single-command custom command with no
-        // declared comment-echo and no working-directory rewrite can be
-        // emitted as `inlineExecCall(argv, cwd)` instead of a synthetic
-        // package + shell wrapper. The lowered binary graph then holds
-        // the literal argv per edge and the engine launches the tool
-        // directly. Multi-command and comment-echo custom commands fall
-        // back to the legacy wrapper-script path below for now (the
-        // engine only knows how to inline a single argv per builtin
-        // exec action; chaining multiple shell statements still needs
-        // the wrapper).
-        bool inlined = false;
-        if (ccg.GetNumberOfCommands() == 1 && !ccg.GetComment().has_value()) {
-          std::vector<std::string> inlineArgv =
-            ReprobuildCustomCommandArgv(ccg, 0);
-          if (!inlineArgv.empty()) {
-            custom.Inline = true;
-            custom.InlineArgv = std::move(inlineArgv);
-            custom.InlineCwd = ccg.GetWorkingDirectory();
-            inlined = true;
-          }
-        }
-        if (!inlined) {
-          std::string const wrapperPath =
-            cmStrCat(wrapperDir, "/", custom.ToolId);
-          if (!ReprobuildWriteCommandScript(wrapperPath, "", commandLines)) {
-            this->GetCMakeInstance()->IssueMessage(
-              MessageType::FATAL_ERROR,
-              cmStrCat("Could not write Reprobuild custom command wrapper: ",
-                       wrapperPath));
-            return;
-          }
-          usedTools.insert(custom.ToolId);
-        }
-        target.CustomActions.push_back(std::move(custom));
-        ++customIndex;
-      }
-
-      if (gt->IsBundleOnApple()) {
-        sawAppleBundle = true;
-        std::vector<cmSourceFile const*> macContentSources;
-        std::vector<cmSourceFile const*> headerSources;
-        gt->GetHeaderSources(headerSources, config);
-        cm::append(macContentSources, headerSources);
-        std::vector<cmSourceFile const*> extraSources;
-        gt->GetExtraSources(extraSources, config);
-        cm::append(macContentSources, extraSources);
-        unsigned int macContentIndex = 0;
-        for (cmSourceFile const* macSource : macContentSources) {
-          cmGeneratorTarget::SourceFileFlags flags =
-            gt->GetTargetSourceFileFlags(macSource);
-          if (flags.Type == cmGeneratorTarget::SourceFileTypeNormal ||
-              flags.MacFolder == nullptr || *flags.MacFolder == '\0') {
+        std::vector<cmSourceFile const*> customCommandSources;
+        gt->GetCustomCommands(customCommandSources, config);
+        std::set<cmCustomCommand const*> emittedCustomCommands;
+        unsigned int customIndex = 0;
+        for (cmSourceFile const* customSource : customCommandSources) {
+          cmCustomCommand const* cc = customSource->GetCustomCommand();
+          if (cc == nullptr || !emittedCustomCommands.insert(cc).second) {
             continue;
           }
-          std::string const macDir = cmStrCat(
-            gt->GetMacContentDirectory(
-              config, cmStateEnums::RuntimeBinaryArtifact),
-            "/", flags.MacFolder);
-          std::string const outputFull =
-            cmStrCat(macDir, "/",
-                     cmSystemTools::GetFilenameName(macSource->GetFullPath()));
-          std::string const outputRel =
-            ReprobuildConfigFullPath(binaryDir, outputFull, config,
-                                     multiConfig);
-          ReprobuildAction content;
-          content.Id =
-            ReprobuildSafeId(cmStrCat("bundle-content-", gt->GetName(), "-",
-                                      macContentIndex++, configSuffix));
-          content.Var =
-            ReprobuildNimIdent("action", nextActionVar++, content.Id);
-          content.ToolId =
-            ReprobuildSafeId(cmStrCat("reprobuild-cmake-", content.Var));
-          content.Inputs = { macSource->GetFullPath() };
-          content.Cacheable = declareOutputs;
+          cmCustomCommandGenerator ccg(*cc, commandConfig, lg.get(), false,
+                                       config);
+          std::vector<std::string> commandLines = ReprobuildCustomCommandLines(
+            ccg, true, lg->GetCurrentBinaryDirectory());
+          retargetCommandConfigExecutables(ccg, commandLines);
+          if (commandLines.empty()) {
+            continue;
+          }
+
+          ReprobuildAction custom;
+          // M27: custom-command OUTPUT/BYPRODUCTS/DEPENDS are NOT
+          // config-prefixed (see ReprobuildCustomCommandPath rationale).
+          std::string const primaryOutput = ccg.GetOutputs().empty()
+            ? cmStrCat("custom-", gt->GetName(), "-", customIndex)
+            : ReprobuildCustomCommandPath(binaryDir,
+                                          lg->GetCurrentBinaryDirectory(),
+                                          ccg.GetOutputs().front());
+          custom.Id =
+            ReprobuildSafeId(cmStrCat("custom-command-", gt->GetName(), "-",
+                                      primaryOutput, configSuffix));
+          custom.Var =
+            ReprobuildNimIdent("action", nextActionVar++, custom.Id);
+          custom.ToolId =
+            ReprobuildSafeId(cmStrCat("reprobuild-cmake-", custom.Var));
+          custom.Pool = cc->GetUsesTerminal() ? "console" : cc->GetJobPool();
+          custom.Cacheable = declareOutputs;
+          // M27: dedup OUTPUT/BYPRODUCT claims across configs. The same
+          // unprefixed binary-tree path may be reached twice (once per
+          // ``configPair``) — the second emission must NOT re-claim the
+          // artifact. We still keep the action wired for sequencing so any
+          // Deps that reference the per-config custom-command Id continue
+          // to resolve.
+          for (std::string const& output : ccg.GetOutputs()) {
+            std::string const outRel = ReprobuildCustomCommandPath(
+              binaryDir, lg->GetCurrentBinaryDirectory(), output);
+            if (declareOutputs && emittedCustomOutputs.insert(outRel).second) {
+              custom.Outputs.push_back(outRel);
+            }
+            ReprobuildAppendCleanFile(cleanFiles, binaryDir, outRel);
+          }
+          for (std::string const& byproduct : ccg.GetByproducts()) {
+            std::string const byRel = ReprobuildCustomCommandPath(
+              binaryDir, lg->GetCurrentBinaryDirectory(), byproduct);
+            if (declareOutputs && emittedCustomOutputs.insert(byRel).second) {
+              custom.Outputs.push_back(byRel);
+            }
+            ReprobuildAppendCleanFile(cleanFiles, binaryDir, byRel);
+          }
+          // If every Output was deduplicated away the action no longer
+          // produces any artifact and must not be advertised as cacheable
+          // either — the fragment validator would otherwise reject an
+          // action whose claims are missing but whose declared depfile
+          // expects to be populated by a fresh run.
+          if (custom.Outputs.empty()) {
+            custom.Cacheable = false;
+          }
+          for (std::string const& dep : ccg.GetDepends()) {
+            std::string realDep;
+            if (lg->GetRealDependency(dep, ccg.GetOutputConfig(), realDep,
+                                      cc->GetCMP0212Status())) {
+              custom.Inputs.push_back(ReprobuildCustomCommandPath(
+                binaryDir, lg->GetCurrentBinaryDirectory(), realDep));
+            }
+          }
+          for (auto const& utility : ccg.GetUtilities()) {
+            cmGeneratorTarget* utilityTarget =
+              lg->FindGeneratorTargetToUse(utility.Value.first);
+            if (utilityTarget &&
+                utilityTarget->GetType() == cmStateEnums::EXECUTABLE &&
+                !utilityTarget->IsImported()) {
+              std::string const depConfig =
+                utility.Value.second ? commandConfig : config;
+              ReprobuildAppendUnique(
+                custom.Deps,
+                ReprobuildSafeId(cmStrCat(
+                  "link-", utilityTarget->GetName(),
+                  ReprobuildConfigSuffix(depConfig, depConfig, multiConfig))));
+            }
+          }
           if (declareOutputs) {
-            content.Outputs = { outputRel };
+            custom.Depfile =
+              ReprobuildCustomDepfilePath(binaryDir, lg.get(), ccg);
           }
-          std::vector<std::string> lines;
-          lines.push_back(cmStrCat(
-            ReprobuildShellSingleQuote(cmSystemTools::GetCMakeCommand()),
-            " -E make_directory ", ReprobuildShellSingleQuote(macDir)));
-          lines.push_back(cmStrCat(
-            ReprobuildShellSingleQuote(cmSystemTools::GetCMakeCommand()),
-            cmSystemTools::FileIsDirectory(macSource->GetFullPath())
-              ? " -E copy_directory "
-              : " -E copy ",
-            ReprobuildShellSingleQuote(macSource->GetFullPath()), " ",
-            ReprobuildShellSingleQuote(outputFull)));
-          std::string const wrapperPath =
-            cmStrCat(wrapperDir, "/", content.ToolId);
-          if (!ReprobuildWriteCommandScript(wrapperPath, binaryDir, lines)) {
-            this->GetCMakeInstance()->IssueMessage(
-              MessageType::FATAL_ERROR,
-              cmStrCat("Could not write Reprobuild bundle content wrapper: ",
-                       wrapperPath));
-            return;
+          if (!custom.Depfile.empty()) {
+            ReprobuildAppendCleanFile(cleanFiles, binaryDir, custom.Depfile);
           }
-          usedTools.insert(content.ToolId);
-          ReprobuildAppendCleanFile(cleanFiles, binaryDir, outputRel);
-          target.CustomActions.push_back(std::move(content));
-        }
-      }
 
-      std::vector<cmSourceFile const*> sources;
-      gt->GetObjectSources(sources, config);
-      if (sources.empty()) {
-        this->GetCMakeInstance()->IssueMessage(
-          MessageType::FATAL_ERROR,
-          cmStrCat("The Reprobuild generator M4 slice requires normal "
-                   "target '",
-                   gt->GetName(), "' to have at least one C or CXX source."));
-        return;
-      }
-
-      std::map<std::string, std::string> pchActionIds;
-      bool targetHasCudaSources = false;
-      for (cmSourceFile const* source : sources) {
-        if (source->GetLanguage() == "CUDA") {
-          targetHasCudaSources = true;
-        }
-        if (!source->IsPchSource()) {
-          continue;
-        }
-        std::string const objFull =
-          cmStrCat(gt->GetObjectDirectory(config), gt->GetObjectName(source));
-        std::string const objRel =
-          ReprobuildConfigFullPath(binaryDir, objFull, config, multiConfig);
-        pchActionIds[source->GetFullPath()] =
-          ReprobuildSafeId(cmStrCat("compile-", gt->GetName(), "-", objRel,
-                                    configSuffix));
-      }
-
-      std::map<std::string, std::vector<std::string>> dyndepDdis;
-      std::map<std::string, std::vector<std::pair<std::string, std::string>>>
-        dyndepActionMaps;
-      std::map<std::string, std::vector<std::string>> dyndepScanActions;
-      std::map<std::string, std::map<std::string, cmSourceFile const*>>
-        dyndepCxxModuleSources;
-      std::vector<std::string> linkObjects;
-      std::vector<cmSourceFile const*> swiftSources;
-      std::vector<std::string> swiftObjectRels;
-      for (cmSourceFile const* source : sources) {
-        if (source->GetLanguage() != "Swift") {
-          continue;
-        }
-        std::string const objFull =
-          cmStrCat(gt->GetObjectDirectory(config), gt->GetObjectName(source));
-        std::string const objRel =
-          ReprobuildConfigFullPath(binaryDir, objFull, config, multiConfig);
-        swiftSources.push_back(source);
-        swiftObjectRels.push_back(objRel);
-        linkObjects.push_back(objRel);
-        ReprobuildAppendCleanFile(cleanFiles, binaryDir, objRel);
-        ReprobuildAppendCleanFile(cleanFiles, binaryDir, cmStrCat(objRel, ".d"));
-        ReprobuildAppendCleanFile(
-          cleanFiles, binaryDir,
-          ReprobuildSwiftDepsPath(binaryDir, gt, source, objRel));
-        ReprobuildAppendCleanFile(
-          cleanFiles, binaryDir,
-          ReprobuildSwiftDiagnosticsPath(binaryDir, gt, source, objRel));
-        cmSystemTools::MakeDirectory(
-          cmSystemTools::GetFilenamePath(cmStrCat(binaryDir, "/", objRel)));
-      }
-      if (!swiftSources.empty()) {
-        cmMakefile const* mf = lg->GetMakefile();
-        usedLanguages.insert("Swift");
-        std::vector<std::string> swiftArgs;
-        ReprobuildAppendCommonCompileArgs(swiftArgs, lg.get(), gt, config,
-                                          "Swift");
-        if (gt->GetType() != cmStateEnums::EXECUTABLE) {
-          swiftArgs.push_back("-parse-as-library");
-        }
-        swiftArgs.push_back("-module-name");
-        swiftArgs.push_back(gt->GetSwiftModuleName());
-        cm::optional<cmSwiftCompileMode> swiftMode =
-          lg->GetSwiftCompileMode(gt, config);
-        bool const splitSwift = swiftMode.has_value();
-        if (swiftMode) {
-          std::string const mode = ReprobuildSwiftCompileModeName(*swiftMode);
-          if (mode == "wholemodule") {
-            swiftArgs.push_back("-whole-module-optimization");
-          } else if (mode == "incremental") {
-            swiftArgs.push_back("-incremental");
-          } else if (mode == "singlefile") {
-            swiftArgs.push_back("-driver-use-frontend-path");
-            swiftArgs.push_back(mf->GetSafeDefinition("CMAKE_Swift_COMPILER"));
+          // Inline-exec fast path: a single-command custom command with no
+          // declared comment-echo and no working-directory rewrite can be
+          // emitted as `inlineExecCall(argv, cwd)` instead of a synthetic
+          // package + shell wrapper. The lowered binary graph then holds
+          // the literal argv per edge and the engine launches the tool
+          // directly. Multi-command and comment-echo custom commands fall
+          // back to the legacy wrapper-script path below for now (the
+          // engine only knows how to inline a single argv per builtin
+          // exec action; chaining multiple shell statements still needs
+          // the wrapper).
+          bool inlined = false;
+          if (ccg.GetNumberOfCommands() == 1 &&
+              !ccg.GetComment().has_value()) {
+            std::vector<std::string> inlineArgv =
+              ReprobuildCustomCommandArgv(ccg, 0);
+            if (!inlineArgv.empty()) {
+              custom.Inline = true;
+              custom.InlineArgv = std::move(inlineArgv);
+              custom.InlineCwd = ccg.GetWorkingDirectory();
+              inlined = true;
+            }
           }
-        }
-        std::string const ofmRel =
-          ReprobuildSwiftOutputMapPath(binaryDir, gt, config, multiConfig);
-        std::string const ofmFull = cmStrCat(binaryDir, "/", ofmRel);
-        if (!ReprobuildWriteSwiftOutputMap(ofmFull, binaryDir, gt,
-                                           swiftSources, swiftObjectRels,
-                                           config)) {
-          this->GetCMakeInstance()->IssueMessage(
-            MessageType::FATAL_ERROR,
-            cmStrCat("Could not write Reprobuild Swift output map: ",
-                     ofmFull));
-          return;
-        }
-        sawSwiftOutputMap = true;
-        ReprobuildAppendCleanFile(cleanFiles, binaryDir, ofmRel);
-        swiftArgs.push_back("-output-file-map");
-        swiftArgs.push_back(ofmRel);
-        swiftArgs.push_back("-emit-dependencies");
-        swiftArgs.push_back("-serialize-diagnostics");
-        swiftArgs.push_back("-c");
-        for (cmSourceFile const* swiftSource : swiftSources) {
-          swiftArgs.push_back(swiftSource->GetFullPath());
-        }
-
-        bool const emitModuleSeparately =
-          splitSwift &&
-          gt->GetProperty("Swift_SEPARATE_MODULE_EMISSION").IsOn();
-        std::string const swiftModuleRel =
-          ReprobuildConfigFullPath(binaryDir, gt->GetSwiftModulePath(config),
-                                   config, multiConfig);
-        if (!swiftModuleRel.empty()) {
-          ReprobuildAppendCleanFile(cleanFiles, binaryDir, swiftModuleRel);
-        }
-        std::string emitModuleActionId;
-        if (emitModuleSeparately && !swiftModuleRel.empty()) {
-          sawSwiftSplit = true;
-          ReprobuildAction emitModule;
-          emitModule.Id =
-            ReprobuildSafeId(cmStrCat("emit-module-", gt->GetName(),
-                                      configSuffix));
-          emitModule.Var =
-            ReprobuildNimIdent("action", nextActionVar++, emitModule.Id);
-          emitModule.ToolId = ReprobuildToolId("Swift");
-          usedTools.insert(emitModule.ToolId);
-          emitModule.Args = swiftArgs;
-          emitModule.Args.insert(emitModule.Args.begin(), "-emit-module");
-          emitModule.Args.push_back("-emit-module-path");
-          emitModule.Args.push_back(swiftModuleRel);
-          for (cmSourceFile const* swiftSource : swiftSources) {
-            emitModule.Inputs.push_back(swiftSource->GetFullPath());
-          }
-          emitModule.Inputs.push_back(ofmRel);
-          if (declareOutputs) {
-            emitModule.Outputs = { swiftModuleRel };
-          } else {
-            emitModule.Cacheable = false;
-          }
-          emitModule.CompileDirectory = binaryDir;
-          emitModule.CompileFile = swiftSources.front()->GetFullPath();
-          emitModule.CompileCommand =
-            cmStrCat(mf->GetSafeDefinition(ReprobuildCompilerVar("Swift")),
-                     " ", cmJoin(emitModule.Args, " "));
-          emitModuleActionId = emitModule.Id;
-          target.CustomActions.push_back(std::move(emitModule));
-        } else if (!swiftModuleRel.empty()) {
-          swiftArgs.push_back("-emit-module");
-          swiftArgs.push_back("-emit-module-path");
-          swiftArgs.push_back(swiftModuleRel);
-        }
-
-        ReprobuildAction swiftCompile;
-        swiftCompile.Id =
-          ReprobuildSafeId(cmStrCat("compile-", gt->GetName(), "-Swift",
-                                    configSuffix));
-        swiftCompile.Var =
-          ReprobuildNimIdent("action", nextActionVar++, swiftCompile.Id);
-        swiftCompile.ToolId = ReprobuildToolId("Swift");
-        usedTools.insert(swiftCompile.ToolId);
-        swiftCompile.Args = swiftArgs;
-        for (cmSourceFile const* swiftSource : swiftSources) {
-          swiftCompile.Inputs.push_back(swiftSource->GetFullPath());
-        }
-        swiftCompile.Inputs.push_back(ofmRel);
-        if (!emitModuleActionId.empty()) {
-          swiftCompile.Deps.push_back(emitModuleActionId);
-        }
-        if (declareOutputs) {
-          swiftCompile.Outputs = swiftObjectRels;
-          for (std::size_t i = 0; i < swiftSources.size(); ++i) {
-            swiftCompile.Outputs.push_back(cmStrCat(swiftObjectRels[i], ".d"));
-            swiftCompile.Outputs.push_back(ReprobuildSwiftDepsPath(
-              binaryDir, gt, swiftSources[i], swiftObjectRels[i]));
-            swiftCompile.Outputs.push_back(ReprobuildSwiftDiagnosticsPath(
-              binaryDir, gt, swiftSources[i], swiftObjectRels[i]));
-          }
-          if (!emitModuleSeparately && !swiftModuleRel.empty()) {
-            swiftCompile.Outputs.push_back(swiftModuleRel);
-          }
-        } else {
-          swiftCompile.Cacheable = false;
-        }
-        swiftCompile.Pool =
-          ReprobuildPoolProperty(gt, nullptr, "JOB_POOL_COMPILE", "");
-        swiftCompile.CompileDirectory = binaryDir;
-        swiftCompile.CompileFile = swiftSources.front()->GetFullPath();
-        swiftCompile.CompileCommand =
-          cmStrCat(mf->GetSafeDefinition(ReprobuildCompilerVar("Swift")), " ",
-                   cmJoin(swiftCompile.Args, " "));
-        target.CompileActions.push_back(std::move(swiftCompile));
-      }
-      for (cmSourceFile const* source : sources) {
-        std::string const lang = source->GetLanguage();
-        if (lang == "Swift") {
-          continue;
-        }
-        if (target.HcrEnabled && lang != "C" && lang != "CXX") {
-          this->GetCMakeInstance()->IssueMessage(
-            MessageType::FATAL_ERROR,
-            cmStrCat("Reprobuild HCR profile unavailable for target '",
-                     gt->GetName(), "': source '", source->GetFullPath(),
-                     "' uses language '", lang,
-                     "'; the current HCR support profile accepts only C "
-                     "and CXX object sources."));
-          return;
-        }
-        if (lang != "C" && lang != "CXX" && lang != "Fortran" &&
-            lang != "CUDA" && lang != "ISPC") {
-          this->GetCMakeInstance()->IssueMessage(
-            MessageType::FATAL_ERROR,
-            cmStrCat("The Reprobuild generator supports only C, CXX, "
-                     "Fortran, CUDA, ISPC, and Swift object sources; source '",
-                     source->GetFullPath(), "' uses language '", lang, "'."));
-          return;
-        }
-        usedLanguages.insert(lang);
-
-        cmMakefile const* mf = lg->GetMakefile();
-        if (lang != "Fortran" && ReprobuildCompilerIsMsvc(mf, lang)) {
-          this->GetCMakeInstance()->IssueMessage(
-            MessageType::FATAL_ERROR,
-            "The Reprobuild generator M3 slice does not support MSVC "
-            "/showIncludes dependency reports yet; refusing to build without "
-            "recognized dependency evidence.");
-          return;
-        }
-        if (lang != "Fortran" && !ReprobuildCompilerUsesMakeDepfile(mf, lang)) {
-          this->GetCMakeInstance()->IssueMessage(
-            MessageType::FATAL_ERROR,
-            cmStrCat("The Reprobuild generator M3 slice supports depfiles "
-                     "only for GCC-compatible C/CXX compilers; compiler id '",
-                     mf->GetSafeDefinition(
-                       cmStrCat("CMAKE_", lang, "_COMPILER_ID")),
-                     "' is not supported."));
-          return;
-        }
-
-        std::string const objFull =
-          cmStrCat(gt->GetObjectDirectory(config), gt->GetObjectName(source));
-        std::string const objRel =
-          ReprobuildConfigFullPath(binaryDir, objFull, config, multiConfig);
-        std::string const depRel = cmStrCat(objRel, ".d");
-        if (!source->IsPchSource() || mf->IsOn("CMAKE_LINK_PCH")) {
-          linkObjects.push_back(objRel);
-        }
-        ReprobuildAppendCleanFile(cleanFiles, binaryDir, objRel);
-        ReprobuildAppendCleanFile(cleanFiles, binaryDir, depRel);
-        std::vector<std::string> languageByproducts;
-        if (lang == "ISPC") {
-          std::string ispcSource =
-            cmSystemTools::GetFilenameWithoutLastExtension(
-              gt->GetObjectName(source));
-          ispcSource =
-            cmSystemTools::GetFilenameWithoutLastExtension(ispcSource);
-          std::string headerDir = gt->GetObjectDirectory(config);
-          if (cmValue prop = gt->GetProperty("ISPC_HEADER_DIRECTORY")) {
-            headerDir = cmStrCat(lg->GetCurrentBinaryDirectory(), "/", *prop);
-          }
-          std::string const headerSuffix =
-            gt->GetSafeProperty("ISPC_HEADER_SUFFIX");
-          std::string const headerRel = ReprobuildConfigFullPath(
-            binaryDir, cmStrCat(headerDir, "/", ispcSource, headerSuffix),
-            config, multiConfig);
-          languageByproducts.push_back(headerRel);
-          ReprobuildAppendCleanFile(cleanFiles, binaryDir, headerRel);
-          std::vector<std::string> suffixes =
-            detail::ComputeISPCObjectSuffixes(gt);
-          std::vector<std::string> extraObjects =
-            detail::ComputeISPCExtraObjects(gt->GetObjectName(source),
-                                            gt->GetObjectDirectory(config),
-                                            suffixes);
-          for (std::string const& extraObject : extraObjects) {
-            std::string const extraRel =
-              ReprobuildConfigFullPath(binaryDir, extraObject, config,
-                                       multiConfig);
-            languageByproducts.push_back(extraRel);
-            ReprobuildAppendUnique(linkObjects, extraRel);
-            ReprobuildAppendCleanFile(cleanFiles, binaryDir, extraRel);
-            sawISPCMultiOutput = true;
-          }
-        }
-        cmSystemTools::MakeDirectory(
-          cmSystemTools::GetFilenamePath(cmStrCat(binaryDir, "/", objRel)));
-        std::string sourcePath = source->GetFullPath();
-        std::string sourceArg = sourcePath;
-        std::string const binaryPrefix = cmStrCat(binaryDir, "/");
-        // M27: when a binary-tree source file is produced by an attached
-        // ``add_custom_command`` whose OUTPUT path is config-independent,
-        // the COMMAND argv writes to the literal user-specified path.
-        // The compile input must agree — otherwise gcc opens a path that
-        // does not exist (the ``<binDir>/<config>/<file>`` rewrite below
-        // is what the broken path looked like before the fix). We use
-        // the same ``emittedCustomOutputs`` set the custom-command
-        // emission populates for dedup: anything claimed there is the
-        // canonical unprefixed location the COMMAND writes to.
-        bool sourceLivesAtUnprefixedPath = false;
-        if (multiConfig && sourcePath.rfind(binaryPrefix, 0) == 0) {
-          std::string const sourceRel =
-            ReprobuildRelativeTo(binaryDir, sourcePath);
-          if (emittedCustomOutputs.count(sourceRel) > 0) {
-            sourceLivesAtUnprefixedPath = true;
-            sourcePath = sourceRel;
-          }
-        }
-        if (multiConfig && !sourceLivesAtUnprefixedPath &&
-            source->GetFullPath().rfind(binaryPrefix, 0) == 0) {
-          sourcePath =
-            ReprobuildConfigFullPath(binaryDir, source->GetFullPath(),
-                                     config, true);
-          sourceArg = cmStrCat(binaryDir, "/", sourcePath);
-        }
-        // TryCompile test sources live under each project's per-invocation
-        // <binary_dir>/CMakeFiles/CMakeScratch/TryCompile-<random>/ scratch
-        // dir, so projects with byte-identical probe content compile-hash
-        // to distinct strong-fingerprint inputs and never share the action
-        // cache. Stage the source through a content-addressed path under
-        // the user-level reprobuild store so two projects asking the same
-        // CMake check actually hit. The path move is symmetric — both
-        // action.Inputs and the compiler-argv entry sourceArg adopt the
-        // canonical path so weak and strong fingerprints both line up.
-        // Only a source that needs nothing beside it is moved; see
-        // ReprobuildTryCompileSourceIsRelocatable.
-        if (this->GetCMakeInstance()->GetIsInTryCompile() &&
-            ReprobuildTryCompileSourceIsRelocatable(source->GetFullPath(),
-                                                    binaryDir)) {
-          std::string const canonicalPath =
-            ReprobuildCanonicaliseTryCompileSourcePath(sourceArg);
-          if (canonicalPath != sourceArg) {
-            sourcePath = canonicalPath;
-            sourceArg = canonicalPath;
-          }
-        }
-
-        std::vector<std::string> args;
-        std::string explicitLanguageFlags;
-        gt->AddExplicitLanguageFlags(explicitLanguageFlags, *source);
-        ReprobuildAppendParsed(args, explicitLanguageFlags);
-
-        std::string flags;
-        lg->GetTargetCompileFlags(gt, config, lang, flags, "");
-        ReprobuildAppendParsed(args, flags);
-        ReprobuildAppendSourcePropertyCompileArgs(args, lg.get(), gt, source,
-                                                  config, lang);
-
-        std::vector<std::string> definitions;
-        gt->GetCompileDefinitions(definitions, config, lang);
-        for (std::string const& def : definitions) {
-          args.push_back(cmStrCat("-D", def));
-        }
-
-        std::vector<std::string> includes;
-        lg->GetIncludeDirectories(includes, gt, lang, config);
-        for (std::string const& include : includes) {
-          args.push_back(cmStrCat("-I", include));
-        }
-
-        std::map<std::string, std::string> pchSources;
-        std::vector<std::string> pchArchs = gt->GetPchArchs(config, lang);
-        for (std::string const& arch : pchArchs) {
-          std::string const pchSource = gt->GetPchSource(config, lang, arch);
-          if (!pchSource.empty()) {
-            pchSources[pchSource] = arch;
-          }
-        }
-        bool const sourceUsesPch =
-          !pchSources.empty() &&
-          !source->GetProperty("SKIP_PRECOMPILE_HEADERS");
-        if (sourceUsesPch) {
-          std::string pchOptions;
-          auto const pchIt = pchSources.find(source->GetFullPath());
-          if (pchIt != pchSources.end()) {
-            pchOptions =
-              gt->GetPchCreateCompileOptions(config, lang, pchIt->second);
-          } else {
-            pchOptions = gt->GetPchUseCompileOptions(config, lang);
-          }
-          ReprobuildAppendOptionList(args, pchOptions);
-        }
-
-        if (target.HcrEnabled) {
-          std::string const compilerId =
-            mf->GetSafeDefinition(cmStrCat("CMAKE_", lang, "_COMPILER_ID"));
-          if (!ReprobuildCompilerSupportsHcr(compilerId)) {
-            this->GetCMakeInstance()->IssueMessage(
-              MessageType::FATAL_ERROR,
-              cmStrCat("Reprobuild HCR profile unavailable for target '",
-                       gt->GetName(), "': compiler id '", compilerId,
-                       "' does not support the current debug-info and "
-                       "patchable-function-entry HCR profile."));
-            return;
-          }
-          if (ReprobuildContainsNoDebugFlag(args)) {
-            this->GetCMakeInstance()->IssueMessage(
-              MessageType::FATAL_ERROR,
-              cmStrCat("Reprobuild HCR profile unavailable for target '",
-                       gt->GetName(),
-                       "': debug information was explicitly disabled by "
-                       "compile flags."));
-            return;
-          }
-          if (ReprobuildContainsLtoFlag(args)) {
-            this->GetCMakeInstance()->IssueMessage(
-              MessageType::FATAL_ERROR,
-              cmStrCat("Reprobuild HCR profile unavailable for target '",
-                       gt->GetName(),
-                       "': LTO flags are incompatible with HCR affected "
-                       "object lookup."));
-            return;
-          }
-          ReprobuildAppendHcrCompilePolicy(args);
-        }
-
-        if (lang == "Fortran") {
-          std::string const ppRel = cmStrCat(objRel, ".ddi.i");
-          std::string const ddiRel = cmStrCat(objRel, ".ddi");
-          std::string const scanDepRel = cmStrCat(ppRel, ".d");
-
-          ReprobuildAction scan;
-          scan.Id = ReprobuildSafeId(cmStrCat("scan-", gt->GetName(), "-",
-                                              objRel, configSuffix));
-          scan.Var = ReprobuildNimIdent("action", nextActionVar++, scan.Id);
-          scan.ToolId = ReprobuildSafeId(cmStrCat("reprobuild-cmake-",
-                                                  scan.Var));
-          std::vector<std::string> scanLines;
-          scanLines.push_back(cmStrCat(
-            ReprobuildShellSingleQuote(
-              mf->GetSafeDefinition(ReprobuildCompilerVar(lang))),
-            " -cpp -E ", cmJoin(args, " "), " ",
-              ReprobuildShellSingleQuote(sourceArg), " -o ",
-            ReprobuildShellSingleQuote(ppRel)));
-          std::string const tdiRel =
-            cmStrCat("CMakeFiles/reprobuild/dyndep/", target.Var, "-",
-                     lang, "DependInfo.json");
-          scanLines.push_back(cmStrCat(
-            ReprobuildShellSingleQuote(cmSystemTools::GetCMakeCommand()),
-            " -E cmake_ninja_depends --tdi=",
-            ReprobuildShellSingleQuote(tdiRel), " --lang=Fortran --src=",
-            ReprobuildShellSingleQuote(ppRel), " --out=",
-            ReprobuildShellSingleQuote(ppRel), " --dep=",
-            ReprobuildShellSingleQuote(scanDepRel), " --obj=",
-            ReprobuildShellSingleQuote(objRel), " --ddi=",
-            ReprobuildShellSingleQuote(ddiRel), " --src-orig=",
-            ReprobuildShellSingleQuote(sourceArg)));
-          std::string const scanWrapper =
-            cmStrCat(wrapperDir, "/", scan.ToolId);
-          if (!ReprobuildWriteCommandScript(scanWrapper, binaryDir,
-                                            scanLines)) {
-            this->GetCMakeInstance()->IssueMessage(
-              MessageType::FATAL_ERROR,
-              cmStrCat("Could not write Reprobuild Fortran scanner wrapper: ",
-                       scanWrapper));
-            return;
-          }
-          usedTools.insert(scan.ToolId);
-          scan.Inputs = { sourcePath, tdiRel };
-          if (declareOutputs) {
-            scan.Outputs = { ppRel, ddiRel };
-            scan.Depfile = scanDepRel;
-          } else {
-            scan.Cacheable = false;
-          }
-          dyndepDdis[lang].push_back(ddiRel);
-          dyndepScanActions[lang].push_back(scan.Id);
-          dyndepActionMaps[lang].push_back({ objRel, ReprobuildSafeId(
-                                                       cmStrCat("compile-",
-                                                                gt->GetName(),
-                                                                "-", objRel,
-                                                                configSuffix)) });
-          target.CustomActions.push_back(std::move(scan));
-
-          args.push_back("-o");
-          args.push_back(objRel);
-          args.push_back("-c");
-          args.push_back(ppRel);
-        } else if (lang == "ISPC") {
-          args.push_back("-M");
-          args.push_back("-MT");
-          args.push_back(objRel);
-          args.push_back("-MF");
-          args.push_back(depRel);
-          args.push_back("-o");
-          args.push_back(objRel);
-          args.push_back("--emit-obj");
-          args.push_back(sourceArg);
-          if (!languageByproducts.empty()) {
-            args.push_back("-h");
-            args.push_back(languageByproducts.front());
-          }
-        } else {
-          if (lang == "CUDA" &&
-              gt->GetPropertyAsBool("CUDA_SEPARABLE_COMPILATION")) {
-            ReprobuildAppendParsed(
-              args, mf->GetSafeDefinition("_CMAKE_CUDA_RDC_FLAG"));
-          }
-          bool const needCxxDyndep =
-            lang == "CXX" && gt->NeedDyndepForSource(lang, config, source);
-          if (needCxxDyndep) {
-            std::string const ddiRel = cmStrCat(objRel, ".ddi");
-            std::string const scanDepRel = cmStrCat(ddiRel, ".d");
-            ReprobuildAction scan;
-            scan.Id = ReprobuildSafeId(cmStrCat("scan-", gt->GetName(), "-",
-                                                objRel, configSuffix));
-            scan.Var = ReprobuildNimIdent("action", nextActionVar++,
-                                          scan.Id);
-            scan.ToolId = ReprobuildSafeId(cmStrCat("reprobuild-cmake-",
-                                                    scan.Var));
-            std::string const scanner =
-              mf->GetSafeDefinition("CMAKE_CXX_COMPILER_CLANG_SCAN_DEPS");
-            if (scanner.empty()) {
+          if (!inlined) {
+            std::string const wrapperPath =
+              cmStrCat(wrapperDir, "/", custom.ToolId);
+            if (!ReprobuildWriteCommandScript(wrapperPath, "", commandLines)) {
               this->GetCMakeInstance()->IssueMessage(
                 MessageType::FATAL_ERROR,
-                "The Reprobuild generator M6 CXX module path requires "
-                "CMAKE_CXX_COMPILER_CLANG_SCAN_DEPS.");
+                cmStrCat("Could not write Reprobuild custom command wrapper: ",
+                         wrapperPath));
               return;
             }
+            usedTools.insert(custom.ToolId);
+          }
+          target.CustomActions.push_back(std::move(custom));
+          ++customIndex;
+        }
+
+        if (gt->IsBundleOnApple()) {
+          sawAppleBundle = true;
+          std::vector<cmSourceFile const*> macContentSources;
+          std::vector<cmSourceFile const*> headerSources;
+          gt->GetHeaderSources(headerSources, config);
+          cm::append(macContentSources, headerSources);
+          std::vector<cmSourceFile const*> extraSources;
+          gt->GetExtraSources(extraSources, config);
+          cm::append(macContentSources, extraSources);
+          unsigned int macContentIndex = 0;
+          for (cmSourceFile const* macSource : macContentSources) {
+            cmGeneratorTarget::SourceFileFlags flags =
+              gt->GetTargetSourceFileFlags(macSource);
+            if (flags.Type == cmGeneratorTarget::SourceFileTypeNormal ||
+                flags.MacFolder == nullptr || *flags.MacFolder == '\0') {
+              continue;
+            }
+            std::string const macDir =
+              cmStrCat(gt->GetMacContentDirectory(
+                         config, cmStateEnums::RuntimeBinaryArtifact),
+                       "/", flags.MacFolder);
+            std::string const outputFull = cmStrCat(
+              macDir, "/",
+              cmSystemTools::GetFilenameName(macSource->GetFullPath()));
+            std::string const outputRel = ReprobuildConfigFullPath(
+              binaryDir, outputFull, config, multiConfig);
+            ReprobuildAction content;
+            content.Id =
+              ReprobuildSafeId(cmStrCat("bundle-content-", gt->GetName(), "-",
+                                        macContentIndex++, configSuffix));
+            content.Var =
+              ReprobuildNimIdent("action", nextActionVar++, content.Id);
+            content.ToolId =
+              ReprobuildSafeId(cmStrCat("reprobuild-cmake-", content.Var));
+            content.Inputs = { macSource->GetFullPath() };
+            content.Cacheable = declareOutputs;
+            if (declareOutputs) {
+              content.Outputs = { outputRel };
+            }
+            std::vector<std::string> lines;
+            lines.push_back(cmStrCat(
+              ReprobuildShellSingleQuote(cmSystemTools::GetCMakeCommand()),
+              " -E make_directory ", ReprobuildShellSingleQuote(macDir)));
+            lines.push_back(cmStrCat(
+              ReprobuildShellSingleQuote(cmSystemTools::GetCMakeCommand()),
+              cmSystemTools::FileIsDirectory(macSource->GetFullPath())
+                ? " -E copy_directory "
+                : " -E copy ",
+              ReprobuildShellSingleQuote(macSource->GetFullPath()), " ",
+              ReprobuildShellSingleQuote(outputFull)));
+            std::string const wrapperPath =
+              cmStrCat(wrapperDir, "/", content.ToolId);
+            if (!ReprobuildWriteCommandScript(wrapperPath, binaryDir, lines)) {
+              this->GetCMakeInstance()->IssueMessage(
+                MessageType::FATAL_ERROR,
+                cmStrCat("Could not write Reprobuild bundle content wrapper: ",
+                         wrapperPath));
+              return;
+            }
+            usedTools.insert(content.ToolId);
+            ReprobuildAppendCleanFile(cleanFiles, binaryDir, outputRel);
+            target.CustomActions.push_back(std::move(content));
+          }
+        }
+
+        std::vector<cmSourceFile const*> sources;
+        gt->GetObjectSources(sources, config);
+        if (sources.empty()) {
+          this->GetCMakeInstance()->IssueMessage(
+            MessageType::FATAL_ERROR,
+            cmStrCat("The Reprobuild generator M4 slice requires normal "
+                     "target '",
+                     gt->GetName(),
+                     "' to have at least one C or CXX source."));
+          return;
+        }
+
+        std::map<std::string, std::string> pchActionIds;
+        bool targetHasCudaSources = false;
+        for (cmSourceFile const* source : sources) {
+          if (source->GetLanguage() == "CUDA") {
+            targetHasCudaSources = true;
+          }
+          if (!source->IsPchSource()) {
+            continue;
+          }
+          std::string const objFull = cmStrCat(gt->GetObjectDirectory(config),
+                                               gt->GetObjectName(source));
+          std::string const objRel =
+            ReprobuildConfigFullPath(binaryDir, objFull, config, multiConfig);
+          pchActionIds[source->GetFullPath()] = ReprobuildSafeId(
+            cmStrCat("compile-", gt->GetName(), "-", objRel, configSuffix));
+        }
+
+        std::map<std::string, std::vector<std::string>> dyndepDdis;
+        std::map<std::string, std::vector<std::pair<std::string, std::string>>>
+          dyndepActionMaps;
+        std::map<std::string, std::vector<std::string>> dyndepScanActions;
+        std::map<std::string, std::map<std::string, cmSourceFile const*>>
+          dyndepCxxModuleSources;
+        std::vector<std::string> linkObjects;
+        std::vector<cmSourceFile const*> swiftSources;
+        std::vector<std::string> swiftObjectRels;
+        for (cmSourceFile const* source : sources) {
+          if (source->GetLanguage() != "Swift") {
+            continue;
+          }
+          std::string const objFull = cmStrCat(gt->GetObjectDirectory(config),
+                                               gt->GetObjectName(source));
+          std::string const objRel =
+            ReprobuildConfigFullPath(binaryDir, objFull, config, multiConfig);
+          swiftSources.push_back(source);
+          swiftObjectRels.push_back(objRel);
+          linkObjects.push_back(objRel);
+          ReprobuildAppendCleanFile(cleanFiles, binaryDir, objRel);
+          ReprobuildAppendCleanFile(cleanFiles, binaryDir,
+                                    cmStrCat(objRel, ".d"));
+          ReprobuildAppendCleanFile(
+            cleanFiles, binaryDir,
+            ReprobuildSwiftDepsPath(binaryDir, gt, source, objRel));
+          ReprobuildAppendCleanFile(
+            cleanFiles, binaryDir,
+            ReprobuildSwiftDiagnosticsPath(binaryDir, gt, source, objRel));
+          cmSystemTools::MakeDirectory(
+            cmSystemTools::GetFilenamePath(cmStrCat(binaryDir, "/", objRel)));
+        }
+        if (!swiftSources.empty()) {
+          cmMakefile const* mf = lg->GetMakefile();
+          usedLanguages.insert("Swift");
+          std::vector<std::string> swiftArgs;
+          ReprobuildAppendCommonCompileArgs(swiftArgs, lg.get(), gt, config,
+                                            "Swift");
+          if (gt->GetType() != cmStateEnums::EXECUTABLE) {
+            swiftArgs.push_back("-parse-as-library");
+          }
+          swiftArgs.push_back("-module-name");
+          swiftArgs.push_back(gt->GetSwiftModuleName());
+          cm::optional<cmSwiftCompileMode> swiftMode =
+            lg->GetSwiftCompileMode(gt, config);
+          bool const splitSwift = swiftMode.has_value();
+          if (swiftMode) {
+            std::string const mode =
+              ReprobuildSwiftCompileModeName(*swiftMode);
+            if (mode == "wholemodule") {
+              swiftArgs.push_back("-whole-module-optimization");
+            } else if (mode == "incremental") {
+              swiftArgs.push_back("-incremental");
+            } else if (mode == "singlefile") {
+              swiftArgs.push_back("-driver-use-frontend-path");
+              swiftArgs.push_back(
+                mf->GetSafeDefinition("CMAKE_Swift_COMPILER"));
+            }
+          }
+          std::string const ofmRel =
+            ReprobuildSwiftOutputMapPath(binaryDir, gt, config, multiConfig);
+          std::string const ofmFull = cmStrCat(binaryDir, "/", ofmRel);
+          if (!ReprobuildWriteSwiftOutputMap(ofmFull, binaryDir, gt,
+                                             swiftSources, swiftObjectRels,
+                                             config)) {
+            this->GetCMakeInstance()->IssueMessage(
+              MessageType::FATAL_ERROR,
+              cmStrCat("Could not write Reprobuild Swift output map: ",
+                       ofmFull));
+            return;
+          }
+          sawSwiftOutputMap = true;
+          ReprobuildAppendCleanFile(cleanFiles, binaryDir, ofmRel);
+          swiftArgs.push_back("-output-file-map");
+          swiftArgs.push_back(ofmRel);
+          swiftArgs.push_back("-emit-dependencies");
+          swiftArgs.push_back("-serialize-diagnostics");
+          swiftArgs.push_back("-c");
+          for (cmSourceFile const* swiftSource : swiftSources) {
+            swiftArgs.push_back(swiftSource->GetFullPath());
+          }
+
+          bool const emitModuleSeparately = splitSwift &&
+            gt->GetProperty("Swift_SEPARATE_MODULE_EMISSION").IsOn();
+          std::string const swiftModuleRel = ReprobuildConfigFullPath(
+            binaryDir, gt->GetSwiftModulePath(config), config, multiConfig);
+          if (!swiftModuleRel.empty()) {
+            ReprobuildAppendCleanFile(cleanFiles, binaryDir, swiftModuleRel);
+          }
+          std::string emitModuleActionId;
+          if (emitModuleSeparately && !swiftModuleRel.empty()) {
+            sawSwiftSplit = true;
+            ReprobuildAction emitModule;
+            emitModule.Id = ReprobuildSafeId(
+              cmStrCat("emit-module-", gt->GetName(), configSuffix));
+            emitModule.Var =
+              ReprobuildNimIdent("action", nextActionVar++, emitModule.Id);
+            emitModule.ToolId = ReprobuildToolId("Swift");
+            usedTools.insert(emitModule.ToolId);
+            emitModule.Args = swiftArgs;
+            emitModule.Args.insert(emitModule.Args.begin(), "-emit-module");
+            emitModule.Args.push_back("-emit-module-path");
+            emitModule.Args.push_back(swiftModuleRel);
+            for (cmSourceFile const* swiftSource : swiftSources) {
+              emitModule.Inputs.push_back(swiftSource->GetFullPath());
+            }
+            emitModule.Inputs.push_back(ofmRel);
+            if (declareOutputs) {
+              emitModule.Outputs = { swiftModuleRel };
+            } else {
+              emitModule.Cacheable = false;
+            }
+            emitModule.CompileDirectory = binaryDir;
+            emitModule.CompileFile = swiftSources.front()->GetFullPath();
+            emitModule.CompileCommand =
+              cmStrCat(mf->GetSafeDefinition(ReprobuildCompilerVar("Swift")),
+                       " ", cmJoin(emitModule.Args, " "));
+            emitModuleActionId = emitModule.Id;
+            target.CustomActions.push_back(std::move(emitModule));
+          } else if (!swiftModuleRel.empty()) {
+            swiftArgs.push_back("-emit-module");
+            swiftArgs.push_back("-emit-module-path");
+            swiftArgs.push_back(swiftModuleRel);
+          }
+
+          ReprobuildAction swiftCompile;
+          swiftCompile.Id = ReprobuildSafeId(
+            cmStrCat("compile-", gt->GetName(), "-Swift", configSuffix));
+          swiftCompile.Var =
+            ReprobuildNimIdent("action", nextActionVar++, swiftCompile.Id);
+          swiftCompile.ToolId = ReprobuildToolId("Swift");
+          usedTools.insert(swiftCompile.ToolId);
+          swiftCompile.Args = swiftArgs;
+          for (cmSourceFile const* swiftSource : swiftSources) {
+            swiftCompile.Inputs.push_back(swiftSource->GetFullPath());
+          }
+          swiftCompile.Inputs.push_back(ofmRel);
+          if (!emitModuleActionId.empty()) {
+            swiftCompile.Deps.push_back(emitModuleActionId);
+          }
+          if (declareOutputs) {
+            swiftCompile.Outputs = swiftObjectRels;
+            for (std::size_t i = 0; i < swiftSources.size(); ++i) {
+              swiftCompile.Outputs.push_back(
+                cmStrCat(swiftObjectRels[i], ".d"));
+              swiftCompile.Outputs.push_back(ReprobuildSwiftDepsPath(
+                binaryDir, gt, swiftSources[i], swiftObjectRels[i]));
+              swiftCompile.Outputs.push_back(ReprobuildSwiftDiagnosticsPath(
+                binaryDir, gt, swiftSources[i], swiftObjectRels[i]));
+            }
+            if (!emitModuleSeparately && !swiftModuleRel.empty()) {
+              swiftCompile.Outputs.push_back(swiftModuleRel);
+            }
+          } else {
+            swiftCompile.Cacheable = false;
+          }
+          swiftCompile.Pool =
+            ReprobuildPoolProperty(gt, nullptr, "JOB_POOL_COMPILE", "");
+          swiftCompile.CompileDirectory = binaryDir;
+          swiftCompile.CompileFile = swiftSources.front()->GetFullPath();
+          swiftCompile.CompileCommand =
+            cmStrCat(mf->GetSafeDefinition(ReprobuildCompilerVar("Swift")),
+                     " ", cmJoin(swiftCompile.Args, " "));
+          target.CompileActions.push_back(std::move(swiftCompile));
+        }
+        for (cmSourceFile const* source : sources) {
+          std::string const lang = source->GetLanguage();
+          if (lang == "Swift") {
+            continue;
+          }
+          if (target.HcrEnabled && lang != "C" && lang != "CXX") {
+            this->GetCMakeInstance()->IssueMessage(
+              MessageType::FATAL_ERROR,
+              cmStrCat("Reprobuild HCR profile unavailable for target '",
+                       gt->GetName(), "': source '", source->GetFullPath(),
+                       "' uses language '", lang,
+                       "'; the current HCR support profile accepts only C "
+                       "and CXX object sources."));
+            return;
+          }
+          if (lang != "C" && lang != "CXX" && lang != "Fortran" &&
+              lang != "CUDA" && lang != "ISPC") {
+            this->GetCMakeInstance()->IssueMessage(
+              MessageType::FATAL_ERROR,
+              cmStrCat(
+                "The Reprobuild generator supports only C, CXX, "
+                "Fortran, CUDA, ISPC, and Swift object sources; source '",
+                source->GetFullPath(), "' uses language '", lang, "'."));
+            return;
+          }
+          usedLanguages.insert(lang);
+
+          cmMakefile const* mf = lg->GetMakefile();
+          if (lang != "Fortran" && ReprobuildCompilerIsMsvc(mf, lang)) {
+            this->GetCMakeInstance()->IssueMessage(
+              MessageType::FATAL_ERROR,
+              "The Reprobuild generator M3 slice does not support MSVC "
+              "/showIncludes dependency reports yet; refusing to build "
+              "without "
+              "recognized dependency evidence.");
+            return;
+          }
+          if (lang != "Fortran" &&
+              !ReprobuildCompilerUsesMakeDepfile(mf, lang)) {
+            this->GetCMakeInstance()->IssueMessage(
+              MessageType::FATAL_ERROR,
+              cmStrCat(
+                "The Reprobuild generator M3 slice supports depfiles "
+                "only for GCC-compatible C/CXX compilers; compiler id '",
+                mf->GetSafeDefinition(
+                  cmStrCat("CMAKE_", lang, "_COMPILER_ID")),
+                "' is not supported."));
+            return;
+          }
+
+          std::string const objFull = cmStrCat(gt->GetObjectDirectory(config),
+                                               gt->GetObjectName(source));
+          std::string const objRel =
+            ReprobuildConfigFullPath(binaryDir, objFull, config, multiConfig);
+          std::string const depRel = cmStrCat(objRel, ".d");
+          if (!source->IsPchSource() || mf->IsOn("CMAKE_LINK_PCH")) {
+            linkObjects.push_back(objRel);
+          }
+          ReprobuildAppendCleanFile(cleanFiles, binaryDir, objRel);
+          ReprobuildAppendCleanFile(cleanFiles, binaryDir, depRel);
+          std::vector<std::string> languageByproducts;
+          if (lang == "ISPC") {
+            std::string ispcSource =
+              cmSystemTools::GetFilenameWithoutLastExtension(
+                gt->GetObjectName(source));
+            ispcSource =
+              cmSystemTools::GetFilenameWithoutLastExtension(ispcSource);
+            std::string headerDir = gt->GetObjectDirectory(config);
+            if (cmValue prop = gt->GetProperty("ISPC_HEADER_DIRECTORY")) {
+              headerDir =
+                cmStrCat(lg->GetCurrentBinaryDirectory(), "/", *prop);
+            }
+            std::string const headerSuffix =
+              gt->GetSafeProperty("ISPC_HEADER_SUFFIX");
+            std::string const headerRel = ReprobuildConfigFullPath(
+              binaryDir, cmStrCat(headerDir, "/", ispcSource, headerSuffix),
+              config, multiConfig);
+            languageByproducts.push_back(headerRel);
+            ReprobuildAppendCleanFile(cleanFiles, binaryDir, headerRel);
+            std::vector<std::string> suffixes =
+              detail::ComputeISPCObjectSuffixes(gt);
+            std::vector<std::string> extraObjects =
+              detail::ComputeISPCExtraObjects(gt->GetObjectName(source),
+                                              gt->GetObjectDirectory(config),
+                                              suffixes);
+            for (std::string const& extraObject : extraObjects) {
+              std::string const extraRel = ReprobuildConfigFullPath(
+                binaryDir, extraObject, config, multiConfig);
+              languageByproducts.push_back(extraRel);
+              ReprobuildAppendUnique(linkObjects, extraRel);
+              ReprobuildAppendCleanFile(cleanFiles, binaryDir, extraRel);
+              sawISPCMultiOutput = true;
+            }
+          }
+          cmSystemTools::MakeDirectory(
+            cmSystemTools::GetFilenamePath(cmStrCat(binaryDir, "/", objRel)));
+          std::string sourcePath = source->GetFullPath();
+          std::string sourceArg = sourcePath;
+          std::string const binaryPrefix = cmStrCat(binaryDir, "/");
+          // M27: when a binary-tree source file is produced by an attached
+          // ``add_custom_command`` whose OUTPUT path is config-independent,
+          // the COMMAND argv writes to the literal user-specified path.
+          // The compile input must agree — otherwise gcc opens a path that
+          // does not exist (the ``<binDir>/<config>/<file>`` rewrite below
+          // is what the broken path looked like before the fix). We use
+          // the same ``emittedCustomOutputs`` set the custom-command
+          // emission populates for dedup: anything claimed there is the
+          // canonical unprefixed location the COMMAND writes to.
+          bool sourceLivesAtUnprefixedPath = false;
+          if (multiConfig && sourcePath.rfind(binaryPrefix, 0) == 0) {
+            std::string const sourceRel =
+              ReprobuildRelativeTo(binaryDir, sourcePath);
+            if (emittedCustomOutputs.count(sourceRel) > 0) {
+              sourceLivesAtUnprefixedPath = true;
+              sourcePath = sourceRel;
+            }
+          }
+          if (multiConfig && !sourceLivesAtUnprefixedPath &&
+              source->GetFullPath().rfind(binaryPrefix, 0) == 0) {
+            sourcePath = ReprobuildConfigFullPath(
+              binaryDir, source->GetFullPath(), config, true);
+            sourceArg = cmStrCat(binaryDir, "/", sourcePath);
+          }
+          // TryCompile test sources live under each project's per-invocation
+          // <binary_dir>/CMakeFiles/CMakeScratch/TryCompile-<random>/ scratch
+          // dir, so projects with byte-identical probe content compile-hash
+          // to distinct strong-fingerprint inputs and never share the action
+          // cache. Stage the source through a content-addressed path under
+          // the user-level reprobuild store so two projects asking the same
+          // CMake check actually hit. The path move is symmetric — both
+          // action.Inputs and the compiler-argv entry sourceArg adopt the
+          // canonical path so weak and strong fingerprints both line up.
+          // Only a source that needs nothing beside it is moved; see
+          // ReprobuildTryCompileSourceIsRelocatable.
+          if (this->GetCMakeInstance()->GetIsInTryCompile() &&
+              ReprobuildTryCompileSourceIsRelocatable(source->GetFullPath(),
+                                                      binaryDir)) {
+            std::string const canonicalPath =
+              ReprobuildCanonicaliseTryCompileSourcePath(sourceArg);
+            if (canonicalPath != sourceArg) {
+              sourcePath = canonicalPath;
+              sourceArg = canonicalPath;
+            }
+          }
+
+          std::vector<std::string> args;
+          std::string explicitLanguageFlags;
+          gt->AddExplicitLanguageFlags(explicitLanguageFlags, *source);
+          ReprobuildAppendParsed(args, explicitLanguageFlags);
+
+          std::string flags;
+          lg->GetTargetCompileFlags(gt, config, lang, flags, "");
+          ReprobuildAppendParsed(args, flags);
+          ReprobuildAppendSourcePropertyCompileArgs(args, lg.get(), gt, source,
+                                                    config, lang);
+
+          std::vector<std::string> definitions;
+          gt->GetCompileDefinitions(definitions, config, lang);
+          for (std::string const& def : definitions) {
+            args.push_back(cmStrCat("-D", def));
+          }
+
+          std::vector<std::string> includes;
+          lg->GetIncludeDirectories(includes, gt, lang, config);
+          for (std::string const& include : includes) {
+            args.push_back(cmStrCat("-I", include));
+          }
+
+          std::map<std::string, std::string> pchSources;
+          std::vector<std::string> pchArchs = gt->GetPchArchs(config, lang);
+          for (std::string const& arch : pchArchs) {
+            std::string const pchSource = gt->GetPchSource(config, lang, arch);
+            if (!pchSource.empty()) {
+              pchSources[pchSource] = arch;
+            }
+          }
+          bool const sourceUsesPch = !pchSources.empty() &&
+            !source->GetProperty("SKIP_PRECOMPILE_HEADERS");
+          if (sourceUsesPch) {
+            std::string pchOptions;
+            auto const pchIt = pchSources.find(source->GetFullPath());
+            if (pchIt != pchSources.end()) {
+              pchOptions =
+                gt->GetPchCreateCompileOptions(config, lang, pchIt->second);
+            } else {
+              pchOptions = gt->GetPchUseCompileOptions(config, lang);
+            }
+            ReprobuildAppendOptionList(args, pchOptions);
+          }
+
+          if (target.HcrEnabled) {
+            std::string const compilerId =
+              mf->GetSafeDefinition(cmStrCat("CMAKE_", lang, "_COMPILER_ID"));
+            if (!ReprobuildCompilerSupportsHcr(compilerId)) {
+              this->GetCMakeInstance()->IssueMessage(
+                MessageType::FATAL_ERROR,
+                cmStrCat("Reprobuild HCR profile unavailable for target '",
+                         gt->GetName(), "': compiler id '", compilerId,
+                         "' does not support the current debug-info and "
+                         "patchable-function-entry HCR profile."));
+              return;
+            }
+            if (ReprobuildContainsNoDebugFlag(args)) {
+              this->GetCMakeInstance()->IssueMessage(
+                MessageType::FATAL_ERROR,
+                cmStrCat("Reprobuild HCR profile unavailable for target '",
+                         gt->GetName(),
+                         "': debug information was explicitly disabled by "
+                         "compile flags."));
+              return;
+            }
+            if (ReprobuildContainsLtoFlag(args)) {
+              this->GetCMakeInstance()->IssueMessage(
+                MessageType::FATAL_ERROR,
+                cmStrCat("Reprobuild HCR profile unavailable for target '",
+                         gt->GetName(),
+                         "': LTO flags are incompatible with HCR affected "
+                         "object lookup."));
+              return;
+            }
+            ReprobuildAppendHcrCompilePolicy(args);
+          }
+
+          if (lang == "Fortran") {
+            std::string const ppRel = cmStrCat(objRel, ".ddi.i");
+            std::string const ddiRel = cmStrCat(objRel, ".ddi");
+            std::string const scanDepRel = cmStrCat(ppRel, ".d");
+
+            ReprobuildAction scan;
+            scan.Id = ReprobuildSafeId(
+              cmStrCat("scan-", gt->GetName(), "-", objRel, configSuffix));
+            scan.Var = ReprobuildNimIdent("action", nextActionVar++, scan.Id);
+            scan.ToolId =
+              ReprobuildSafeId(cmStrCat("reprobuild-cmake-", scan.Var));
             std::vector<std::string> scanLines;
+            scanLines.push_back(
+              cmStrCat(ReprobuildShellSingleQuote(
+                         mf->GetSafeDefinition(ReprobuildCompilerVar(lang))),
+                       " -cpp -E ", cmJoin(args, " "), " ",
+                       ReprobuildShellSingleQuote(sourceArg), " -o ",
+                       ReprobuildShellSingleQuote(ppRel)));
+            std::string const tdiRel =
+              cmStrCat("CMakeFiles/reprobuild/dyndep/", target.Var, "-", lang,
+                       "DependInfo.json");
             scanLines.push_back(cmStrCat(
-              ReprobuildShellSingleQuote(scanner), " -format=p1689 -- ",
-              ReprobuildShellSingleQuote(
-                mf->GetSafeDefinition(ReprobuildCompilerVar(lang))),
-              " ", cmJoin(args, " "), " -x c++ ",
-              ReprobuildShellSingleQuote(sourceArg), " -c -o ",
-              ReprobuildShellSingleQuote(objRel), " -MT ",
-              ReprobuildShellSingleQuote(ddiRel), " -MD -MF ",
-              ReprobuildShellSingleQuote(scanDepRel), " > ",
-              ReprobuildShellSingleQuote(ddiRel)));
+              ReprobuildShellSingleQuote(cmSystemTools::GetCMakeCommand()),
+              " -E cmake_ninja_depends --tdi=",
+              ReprobuildShellSingleQuote(tdiRel),
+              " --lang=Fortran --src=", ReprobuildShellSingleQuote(ppRel),
+              " --out=", ReprobuildShellSingleQuote(ppRel),
+              " --dep=", ReprobuildShellSingleQuote(scanDepRel),
+              " --obj=", ReprobuildShellSingleQuote(objRel),
+              " --ddi=", ReprobuildShellSingleQuote(ddiRel),
+              " --src-orig=", ReprobuildShellSingleQuote(sourceArg)));
             std::string const scanWrapper =
               cmStrCat(wrapperDir, "/", scan.ToolId);
             if (!ReprobuildWriteCommandScript(scanWrapper, binaryDir,
                                               scanLines)) {
               this->GetCMakeInstance()->IssueMessage(
                 MessageType::FATAL_ERROR,
-                cmStrCat("Could not write Reprobuild CXX scanner wrapper: ",
-                         scanWrapper));
+                cmStrCat(
+                  "Could not write Reprobuild Fortran scanner wrapper: ",
+                  scanWrapper));
               return;
             }
             usedTools.insert(scan.ToolId);
-            scan.Inputs = { sourcePath };
+            scan.Inputs = { sourcePath, tdiRel };
             if (declareOutputs) {
-              scan.Outputs = { ddiRel };
+              scan.Outputs = { ppRel, ddiRel };
               scan.Depfile = scanDepRel;
             } else {
               scan.Cacheable = false;
             }
             dyndepDdis[lang].push_back(ddiRel);
             dyndepScanActions[lang].push_back(scan.Id);
-            dyndepActionMaps[lang].push_back({ objRel, ReprobuildSafeId(
-                                                         cmStrCat("compile-",
-                                                                  gt->GetName(),
-                                                                  "-", objRel,
-                                                                  configSuffix)) });
-            if (cmGeneratorFileSet const* fs =
-                  gt->GetFileSetForSource(config, source)) {
-              if (fs->GetType() == cm::FileSetMetadata::CXX_MODULES) {
-                dyndepCxxModuleSources[lang][objRel] = source;
+            dyndepActionMaps[lang].push_back(
+              { objRel,
+                ReprobuildSafeId(cmStrCat("compile-", gt->GetName(), "-",
+                                          objRel, configSuffix)) });
+            target.CustomActions.push_back(std::move(scan));
+
+            args.push_back("-o");
+            args.push_back(objRel);
+            args.push_back("-c");
+            args.push_back(ppRel);
+          } else if (lang == "ISPC") {
+            args.push_back("-M");
+            args.push_back("-MT");
+            args.push_back(objRel);
+            args.push_back("-MF");
+            args.push_back(depRel);
+            args.push_back("-o");
+            args.push_back(objRel);
+            args.push_back("--emit-obj");
+            args.push_back(sourceArg);
+            if (!languageByproducts.empty()) {
+              args.push_back("-h");
+              args.push_back(languageByproducts.front());
+            }
+          } else {
+            if (lang == "CUDA" &&
+                gt->GetPropertyAsBool("CUDA_SEPARABLE_COMPILATION")) {
+              ReprobuildAppendParsed(
+                args, mf->GetSafeDefinition("_CMAKE_CUDA_RDC_FLAG"));
+            }
+            bool const needCxxDyndep =
+              lang == "CXX" && gt->NeedDyndepForSource(lang, config, source);
+            if (needCxxDyndep) {
+              std::string const ddiRel = cmStrCat(objRel, ".ddi");
+              std::string const scanDepRel = cmStrCat(ddiRel, ".d");
+              ReprobuildAction scan;
+              scan.Id = ReprobuildSafeId(
+                cmStrCat("scan-", gt->GetName(), "-", objRel, configSuffix));
+              scan.Var =
+                ReprobuildNimIdent("action", nextActionVar++, scan.Id);
+              scan.ToolId =
+                ReprobuildSafeId(cmStrCat("reprobuild-cmake-", scan.Var));
+              std::string const scanner =
+                mf->GetSafeDefinition("CMAKE_CXX_COMPILER_CLANG_SCAN_DEPS");
+              if (scanner.empty()) {
+                this->GetCMakeInstance()->IssueMessage(
+                  MessageType::FATAL_ERROR,
+                  "The Reprobuild generator M6 CXX module path requires "
+                  "CMAKE_CXX_COMPILER_CLANG_SCAN_DEPS.");
+                return;
+              }
+              std::vector<std::string> scanLines;
+              scanLines.push_back(cmStrCat(
+                ReprobuildShellSingleQuote(scanner), " -format=p1689 -- ",
+                ReprobuildShellSingleQuote(
+                  mf->GetSafeDefinition(ReprobuildCompilerVar(lang))),
+                " ", cmJoin(args, " "), " -x c++ ",
+                ReprobuildShellSingleQuote(sourceArg), " -c -o ",
+                ReprobuildShellSingleQuote(objRel), " -MT ",
+                ReprobuildShellSingleQuote(ddiRel), " -MD -MF ",
+                ReprobuildShellSingleQuote(scanDepRel), " > ",
+                ReprobuildShellSingleQuote(ddiRel)));
+              std::string const scanWrapper =
+                cmStrCat(wrapperDir, "/", scan.ToolId);
+              if (!ReprobuildWriteCommandScript(scanWrapper, binaryDir,
+                                                scanLines)) {
+                this->GetCMakeInstance()->IssueMessage(
+                  MessageType::FATAL_ERROR,
+                  cmStrCat("Could not write Reprobuild CXX scanner wrapper: ",
+                           scanWrapper));
+                return;
+              }
+              usedTools.insert(scan.ToolId);
+              scan.Inputs = { sourcePath };
+              if (declareOutputs) {
+                scan.Outputs = { ddiRel };
+                scan.Depfile = scanDepRel;
+              } else {
+                scan.Cacheable = false;
+              }
+              dyndepDdis[lang].push_back(ddiRel);
+              dyndepScanActions[lang].push_back(scan.Id);
+              dyndepActionMaps[lang].push_back(
+                { objRel,
+                  ReprobuildSafeId(cmStrCat("compile-", gt->GetName(), "-",
+                                            objRel, configSuffix)) });
+              if (cmGeneratorFileSet const* fs =
+                    gt->GetFileSetForSource(config, source)) {
+                if (fs->GetType() == cm::FileSetMetadata::CXX_MODULES) {
+                  dyndepCxxModuleSources[lang][objRel] = source;
+                }
+              }
+              target.CustomActions.push_back(std::move(scan));
+              std::string modmapFlag =
+                mf->GetSafeDefinition("CMAKE_CXX_MODULE_MAP_FLAG");
+              cmSystemTools::ReplaceString(modmapFlag, "<MODULE_MAP_FILE>",
+                                           cmStrCat(objRel, ".modmap"));
+              ReprobuildAppendParsed(args, modmapFlag);
+            }
+            args.push_back("-MD");
+            args.push_back("-MT");
+            args.push_back(objRel);
+            args.push_back("-MF");
+            args.push_back(depRel);
+            args.push_back("-o");
+            args.push_back(objRel);
+            args.push_back("-c");
+            args.push_back(sourceArg);
+          }
+
+          ReprobuildAction action;
+          action.Id = ReprobuildSafeId(
+            cmStrCat("compile-", gt->GetName(), "-", objRel, configSuffix));
+          action.Var =
+            ReprobuildNimIdent("action", nextActionVar++, action.Id);
+          action.ToolId = ReprobuildToolId(lang);
+          std::string const launcher =
+            lg->GetRuleLauncher(gt, "RULE_LAUNCH_COMPILE", config);
+          if (!launcher.empty()) {
+            std::vector<std::string> launcherArgs;
+            if (launcher.find(';') != std::string::npos) {
+              cmList launcherList{ launcher };
+              launcherArgs.assign(launcherList.begin(), launcherList.end());
+            } else {
+              ReprobuildAppendParsed(launcherArgs, launcher);
+            }
+            if (!launcherArgs.empty()) {
+              action.ToolId =
+                ReprobuildSafeId(cmStrCat("reprobuild-cmake-", action.Var));
+              std::string const wrapperPath =
+                cmStrCat(wrapperDir, "/", action.ToolId);
+              if (!ReprobuildWriteLaunchedWrapper(
+                    wrapperPath, launcherArgs,
+                    mf->GetSafeDefinition(ReprobuildCompilerVar(lang)))) {
+                this->GetCMakeInstance()->IssueMessage(
+                  MessageType::FATAL_ERROR,
+                  cmStrCat(
+                    "Could not write Reprobuild compiler launcher wrapper: ",
+                    wrapperPath));
+                return;
               }
             }
-            target.CustomActions.push_back(std::move(scan));
-            std::string modmapFlag =
-              mf->GetSafeDefinition("CMAKE_CXX_MODULE_MAP_FLAG");
-            cmSystemTools::ReplaceString(modmapFlag, "<MODULE_MAP_FILE>",
-                                         cmStrCat(objRel, ".modmap"));
-            ReprobuildAppendParsed(args, modmapFlag);
           }
-          args.push_back("-MD");
-          args.push_back("-MT");
-          args.push_back(objRel);
-          args.push_back("-MF");
-          args.push_back(depRel);
-          args.push_back("-o");
-          args.push_back(objRel);
-          args.push_back("-c");
-          args.push_back(sourceArg);
-        }
-
-        ReprobuildAction action;
-        action.Id = ReprobuildSafeId(cmStrCat("compile-", gt->GetName(), "-",
-                                              objRel, configSuffix));
-        action.Var = ReprobuildNimIdent("action", nextActionVar++, action.Id);
-        action.ToolId = ReprobuildToolId(lang);
-        std::string const launcher = lg->GetRuleLauncher(
-          gt, "RULE_LAUNCH_COMPILE", config);
-        if (!launcher.empty()) {
-          std::vector<std::string> launcherArgs;
-          if (launcher.find(';') != std::string::npos) {
-            cmList launcherList{ launcher };
-            launcherArgs.assign(launcherList.begin(), launcherList.end());
+          usedTools.insert(action.ToolId);
+          action.Args = args;
+          // Tier 2a + 2c: lift every C/CXX compile action to inline-exec.
+          // The compiler binary is fully resolved by CMake's language
+          // detection (CMAKE_<LANG>_COMPILER), so the action is
+          // self-contained and does not need a typed tool profile. This
+          // makes the action runnable by the direct provider without going
+          // through resolveAndWriteIdentity, AND lets the slow-path
+          // engine skip per-action tool-profile lookups for compiles.
+          // Fortran is excluded because its scan/dyndep machinery still
+          // assumes tool-profile lookup.
+          if (lang != "Fortran") {
+            std::string const compilerPath =
+              mf->GetSafeDefinition(ReprobuildCompilerVar(lang));
+            if (!compilerPath.empty()) {
+              action.Inline = true;
+              action.InlineArgv.clear();
+              // If a per-target RULE_LAUNCH_COMPILE launcher was configured,
+              // prepend its argv. The wrapper script the slow path writes
+              // (ReprobuildWriteLaunchedWrapper) effectively runs
+              // ``<launcher_argv> <compiler> "$@"`` — inline-exec mirrors
+              // that with the launcher argv directly in the action's argv.
+              if (!launcher.empty()) {
+                std::vector<std::string> launcherInline;
+                if (launcher.find(';') != std::string::npos) {
+                  cmList launcherList{ launcher };
+                  launcherInline.assign(launcherList.begin(),
+                                        launcherList.end());
+                } else {
+                  ReprobuildAppendParsed(launcherInline, launcher);
+                }
+                for (std::string const& part : launcherInline) {
+                  action.InlineArgv.push_back(part);
+                }
+              }
+              action.InlineArgv.push_back(compilerPath);
+              for (std::string const& arg : args) {
+                action.InlineArgv.push_back(arg);
+              }
+              action.InlineCwd = binaryDir;
+            }
+          }
+          if (lang == "Fortran") {
+            action.Inputs = { cmStrCat(objRel, ".ddi.i") };
           } else {
-            ReprobuildAppendParsed(launcherArgs, launcher);
+            action.Inputs = { sourcePath };
           }
-          if (!launcherArgs.empty()) {
-            action.ToolId = ReprobuildSafeId(cmStrCat("reprobuild-cmake-",
-                                                      action.Var));
-            std::string const wrapperPath =
-              cmStrCat(wrapperDir, "/", action.ToolId);
-            if (!ReprobuildWriteLaunchedWrapper(
-                  wrapperPath, launcherArgs,
-                  mf->GetSafeDefinition(ReprobuildCompilerVar(lang)))) {
+          if (declareOutputs) {
+            action.Outputs = { objRel };
+            cm::append(action.Outputs, languageByproducts);
+          } else {
+            action.Cacheable = false;
+          }
+          // ORDER AGAINST THIS TARGET'S CUSTOM COMMANDS, ALWAYS -- this used
+          // to live in the `else` above, so it applied only when the action
+          // did NOT declare its outputs (`declareOutputs` is `!IsCrossConfig`,
+          // i.e. false only in the cross-config case). In the ordinary
+          // single-config build, which is nearly every build, a compile action
+          // was emitted with no ordering edge to the commands generating its
+          // own sources.
+          //
+          // WHY THAT IS NOT CAUGHT BY THE DEPFILE. A source that includes a
+          // GENERATED header has no recorded dependency on it until a depfile
+          // exists, and no depfile exists until the source has compiled once.
+          // So on a clean build nothing orders the compile after the
+          // generator:
+          // `-j1` passes because the generator happens to be scheduled first,
+          // and `-j8` races and fails with the generated header "not found".
+          // Green on a developer's machine, intermittently red in CI.
+          //
+          // Ninja does not have this problem because CMake emits an explicit
+          // order-only (`||`) edge from every object in a target to that
+          // target's custom commands. This is that edge. It is unconditional
+          // because the ordering requirement does not depend on whether the
+          // action declares outputs or is cacheable -- only on the fact that
+          // something in this target may generate a source this compile reads.
+          for (ReprobuildAction const& custom : target.CustomActions) {
+            ReprobuildAppendUnique(action.Deps, custom.Id);
+          }
+          if (declareOutputs && lang != "Fortran") {
+            action.Depfile = depRel;
+          }
+          if (declareOutputs &&
+              (lang == "Fortran" ||
+               (lang == "CXX" &&
+                gt->NeedDyndepForSource(lang, config, source)))) {
+            action.DynamicDepsFile = cmStrCat("CMakeFiles/reprobuild/dyndep/",
+                                              target.Var, "-", lang, ".rbdyn");
+            if (lang == "CXX") {
+              action.Inputs.push_back(cmStrCat(objRel, ".modmap"));
+            }
+          }
+          if (sourceUsesPch) {
+            for (std::string const& arch : pchArchs) {
+              std::string const pchHeader =
+                gt->GetPchHeader(config, lang, arch);
+              if (!pchHeader.empty()) {
+                action.Inputs.push_back(pchHeader);
+              }
+              std::string const pchSource =
+                gt->GetPchSource(config, lang, arch);
+              if (!source->IsPchSource() && !pchSource.empty()) {
+                std::string const pchFile = gt->GetPchFile(config, lang, arch);
+                if (!pchFile.empty()) {
+                  action.Inputs.push_back(pchFile);
+                }
+                auto const pchAction = pchActionIds.find(pchSource);
+                if (pchAction != pchActionIds.end()) {
+                  action.Deps.push_back(pchAction->second);
+                }
+              }
+            }
+          }
+          if (source->IsPchSource()) {
+            action.Pool = ReprobuildPoolProperty(
+              gt, source, "JOB_POOL_PRECOMPILE_HEADER", "JOB_POOL_COMPILE");
+          } else {
+            action.Pool = ReprobuildPoolProperty(
+              gt, source, "JOB_POOL_COMPILE", "JOB_POOL_COMPILE");
+          }
+          action.CompileDirectory = binaryDir;
+          action.CompileFile = sourceArg;
+          action.CompileCommand =
+            cmStrCat(mf->GetSafeDefinition(ReprobuildCompilerVar(lang)), " ",
+                     cmJoin(args, " "));
+          std::string const argsText = cmJoin(args, " ");
+          if (argsText.size() > 2048) {
+            action.ResponseFile = cmStrCat("CMakeFiles/reprobuild/rsp/",
+                                           action.Var, "-", nextRsp++, ".rsp");
+            std::string const rspFull =
+              cmStrCat(binaryDir, "/", action.ResponseFile);
+            if (!ReprobuildWriteResponseFile(rspFull, args)) {
               this->GetCMakeInstance()->IssueMessage(
                 MessageType::FATAL_ERROR,
-                cmStrCat("Could not write Reprobuild compiler launcher wrapper: ",
-                         wrapperPath));
+                cmStrCat("Could not write Reprobuild response file: ",
+                         rspFull));
               return;
             }
+            action.Args = { cmStrCat("@", action.ResponseFile) };
+            action.Inputs.push_back(action.ResponseFile);
           }
+          if (target.HcrEnabled && (lang == "C" || lang == "CXX")) {
+            target.HcrObjects.push_back(
+              ReprobuildHcrObject{ sourcePath, objRel, action.Id, lang });
+          }
+          target.CompileActions.push_back(std::move(action));
         }
-        usedTools.insert(action.ToolId);
-        action.Args = args;
-        // Tier 2a + 2c: lift every C/CXX compile action to inline-exec.
-        // The compiler binary is fully resolved by CMake's language
-        // detection (CMAKE_<LANG>_COMPILER), so the action is
-        // self-contained and does not need a typed tool profile. This
-        // makes the action runnable by the direct provider without going
-        // through resolveAndWriteIdentity, AND lets the slow-path
-        // engine skip per-action tool-profile lookups for compiles.
-        // Fortran is excluded because its scan/dyndep machinery still
-        // assumes tool-profile lookup.
-        if (lang != "Fortran") {
-          std::string const compilerPath =
-            mf->GetSafeDefinition(ReprobuildCompilerVar(lang));
-          if (!compilerPath.empty()) {
-            action.Inline = true;
-            action.InlineArgv.clear();
-            // If a per-target RULE_LAUNCH_COMPILE launcher was configured,
-            // prepend its argv. The wrapper script the slow path writes
-            // (ReprobuildWriteLaunchedWrapper) effectively runs
-            // ``<launcher_argv> <compiler> "$@"`` — inline-exec mirrors
-            // that with the launcher argv directly in the action's argv.
-            if (!launcher.empty()) {
-              std::vector<std::string> launcherInline;
-              if (launcher.find(';') != std::string::npos) {
-                cmList launcherList{ launcher };
-                launcherInline.assign(launcherList.begin(),
-                                      launcherList.end());
-              } else {
-                ReprobuildAppendParsed(launcherInline, launcher);
-              }
-              for (std::string const& part : launcherInline) {
-                action.InlineArgv.push_back(part);
+
+        for (auto const& item : dyndepDdis) {
+          std::string const& lang = item.first;
+          std::vector<std::string> const& ddis = item.second;
+          if (ddis.empty()) {
+            continue;
+          }
+          std::string const stem =
+            cmStrCat("CMakeFiles/reprobuild/dyndep/", target.Var, "-", lang);
+          std::string const tdiRel = cmStrCat(stem, "DependInfo.json");
+          std::string const mapRel = cmStrCat(stem, ".map");
+          std::string const ddRel = cmStrCat(stem, ".dd");
+          std::string const fragmentRel = cmStrCat(stem, ".rbdyn");
+          if (!ReprobuildWriteTargetDependInfo(
+                cmStrCat(binaryDir, "/", tdiRel), gt, lg.get(), lang, config,
+                dyndepCxxModuleSources[lang]) ||
+              !ReprobuildWriteDyndepActionMap(cmStrCat(binaryDir, "/", mapRel),
+                                              dyndepActionMaps[lang])) {
+            this->GetCMakeInstance()->IssueMessage(
+              MessageType::FATAL_ERROR,
+              cmStrCat("Could not write Reprobuild ", lang,
+                       " dyndep metadata for target ", gt->GetName()));
+            return;
+          }
+
+          ReprobuildAction dyndep;
+          dyndep.Id = ReprobuildSafeId(
+            cmStrCat("dyndep-", gt->GetName(), "-", lang, configSuffix));
+          dyndep.Var =
+            ReprobuildNimIdent("action", nextActionVar++, dyndep.Id);
+          dyndep.ToolId =
+            ReprobuildSafeId(cmStrCat("reprobuild-cmake-", dyndep.Var));
+          dyndep.Deps = dyndepScanActions[lang];
+          dyndep.Inputs = ddis;
+          dyndep.Inputs.push_back(tdiRel);
+          dyndep.Inputs.push_back(mapRel);
+          if (declareOutputs) {
+            dyndep.Outputs = { ddRel, fragmentRel,
+                               cmStrCat(cmSystemTools::GetFilenamePath(ddRel),
+                                        "/", lang, "Modules.json") };
+            if (lang == "CXX") {
+              for (auto const& mapEntry : dyndepActionMaps[lang]) {
+                dyndep.Outputs.push_back(cmStrCat(mapEntry.first, ".modmap"));
               }
             }
-            action.InlineArgv.push_back(compilerPath);
-            for (std::string const& arg : args) {
-              action.InlineArgv.push_back(arg);
-            }
-            action.InlineCwd = binaryDir;
           }
-        }
-        if (lang == "Fortran") {
-          action.Inputs = { cmStrCat(objRel, ".ddi.i") };
-        } else {
-          action.Inputs = { sourcePath };
-        }
-        if (declareOutputs) {
-          action.Outputs = { objRel };
-          cm::append(action.Outputs, languageByproducts);
-        } else {
-          action.Cacheable = false;
-        }
-        // ORDER AGAINST THIS TARGET'S CUSTOM COMMANDS, ALWAYS -- this used to
-        // live in the `else` above, so it applied only when the action did
-        // NOT declare its outputs (`declareOutputs` is `!IsCrossConfig`, i.e.
-        // false only in the cross-config case). In the ordinary
-        // single-config build, which is nearly every build, a compile action
-        // was emitted with no ordering edge to the commands generating its
-        // own sources.
-        //
-        // WHY THAT IS NOT CAUGHT BY THE DEPFILE. A source that includes a
-        // GENERATED header has no recorded dependency on it until a depfile
-        // exists, and no depfile exists until the source has compiled once.
-        // So on a clean build nothing orders the compile after the generator:
-        // `-j1` passes because the generator happens to be scheduled first,
-        // and `-j8` races and fails with the generated header "not found".
-        // Green on a developer's machine, intermittently red in CI.
-        //
-        // Ninja does not have this problem because CMake emits an explicit
-        // order-only (`||`) edge from every object in a target to that
-        // target's custom commands. This is that edge. It is unconditional
-        // because the ordering requirement does not depend on whether the
-        // action declares outputs or is cacheable -- only on the fact that
-        // something in this target may generate a source this compile reads.
-        for (ReprobuildAction const& custom : target.CustomActions) {
-          ReprobuildAppendUnique(action.Deps, custom.Id);
-        }
-        if (declareOutputs && lang != "Fortran") {
-          action.Depfile = depRel;
-        }
-        if (declareOutputs &&
-            (lang == "Fortran" ||
-             (lang == "CXX" && gt->NeedDyndepForSource(lang, config, source)))) {
-          action.DynamicDepsFile =
-            cmStrCat("CMakeFiles/reprobuild/dyndep/", target.Var, "-", lang,
-                     ".rbdyn");
+          dyndep.Cacheable = false;
+
+          std::vector<std::string> dyndepLines;
+          std::string command = cmStrCat(
+            ReprobuildShellSingleQuote(cmSystemTools::GetCMakeCommand()),
+            " -E cmake_ninja_dyndep --tdi=",
+            ReprobuildShellSingleQuote(tdiRel), " --lang=", lang);
           if (lang == "CXX") {
-            action.Inputs.push_back(cmStrCat(objRel, ".modmap"));
+            std::string modmapFormat = lg->GetMakefile()->GetSafeDefinition(
+              "CMAKE_CXX_MODULE_MAP_FORMAT");
+            if (modmapFormat.empty()) {
+              this->GetCMakeInstance()->IssueMessage(
+                MessageType::FATAL_ERROR,
+                "The Reprobuild generator M6 CXX module path requires "
+                "CMAKE_CXX_MODULE_MAP_FORMAT.");
+              return;
+            }
+            command += cmStrCat(" --modmapfmt=", modmapFormat);
+          }
+          command += cmStrCat(" --dd=", ReprobuildShellSingleQuote(ddRel));
+          for (std::string const& ddi : ddis) {
+            command += " ";
+            command += ReprobuildShellSingleQuote(ddi);
+          }
+          dyndepLines.push_back(command);
+          std::string fragmentCommand =
+            "candidate='/Users/zahary/metacraft/reprobuild/build/bin/"
+            "repro-cmake-dyndep-fragment'; "
+            "if [ -x \"$candidate\" ]; then conv=\"$candidate\"; else "
+            "conv='repro-cmake-dyndep-fragment'; fi; "
+            "\"$conv\" --out ";
+          fragmentCommand += ReprobuildShellSingleQuote(fragmentRel);
+          fragmentCommand += " --map ";
+          fragmentCommand += ReprobuildShellSingleQuote(mapRel);
+          for (std::string const& ddi : ddis) {
+            fragmentCommand += " ";
+            fragmentCommand += ReprobuildShellSingleQuote(ddi);
+          }
+          dyndepLines.push_back(fragmentCommand);
+          std::string const dyndepWrapper =
+            cmStrCat(wrapperDir, "/", dyndep.ToolId);
+          if (!ReprobuildWriteCommandScript(dyndepWrapper, binaryDir,
+                                            dyndepLines)) {
+            this->GetCMakeInstance()->IssueMessage(
+              MessageType::FATAL_ERROR,
+              cmStrCat("Could not write Reprobuild dyndep wrapper: ",
+                       dyndepWrapper));
+            return;
+          }
+          usedTools.insert(dyndep.ToolId);
+          for (ReprobuildAction& compile : target.CompileActions) {
+            if (compile.DynamicDepsFile == fragmentRel) {
+              ReprobuildAppendUnique(compile.Deps, dyndep.Id);
+            }
+          }
+          target.CustomActions.push_back(std::move(dyndep));
+        }
+
+        auto objectOutputFor = [&](cmGeneratorTarget* objectTarget,
+                                   cmSourceFile const* source) {
+          return ReprobuildConfigFullPath(
+            binaryDir,
+            cmStrCat(objectTarget->GetObjectDirectory(config),
+                     objectTarget->GetObjectName(source)),
+            config, multiConfig);
+        };
+        auto appendObjectLibraryOutputs =
+          [&](cmGeneratorTarget* objectTarget,
+              std::vector<std::string>& objects,
+              std::vector<std::string>& deps) {
+            std::vector<cmSourceFile const*> objectSources;
+            objectTarget->GetObjectSources(objectSources, config);
+            for (cmSourceFile const* objectSource : objectSources) {
+              std::string const objRel =
+                objectOutputFor(objectTarget, objectSource);
+              ReprobuildAppendUnique(objects, objRel);
+              ReprobuildAppendUnique(
+                deps,
+                ReprobuildSafeId(cmStrCat("compile-", objectTarget->GetName(),
+                                          "-", objRel, configSuffix)));
+            }
+          };
+
+        auto appendCustomEventActions =
+          [&](std::vector<cmCustomCommand> const& commands,
+              std::string const& stage,
+              std::vector<ReprobuildAction>& actions) {
+            unsigned int eventIndex = 0;
+            for (cmCustomCommand const& cc : commands) {
+              cmCustomCommandGenerator ccg(cc, commandConfig, lg.get(), false,
+                                           config);
+              std::vector<std::string> commandLines;
+              for (unsigned int i = 0; i < ccg.GetNumberOfCommands(); ++i) {
+                std::string commandLine;
+                std::string const workingDirectory = ccg.GetWorkingDirectory();
+                if (!workingDirectory.empty()) {
+                  commandLine += "cd ";
+                  commandLine += ReprobuildShellSingleQuote(workingDirectory);
+                  commandLine += " && ";
+                }
+                commandLine += ReprobuildShellSingleQuote(ccg.GetCommand(i));
+                ccg.AppendArguments(i, commandLine);
+                commandLines.push_back(commandLine);
+              }
+              if (commandLines.empty()) {
+                continue;
+              }
+              retargetCommandConfigExecutables(ccg, commandLines);
+
+              ReprobuildAction event;
+              event.Id = ReprobuildSafeId(cmStrCat(
+                stage, "-", gt->GetName(), "-", eventIndex++, configSuffix));
+              event.Var =
+                ReprobuildNimIdent("action", nextActionVar++, event.Id);
+              event.ToolId =
+                ReprobuildSafeId(cmStrCat("reprobuild-cmake-", event.Var));
+              event.Pool = cc.GetUsesTerminal() ? "console" : cc.GetJobPool();
+              event.Inputs = ccg.GetDepends();
+              event.Cacheable = false;
+              for (std::string const& byproduct : ccg.GetByproducts()) {
+                ReprobuildAppendCleanFile(
+                  cleanFiles, lg->GetCurrentBinaryDirectory(), byproduct);
+                if (declareOutputs) {
+                  event.Outputs.push_back(ReprobuildRelativeTo(
+                    binaryDir,
+                    cmSystemTools::CollapseFullPath(
+                      byproduct, lg->GetCurrentBinaryDirectory())));
+                }
+              }
+              std::string const wrapperPath =
+                cmStrCat(wrapperDir, "/", event.ToolId);
+              if (!ReprobuildWriteCommandScript(wrapperPath, "",
+                                                commandLines)) {
+                this->GetCMakeInstance()->IssueMessage(
+                  MessageType::FATAL_ERROR,
+                  cmStrCat("Could not write Reprobuild build-event wrapper: ",
+                           wrapperPath));
+                return false;
+              }
+              usedTools.insert(event.ToolId);
+              actions.push_back(std::move(event));
+            }
+            return true;
+          };
+
+        if (!appendCustomEventActions(gt->GetPreBuildCommands(), "pre-build",
+                                      target.PreBuildActions) ||
+            !appendCustomEventActions(gt->GetPreLinkCommands(), "pre-link",
+                                      target.PreLinkActions) ||
+            !appendCustomEventActions(gt->GetPostBuildCommands(), "post-build",
+                                      target.PostBuildActions)) {
+          return;
+        }
+        for (ReprobuildAction& compile : target.CompileActions) {
+          for (ReprobuildAction const& preBuild : target.PreBuildActions) {
+            ReprobuildAppendUnique(compile.Deps, preBuild.Id);
           }
         }
-        if (sourceUsesPch) {
-          for (std::string const& arch : pchArchs) {
-            std::string const pchHeader = gt->GetPchHeader(config, lang, arch);
-            if (!pchHeader.empty()) {
-              action.Inputs.push_back(pchHeader);
+
+        for (ReprobuildAction const& compile : target.CompileActions) {
+          target.ObjectOutputs.insert(target.ObjectOutputs.end(),
+                                      compile.Outputs.begin(),
+                                      compile.Outputs.end());
+        }
+
+        std::vector<std::string> cudaDeviceLinkActionIds;
+        if (targetHasCudaSources &&
+            (gt->GetPropertyAsBool("CUDA_SEPARABLE_COMPILATION") ||
+             gt->GetPropertyAsBool("CUDA_RESOLVE_DEVICE_SYMBOLS")) &&
+            type != cmStateEnums::OBJECT_LIBRARY) {
+          cmMakefile const* mf = lg->GetMakefile();
+          if (mf->GetSafeDefinition("CMAKE_REPROBUILD_CUDA_PROFILE") ==
+                "ClangFatbinary" &&
+              mf->GetSafeDefinition("CMAKE_CUDA_COMPILER_ID") != "Clang" &&
+              mf->GetSafeDefinition("CMAKE_CUDA_COMPILER_ID") !=
+                "AppleClang") {
+            this->GetCMakeInstance()->IssueMessage(
+              MessageType::FATAL_ERROR,
+              "Reprobuild profile unavailable: Clang CUDA fatbinary and "
+              "registration-stub profile requires a Clang CUDA compiler.");
+            return;
+          }
+          std::string const deviceObjRel = ReprobuildConfigFullPath(
+            binaryDir,
+            cmStrCat(gt->GetObjectDirectory(config), "cmake_device_link",
+                     mf->GetSafeDefinition("CMAKE_CUDA_OUTPUT_EXTENSION")),
+            config, multiConfig);
+          ReprobuildAction deviceLink;
+          deviceLink.Id = ReprobuildSafeId(
+            cmStrCat("device-link-", gt->GetName(), configSuffix));
+          deviceLink.Var =
+            ReprobuildNimIdent("action", nextActionVar++, deviceLink.Id);
+          deviceLink.ToolId = ReprobuildToolId("CUDA");
+          usedTools.insert(deviceLink.ToolId);
+          std::string const cudaCompilerId =
+            mf->GetSafeDefinition("CMAKE_CUDA_COMPILER_ID");
+          if (cudaCompilerId == "Clang" || cudaCompilerId == "AppleClang") {
+            std::string architecturesStr =
+              gt->GetSafeProperty("CUDA_ARCHITECTURES");
+            if (cmIsOff(architecturesStr)) {
+              this->GetCMakeInstance()->IssueMessage(
+                MessageType::FATAL_ERROR,
+                "CUDA_SEPARABLE_COMPILATION on Clang requires "
+                "CUDA_ARCHITECTURES to be set.");
+              return;
             }
-            std::string const pchSource = gt->GetPchSource(config, lang, arch);
-            if (!source->IsPchSource() && !pchSource.empty()) {
-              std::string const pchFile = gt->GetPchFile(config, lang, arch);
-              if (!pchFile.empty()) {
-                action.Inputs.push_back(pchFile);
+            cmList architectures{ architecturesStr };
+            if (architectures.empty()) {
+              this->GetCMakeInstance()->IssueMessage(
+                MessageType::FATAL_ERROR,
+                "Reprobuild profile unavailable: Clang CUDA fatbinary and "
+                "registration-stub flow requires CUDA_ARCHITECTURES.");
+              return;
+            }
+            std::string const cudaDeviceLinker =
+              mf->GetSafeDefinition("CMAKE_CUDA_DEVICE_LINKER");
+            std::string const cudaFatbinary =
+              mf->GetSafeDefinition("CMAKE_CUDA_FATBINARY");
+            if (cudaDeviceLinker.empty() || cudaFatbinary.empty()) {
+              this->GetCMakeInstance()->IssueMessage(
+                MessageType::FATAL_ERROR,
+                "Reprobuild profile unavailable: Clang CUDA fatbinary and "
+                "registration-stub tools were not found.");
+              return;
+            }
+            std::string const dlinkToolId =
+              ReprobuildSafeId("reprobuild-cmake-cuda-device-linker");
+            std::string const fatbinaryToolId =
+              ReprobuildSafeId("reprobuild-cmake-cuda-fatbinary");
+            if (!ReprobuildWriteWrapper(cmStrCat(wrapperDir, "/", dlinkToolId),
+                                        cudaDeviceLinker) ||
+                !ReprobuildWriteWrapper(
+                  cmStrCat(wrapperDir, "/", fatbinaryToolId), cudaFatbinary)) {
+              this->GetCMakeInstance()->IssueMessage(
+                MessageType::FATAL_ERROR,
+                "Could not write Reprobuild Clang CUDA tool wrappers.");
+              return;
+            }
+            usedTools.insert(dlinkToolId);
+            usedTools.insert(fatbinaryToolId);
+
+            std::string const registerRel =
+              ReprobuildConfigFullPath(binaryDir,
+                                       cmStrCat(gt->GetObjectDirectory(config),
+                                                "cmake_cuda_register.h"),
+                                       config, multiConfig);
+            std::string const fatbinRel = ReprobuildConfigFullPath(
+              binaryDir,
+              cmStrCat(gt->GetObjectDirectory(config), "cmake_cuda_fatbin.h"),
+              config, multiConfig);
+            std::vector<std::string> cubinRels;
+            std::vector<std::string> cubinActionIds;
+            for (std::string const& architectureKind : architectures) {
+              std::string const architecture =
+                architectureKind.substr(0, architectureKind.find('-'));
+              std::string const cubinRel = ReprobuildConfigFullPath(
+                binaryDir,
+                cmStrCat(gt->GetObjectDirectory(config), "sm_", architecture,
+                         ".cubin"),
+                config, multiConfig);
+              ReprobuildAction cubinLink;
+              cubinLink.Id =
+                ReprobuildSafeId(cmStrCat("cuda-device-link-", gt->GetName(),
+                                          "-sm-", architecture, configSuffix));
+              cubinLink.Var =
+                ReprobuildNimIdent("action", nextActionVar++, cubinLink.Id);
+              cubinLink.ToolId = dlinkToolId;
+              cubinLink.Args = { cmStrCat("-arch=sm_", architecture) };
+              if (cubinRels.empty()) {
+                cubinLink.Args.push_back(
+                  cmStrCat("--register-link-binaries=", registerRel));
               }
-              auto const pchAction = pchActionIds.find(pchSource);
-              if (pchAction != pchActionIds.end()) {
-                action.Deps.push_back(pchAction->second);
+              cubinLink.Args.push_back("-o");
+              cubinLink.Args.push_back(cubinRel);
+              cm::append(cubinLink.Args, linkObjects);
+              cubinLink.Inputs = linkObjects;
+              for (ReprobuildAction const& compile : target.CompileActions) {
+                ReprobuildAppendUnique(cubinLink.Deps, compile.Id);
+              }
+              if (declareOutputs) {
+                cubinLink.Outputs = { cubinRel };
+                if (cubinRels.empty()) {
+                  cubinLink.Outputs.push_back(registerRel);
+                }
+              } else {
+                cubinLink.Cacheable = false;
+              }
+              ReprobuildAppendCleanFile(cleanFiles, binaryDir, cubinRel);
+              if (cubinRels.empty()) {
+                ReprobuildAppendCleanFile(cleanFiles, binaryDir, registerRel);
+              }
+              cubinRels.push_back(cubinRel);
+              cubinActionIds.push_back(cubinLink.Id);
+              target.CustomActions.push_back(std::move(cubinLink));
+            }
+
+            ReprobuildAction fatbinary;
+            fatbinary.Id = ReprobuildSafeId(
+              cmStrCat("cuda-fatbinary-", gt->GetName(), configSuffix));
+            fatbinary.Var =
+              ReprobuildNimIdent("action", nextActionVar++, fatbinary.Id);
+            fatbinary.ToolId = fatbinaryToolId;
+            fatbinary.Args = { "-64", "-cmdline=--compile-only",
+                               "-compress-all", "-link",
+                               cmStrCat("--embedded-fatbin=", fatbinRel) };
+            for (std::size_t i = 0; i < cubinRels.size(); ++i) {
+              std::string const architecture =
+                architectures[i].substr(0, architectures[i].find('-'));
+              fatbinary.Args.push_back(cmStrCat(
+                "-im=profile=sm_", architecture, ",file=", cubinRels[i]));
+              fatbinary.Inputs.push_back(cubinRels[i]);
+              fatbinary.Deps.push_back(cubinActionIds[i]);
+            }
+            if (declareOutputs) {
+              fatbinary.Outputs = { fatbinRel };
+            } else {
+              fatbinary.Cacheable = false;
+            }
+            ReprobuildAppendCleanFile(cleanFiles, binaryDir, fatbinRel);
+            std::string const fatbinaryActionId = fatbinary.Id;
+            target.CustomActions.push_back(std::move(fatbinary));
+
+            ReprobuildAction stubCompile;
+            stubCompile.Id = ReprobuildSafeId(cmStrCat(
+              "cuda-registration-stub-", gt->GetName(), configSuffix));
+            stubCompile.Var =
+              ReprobuildNimIdent("action", nextActionVar++, stubCompile.Id);
+            stubCompile.ToolId = ReprobuildToolId("CUDA");
+            usedTools.insert(stubCompile.ToolId);
+            ReprobuildAppendCommonCompileArgs(stubCompile.Args, lg.get(), gt,
+                                              config, "CUDA");
+            cmLinkLineDeviceComputer deviceLinkComputer(
+              lg.get(), lg->GetStateSnapshot().GetDirectory());
+            std::string linkLibs;
+            std::string linkFlags;
+            std::string frameworkPath;
+            std::string linkPath;
+            lg->GetDeviceLinkFlags(deviceLinkComputer, config, linkLibs,
+                                   linkFlags, frameworkPath, linkPath, gt);
+            ReprobuildAppendParsed(stubCompile.Args, linkFlags);
+            stubCompile.Args.push_back(
+              "-D__CUDA_INCLUDE_COMPILER_INTERNAL_HEADERS__");
+            stubCompile.Args.push_back("-D__NV_EXTRA_INITIALIZATION=\"\"");
+            stubCompile.Args.push_back("-D__NV_EXTRA_FINALIZATION=\"\"");
+            stubCompile.Args.push_back(
+              cmStrCat("-DREGISTERLINKBINARYFILE=\\\"", registerRel, "\\\""));
+            stubCompile.Args.push_back(
+              cmStrCat("-DFATBINFILE=\\\"", fatbinRel, "\\\""));
+            ReprobuildAppendParsed(
+              stubCompile.Args,
+              mf->GetSafeDefinition("_CMAKE_COMPILE_AS_CUDA_FLAG"));
+            std::string const linkStub =
+              cmStrCat(mf->GetSafeDefinition(
+                         "CMAKE_CUDA_COMPILER_TOOLKIT_LIBRARY_ROOT"),
+                       "/bin/crt/link.stub");
+            stubCompile.Args.push_back("-c");
+            stubCompile.Args.push_back(linkStub);
+            stubCompile.Args.push_back("-o");
+            stubCompile.Args.push_back(deviceObjRel);
+            stubCompile.Inputs = { fatbinRel, registerRel, linkStub };
+            stubCompile.Deps = { fatbinaryActionId };
+            if (declareOutputs) {
+              stubCompile.Outputs = { deviceObjRel };
+            } else {
+              stubCompile.Cacheable = false;
+            }
+            ReprobuildAppendCleanFile(cleanFiles, binaryDir, deviceObjRel);
+            cudaDeviceLinkActionIds.push_back(stubCompile.Id);
+            target.CustomActions.push_back(std::move(stubCompile));
+            ReprobuildAppendUnique(linkObjects, deviceObjRel);
+            sawCudaDeviceLink = true;
+            sawCudaClangFatbinary = true;
+            continue;
+          } else {
+            deviceLink.Args.push_back("-dlink");
+          }
+          deviceLink.Args.push_back("-o");
+          deviceLink.Args.push_back(deviceObjRel);
+          cm::append(deviceLink.Args, linkObjects);
+          deviceLink.Inputs = linkObjects;
+          for (ReprobuildAction const& compile : target.CompileActions) {
+            ReprobuildAppendUnique(deviceLink.Deps, compile.Id);
+          }
+          if (declareOutputs) {
+            deviceLink.Outputs = { deviceObjRel };
+          } else {
+            deviceLink.Cacheable = false;
+          }
+          ReprobuildAppendCleanFile(cleanFiles, binaryDir, deviceObjRel);
+          cudaDeviceLinkActionIds.push_back(deviceLink.Id);
+          target.CustomActions.push_back(std::move(deviceLink));
+          ReprobuildAppendUnique(linkObjects, deviceObjRel);
+          sawCudaDeviceLink = true;
+        }
+
+        if (type == cmStateEnums::OBJECT_LIBRARY) {
+          buildTargets.push_back(std::move(target));
+          continue;
+        }
+
+        std::string linkLang = gt->GetLinkerLanguage(config);
+        if (linkLang != "C" && linkLang != "CXX") {
+          linkLang = sources.front()->GetLanguage();
+        }
+        usedLanguages.insert(linkLang);
+
+        target.LinkAction.Id =
+          ReprobuildSafeId(cmStrCat("link-", gt->GetName(), configSuffix));
+        target.LinkAction.Var =
+          ReprobuildNimIdent("action", nextActionVar++, target.LinkAction.Id);
+        target.LinkAction.Pool =
+          ReprobuildPoolProperty(gt, nullptr, "JOB_POOL_LINK", "");
+        for (ReprobuildAction const& compile : target.CompileActions) {
+          ReprobuildAppendUnique(target.LinkAction.Deps, compile.Id);
+        }
+        for (std::string const& deviceLinkAction : cudaDeviceLinkActionIds) {
+          ReprobuildAppendUnique(target.LinkAction.Deps, deviceLinkAction);
+        }
+        for (ReprobuildAction& preLink : target.PreLinkActions) {
+          for (ReprobuildAction const& compile : target.CompileActions) {
+            ReprobuildAppendUnique(preLink.Deps, compile.Id);
+          }
+        }
+
+        std::vector<std::string> linkDependencyActions;
+        std::vector<std::string> linkLibraryInputs;
+        auto appendLinkedTarget = [&](cmGeneratorTarget const* depTargetConst,
+                                      bool includeObjectLibraryOutputs) {
+          cmGeneratorTarget* depTarget =
+            const_cast<cmGeneratorTarget*>(depTargetConst);
+          if (!depTarget || depTarget->IsImported()) {
+            return;
+          }
+          auto depType = depTarget->GetType();
+          if (type == cmStateEnums::STATIC_LIBRARY &&
+              depType != cmStateEnums::OBJECT_LIBRARY) {
+            return;
+          }
+          if (depType == cmStateEnums::OBJECT_LIBRARY) {
+            if (includeObjectLibraryOutputs) {
+              appendObjectLibraryOutputs(depTarget, linkObjects,
+                                         linkDependencyActions);
+            }
+            return;
+          }
+          if (depType == cmStateEnums::STATIC_LIBRARY ||
+              depType == cmStateEnums::SHARED_LIBRARY ||
+              depType == cmStateEnums::MODULE_LIBRARY ||
+              depType == cmStateEnums::EXECUTABLE) {
+            cmStateEnums::ArtifactType artifact =
+              depTarget->HasImportLibrary(config)
+              ? cmStateEnums::ImportLibraryArtifact
+              : cmStateEnums::RuntimeBinaryArtifact;
+            std::string const depPath = ReprobuildRelativeTo(
+              binaryDir, depTarget->GetFullPath(config, artifact, true));
+            ReprobuildAppendUnique(
+              linkLibraryInputs,
+              ReprobuildConfigPath(depPath, config, multiConfig));
+            ReprobuildAppendUnique(
+              linkDependencyActions,
+              ReprobuildSafeId(
+                cmStrCat("link-", depTarget->GetName(), configSuffix)));
+          }
+        };
+
+        // M27: external objects whose underlying source file is produced by
+        // an attached ``add_custom_command`` must use the literal path the
+        // command writes to (no per-config subdir). Reprobuild does NOT
+        // rewrite the COMMAND argv, so the on-disk path is exactly what the
+        // user spelled in OUTPUT. Other external objects (raw .obj source
+        // files added as ``add_library`` inputs that Reprobuild does NOT
+        // build itself) likewise live at the literal path the user provided
+        // — there is no Reprobuild-controlled per-config artifact for them.
+        // Either way the right link-line input is the unprefixed path. We
+        // continue to call ``ReprobuildConfigFullPath`` for object-library
+        // outputs above (handled via ``appendLinkedTarget`` — those DO live
+        // under ``<config>/`` because Reprobuild itself writes them).
+        auto appendExternalObjectLinkInput = [&](cmSourceFile const* sf) {
+          ReprobuildAppendUnique(
+            linkObjects,
+            ReprobuildCustomCommandFullPath(binaryDir, sf->GetFullPath()));
+        };
+        std::vector<cmSourceFile const*> externalObjects;
+        gt->GetExternalObjects(externalObjects, config);
+        for (cmSourceFile const* externalObject : externalObjects) {
+          std::string const& objLib = externalObject->GetObjectLibrary();
+          if (!objLib.empty()) {
+            appendLinkedTarget(lg->FindGeneratorTargetToUse(objLib), true);
+          } else {
+            appendExternalObjectLinkInput(externalObject);
+          }
+        }
+        if (cmComputeLinkInformation* cli = gt->GetLinkInformation(config)) {
+          for (cmComputeLinkInformation::Item const& item : cli->GetItems()) {
+            if (item.Target) {
+              appendLinkedTarget(item.Target, false);
+            } else if (item.ObjectSource) {
+              std::string const& objLib =
+                item.ObjectSource->GetObjectLibrary();
+              if (!objLib.empty()) {
+                appendLinkedTarget(lg->FindGeneratorTargetToUse(objLib), true);
+              } else {
+                appendExternalObjectLinkInput(item.ObjectSource);
               }
             }
           }
         }
-        if (source->IsPchSource()) {
-          action.Pool = ReprobuildPoolProperty(
-            gt, source, "JOB_POOL_PRECOMPILE_HEADER", "JOB_POOL_COMPILE");
+        for (std::string const& depAction : linkDependencyActions) {
+          for (ReprobuildAction& preLink : target.PreLinkActions) {
+            ReprobuildAppendUnique(preLink.Deps, depAction);
+          }
+          ReprobuildAppendUnique(target.LinkAction.Deps, depAction);
+        }
+        for (ReprobuildAction const& preLink : target.PreLinkActions) {
+          ReprobuildAppendUnique(target.LinkAction.Deps, preLink.Id);
+        }
+
+        std::string const output = ReprobuildConfigFullPath(
+          binaryDir, gt->GetFullPath(config), config, multiConfig);
+        std::string const realOutput = ReprobuildConfigFullPath(
+          binaryDir,
+          gt->GetFullPath(config, cmStateEnums::RuntimeBinaryArtifact, true),
+          config, multiConfig);
+        ReprobuildAppendCleanFile(cleanFiles, binaryDir, output);
+        ReprobuildAppendCleanFile(cleanFiles, binaryDir, realOutput);
+        if (gt->IsBundleOnApple()) {
+          std::string plistFull;
+          if (gt->IsAppBundleOnApple()) {
+            plistFull = cmStrCat(gt->GetDirectory(config), "/",
+                                 gt->GetAppBundleDirectory(
+                                   config, cmGeneratorTarget::ContentLevel),
+                                 "/Info.plist");
+          } else if (gt->IsFrameworkOnApple()) {
+            plistFull = cmStrCat(
+              gt->GetDirectory(config), "/",
+              gt->GetFrameworkDirectory(config, cmGeneratorTarget::FullLevel),
+              "/Resources/Info.plist");
+          } else if (gt->IsCFBundleOnApple()) {
+            plistFull = cmStrCat(gt->GetDirectory(config), "/",
+                                 gt->GetCFBundleDirectory(
+                                   config, cmGeneratorTarget::ContentLevel),
+                                 "/Info.plist");
+          }
+          if (!plistFull.empty()) {
+            ReprobuildAppendCleanFile(
+              cleanFiles, binaryDir,
+              ReprobuildConfigFullPath(binaryDir, plistFull, config,
+                                       multiConfig));
+          }
+        }
+        cmSystemTools::MakeDirectory(cmSystemTools::GetFilenamePath(
+          cmStrCat(binaryDir, "/", realOutput)));
+
+        if (type == cmStateEnums::STATIC_LIBRARY) {
+          std::string const arTool =
+            lg->GetMakefile()->GetSafeDefinition("CMAKE_AR");
+          std::string const ranlibTool =
+            lg->GetMakefile()->GetSafeDefinition("CMAKE_RANLIB");
+          if (arTool.empty()) {
+            this->GetCMakeInstance()->IssueMessage(
+              MessageType::FATAL_ERROR,
+              cmStrCat("Missing CMAKE_AR while writing static library target ",
+                       gt->GetName()));
+            return;
+          }
+          // Inline-exec: emit a single `ar rcs <output> <objects…>`
+          // invocation. The flags collapse what the old multi-step shell
+          // wrapper did
+          // (`rm -f output; ar qc output objects…; ranlib output`) into one
+          // direct call: `r` replaces matching members (so re-runs don't
+          // accumulate duplicates the way `qc` would), `c` suppresses the
+          // "creating archive" warning, and `s` writes the symbol table —
+          // i.e. ar performs its own ranlib step. CMAKE_RANLIB is not invoked
+          // separately on the modern toolchains the bench exercises; if an
+          // AIX-style toolchain ever needs a follow-up ranlib edge we can
+          // add it as a second inline-exec depending on this one.
+          std::vector<std::string> archiveArgv = { arTool, "rcs", output };
+          cm::append(archiveArgv, linkObjects);
+          target.LinkAction.Inline = true;
+          target.LinkAction.InlineArgv = std::move(archiveArgv);
+          target.LinkAction.Inputs = linkObjects;
+          if (declareOutputs) {
+            target.LinkAction.Outputs = { output };
+          }
         } else {
-          action.Pool = ReprobuildPoolProperty(gt, source, "JOB_POOL_COMPILE",
-                                               "JOB_POOL_COMPILE");
+          usedTools.insert(ReprobuildToolId(linkLang));
+          std::string flags;
+          std::string linkFlags;
+          std::string linkLibs;
+          std::string frameworkPath;
+          std::string linkPath;
+          // Reprobuild runs actions from the build root.  Use the root local
+          // generator for link-line path conversion so CMake does not emit
+          // library references relative to a target subdirectory.
+          cmLinkLineComputer linkLineComputer(
+            rootLg, rootLg->GetStateSnapshot().GetDirectory());
+          lg->GetTargetFlags(&linkLineComputer, config, linkLibs, flags,
+                             linkFlags, frameworkPath, linkPath, gt);
+          lg->AppendDependencyInfoLinkerFlags(linkFlags, gt, config, linkLang);
+          if (cmComputeLinkInformation* cli = gt->GetLinkInformation(config)) {
+            std::string const rpath = linkLineComputer.ComputeRPath(*cli);
+            if (!rpath.empty()) {
+              if (!linkFlags.empty()) {
+                linkFlags += " ";
+              }
+              linkFlags += rpath;
+            }
+          }
+          std::vector<std::string> linkArgs;
+          ReprobuildAppendParsed(linkArgs, flags);
+          ReprobuildAppendParsed(linkArgs, linkFlags);
+          ReprobuildAppendParsed(linkArgs, frameworkPath);
+          ReprobuildAppendParsed(linkArgs, linkPath);
+          if (linkLang == "Swift") {
+            std::string swiftFlags;
+            lg->GetTargetCompileFlags(gt, config, "Swift", swiftFlags, "");
+            ReprobuildAppendParsed(linkArgs, swiftFlags);
+            if (type == cmStateEnums::EXECUTABLE) {
+              linkArgs.push_back("-emit-executable");
+            } else if (type == cmStateEnums::SHARED_LIBRARY ||
+                       type == cmStateEnums::MODULE_LIBRARY) {
+              linkArgs.push_back("-emit-library");
+            }
+          }
+          if (gt->HasSOName(config)) {
+            cmGeneratorTarget::Names const names = gt->GetLibraryNames(config);
+            std::string soname = names.SharedObject;
+            if (gt->GetType() == cmStateEnums::SHARED_LIBRARY) {
+              soname =
+                cmStrCat(gt->GetInstallNameDirForBuildTree(config), soname);
+            }
+            std::string const soFlag =
+              lg->GetMakefile()->GetSONameFlag(linkLang);
+            if (!soFlag.empty()) {
+              if (std::isspace(static_cast<unsigned char>(soFlag.back())) ||
+                  !cmHasSuffix(soFlag, ",")) {
+                std::string trimmed = soFlag;
+                while (
+                  !trimmed.empty() &&
+                  std::isspace(static_cast<unsigned char>(trimmed.back()))) {
+                  trimmed.pop_back();
+                }
+                linkArgs.push_back(trimmed);
+                linkArgs.push_back(soname);
+              } else {
+                linkArgs.push_back(cmStrCat(soFlag, soname));
+              }
+            }
+          }
+          linkArgs.push_back("-o");
+          linkArgs.push_back(realOutput);
+          cm::append(linkArgs, linkObjects);
+          ReprobuildAppendParsed(linkArgs, linkLibs);
+          if (target.HcrEnabled && ReprobuildContainsLtoFlag(linkArgs)) {
+            this->GetCMakeInstance()->IssueMessage(
+              MessageType::FATAL_ERROR,
+              cmStrCat("Reprobuild HCR profile unavailable for target '",
+                       gt->GetName(),
+                       "': link flags request LTO/linker-plugin behavior, "
+                       "which is incompatible with HCR linkgraph evidence."));
+            return;
+          }
+          target.LinkAction.ToolId = ReprobuildToolId(linkLang);
+          target.LinkAction.Args = linkArgs;
+          target.LinkAction.Inputs = linkObjects;
+          for (std::string const& linkLibraryInput : linkLibraryInputs) {
+            ReprobuildAppendUnique(target.LinkAction.Inputs, linkLibraryInput);
+          }
+          if (declareOutputs) {
+            target.LinkAction.Outputs = { realOutput };
+          }
+          if (gt->HasImportLibrary(config)) {
+            std::string const importOutput = ReprobuildRelativeTo(
+              binaryDir,
+              gt->GetFullPath(config, cmStateEnums::ImportLibraryArtifact,
+                              true));
+            std::string const importOutputConfig =
+              ReprobuildConfigPath(importOutput, config, multiConfig);
+            if (!importOutput.empty()) {
+              ReprobuildAppendCleanFile(cleanFiles, binaryDir,
+                                        importOutputConfig);
+              sawImportLibraryOutput = true;
+              // The link command is hand-built above and -- unlike CMake's
+              // CMAKE_<LANG>_CREATE_SHARED_LIBRARY rule -- carries no import
+              // library flag. A GNU-family linker would therefore produce the
+              // DLL but never the import library (.dll.a) declared as an
+              // output just above, so a consumer opening that output fails.
+              // Emit the flag explicitly. MSVC produces an import library only
+              // when the DLL has exports, so its path is a conditional output.
+              // Its explicit /IMPLIB also preserves custom archive
+              // directories.
+              std::string const linkerId =
+                lg->GetMakefile()->GetSafeDefinition(
+                  cmStrCat("CMAKE_", linkLang, "_COMPILER_ID"));
+              std::string const linkerSimId =
+                lg->GetMakefile()->GetSafeDefinition(
+                  cmStrCat("CMAKE_", linkLang, "_SIMULATE_ID"));
+              bool const gnuStyleLinker = linkerId == "GNU" ||
+                ((linkerId == "Clang" || linkerId == "AppleClang") &&
+                 linkerSimId != "MSVC");
+              bool const msvcStyleLinker =
+                linkerId == "MSVC" || linkerSimId == "MSVC";
+              if (declareOutputs) {
+                ReprobuildAppendUnique(msvcStyleLinker
+                                         ? target.LinkAction.OptionalOutputs
+                                         : target.LinkAction.Outputs,
+                                       importOutputConfig);
+              }
+              if (gnuStyleLinker) {
+                target.LinkAction.Args.push_back(
+                  cmStrCat("-Wl,--out-implib,", importOutputConfig));
+              } else if (msvcStyleLinker) {
+                // The action invokes the compiler driver. Pass the option to
+                // its linker using the driver's frontend convention.
+                std::string const frontend =
+                  lg->GetMakefile()->GetSafeDefinition(cmStrCat(
+                    "CMAKE_", linkLang, "_COMPILER_FRONTEND_VARIANT"));
+                target.LinkAction.Args.push_back(
+                  linkerId == "MSVC" || frontend == "MSVC" ? "/link"
+                                                           : "-Xlinker");
+                target.LinkAction.Args.push_back(
+                  cmStrCat("/IMPLIB:", importOutputConfig));
+              }
+            }
+          }
+          if (declareOutputs && gt->HasLinkDependencyFile(config)) {
+            target.LinkAction.Depfile = lg->GetLinkDependencyFile(gt, config);
+            ReprobuildAppendCleanFile(cleanFiles, binaryDir,
+                                      target.LinkAction.Depfile);
+            sawLinkDepfile = true;
+          }
+          // Tier 2a + 2c: lift the link action to inline-exec. The compiler
+          // path is fully resolved (CMAKE_<LANG>_COMPILER) and the action is
+          // self-contained. Build InlineArgv from target.LinkAction.Args
+          // AFTER the HasImportLibrary block above has appended its
+          // -Wl,--out-implib flag, so InlineArgv stays a faithful copy of
+          // the final argv list.
+          {
+            cmMakefile const* linkMf = lg->GetMakefile();
+            std::string const linkerPath =
+              linkMf->GetSafeDefinition(ReprobuildCompilerVar(linkLang));
+            if (!linkerPath.empty()) {
+              target.LinkAction.Inline = true;
+              target.LinkAction.InlineArgv.clear();
+              target.LinkAction.InlineArgv.push_back(linkerPath);
+              for (std::string const& arg : target.LinkAction.Args) {
+                target.LinkAction.InlineArgv.push_back(arg);
+              }
+              target.LinkAction.InlineCwd = binaryDir;
+            }
+          }
         }
-        action.CompileDirectory = binaryDir;
-        action.CompileFile = sourceArg;
-        action.CompileCommand =
-          cmStrCat(mf->GetSafeDefinition(ReprobuildCompilerVar(lang)),
-                   " ", cmJoin(args, " "));
-        std::string const argsText = cmJoin(args, " ");
-        if (argsText.size() > 2048) {
-          action.ResponseFile = cmStrCat("CMakeFiles/reprobuild/rsp/",
-                                         action.Var, "-", nextRsp++, ".rsp");
-          std::string const rspFull = cmStrCat(binaryDir, "/", action.ResponseFile);
-          if (!ReprobuildWriteResponseFile(rspFull, args)) {
+        if (!declareOutputs) {
+          target.LinkAction.Cacheable = false;
+        }
+        target.HasLinkAction = true;
+
+        if (type == cmStateEnums::SHARED_LIBRARY && output != realOutput) {
+          cmGeneratorTarget::Names const names = gt->GetLibraryNames(config);
+          std::string const soName = ReprobuildRelativeTo(
+            binaryDir,
+            cmStrCat(gt->GetDirectory(config), "/", names.SharedObject));
+          ReprobuildAction symlinkAction;
+          symlinkAction.Id = ReprobuildSafeId(
+            cmStrCat("symlink-", gt->GetName(), configSuffix));
+          symlinkAction.Var =
+            ReprobuildNimIdent("action", nextActionVar++, symlinkAction.Id);
+          // Inline-exec both symlink flavors: a framework's
+          // "Versions/Current" shortcut uses `cmake -E create_symlink`, an
+          // ordinary shared-library soname chain uses `cmake -E
+          // cmake_symlink_library`. Both are single direct cmake.exe
+          // invocations — no shell, no wrapper script.
+          std::string const cmakeCmd = cmSystemTools::GetCMakeCommand();
+          symlinkAction.Inline = true;
+          symlinkAction.InlineCwd = binaryDir;
+          if (gt->IsFrameworkOnApple()) {
+            std::string const frameworkLinkTarget = cmStrCat(
+              "Versions/Current/", cmSystemTools::GetFilenameName(realOutput));
+            symlinkAction.InlineArgv = { cmakeCmd, "-E", "create_symlink",
+                                         frameworkLinkTarget, output };
+          } else {
+            symlinkAction.InlineArgv = {
+              cmakeCmd,   "-E",   "cmake_symlink_library",
+              realOutput, soName, output
+            };
+          }
+          symlinkAction.Inputs = { realOutput };
+          if (declareOutputs) {
+            symlinkAction.Outputs = { output };
+          } else {
+            symlinkAction.Cacheable = false;
+          }
+          if (soName != output && soName != realOutput) {
+            if (declareOutputs) {
+              symlinkAction.Outputs.insert(symlinkAction.Outputs.begin(),
+                                           soName);
+            }
+            ReprobuildAppendCleanFile(cleanFiles, binaryDir, soName);
+          }
+          ReprobuildAppendCleanFile(cleanFiles, binaryDir, output);
+          symlinkAction.Deps = { target.LinkAction.Id };
+          sawSymlinkOutput = true;
+          target.SymlinkActions.push_back(std::move(symlinkAction));
+        }
+
+        if (target.HcrEnabled) {
+          if (target.HcrObjects.empty()) {
+            this->GetCMakeInstance()->IssueMessage(
+              MessageType::FATAL_ERROR,
+              cmStrCat("Reprobuild HCR profile unavailable for target '",
+                       gt->GetName(),
+                       "': no C or CXX object compile actions were available "
+                       "for affected object lookup."));
+            return;
+          }
+          ReprobuildAction linkGraph;
+          linkGraph.Id = ReprobuildSafeId(
+            cmStrCat("hcr-linkgraph-", gt->GetName(), configSuffix));
+          linkGraph.Var =
+            ReprobuildNimIdent("action", nextActionVar++, linkGraph.Id);
+          linkGraph.ToolId =
+            ReprobuildSafeId(cmStrCat("reprobuild-cmake-", linkGraph.Var));
+          linkGraph.Inputs = { realOutput };
+          linkGraph.Cacheable = false;
+          std::string const linkGraphRel = cmStrCat(
+            "CMakeFiles/reprobuild/hcr/", linkGraph.Var, ".linkgraph");
+          if (declareOutputs) {
+            linkGraph.Outputs = { linkGraphRel };
+          }
+          std::vector<std::string> lines;
+          lines.push_back(
+            cmStrCat("out=", ReprobuildShellSingleQuote(linkGraphRel),
+                     "; bin=", ReprobuildShellSingleQuote(realOutput),
+                     "; mkdir -p \"$(dirname \"$out\")\"; "
+                     "tmp=\"$out.tmp\"; "
+                     "{ printf '%s\\n' "
+                     "'schema_id=reprobuild.hcr.linkgraph-evidence.v1'; "
+                     "printf 'target=%s\\n' ",
+                     ReprobuildShellSingleQuote(target.Name),
+                     "; printf 'binary=%s\\n' \"$bin\"; "
+                     "if command -v file >/dev/null 2>&1; then "
+                     "printf '%s\\n' 'file_begin'; file \"$bin\"; "
+                     "printf '%s\\n' 'file_end'; fi; "
+                     "if command -v nm >/dev/null 2>&1; then "
+                     "printf '%s\\n' 'symbols_begin'; "
+                     "nm -an \"$bin\" 2>&1 | head -200; "
+                     "printf '%s\\n' 'symbols_end'; fi; "
+                     "if command -v otool >/dev/null 2>&1; then "
+                     "printf '%s\\n' 'load_commands_begin'; "
+                     "otool -l \"$bin\" 2>&1 | head -400; "
+                     "printf '%s\\n' 'load_commands_end'; "
+                     "elif command -v readelf >/dev/null 2>&1; then "
+                     "printf '%s\\n' 'elf_symbols_begin'; "
+                     "readelf -Ws \"$bin\" 2>&1 | head -400; "
+                     "printf '%s\\n' 'elf_symbols_end'; fi; "
+                     "} > \"$tmp\"; test -s \"$tmp\"; "
+                     "mv \"$tmp\" \"$out\""));
+          std::string const wrapperPath =
+            cmStrCat(wrapperDir, "/", linkGraph.ToolId);
+          if (!ReprobuildWriteCommandScript(wrapperPath, binaryDir, lines)) {
+            this->GetCMakeInstance()->IssueMessage(
+              MessageType::FATAL_ERROR,
+              cmStrCat("Could not write Reprobuild HCR linkgraph wrapper: ",
+                       wrapperPath));
+            return;
+          }
+          usedTools.insert(linkGraph.ToolId);
+          target.HcrLinkOutput = realOutput;
+          target.HcrLinkGraph = linkGraphRel;
+          target.HcrLinkGraphAction = linkGraph.Id;
+          ReprobuildAppendCleanFile(cleanFiles, binaryDir, linkGraphRel);
+          target.PostBuildActions.insert(target.PostBuildActions.begin(),
+                                         std::move(linkGraph));
+        }
+
+        std::string finalDep = target.LinkAction.Id;
+        if (!target.SymlinkActions.empty()) {
+          finalDep = target.SymlinkActions.back().Id;
+        }
+        for (ReprobuildAction& postBuild : target.PostBuildActions) {
+          ReprobuildAppendUnique(postBuild.Deps, finalDep);
+          finalDep = postBuild.Id;
+        }
+        std::string const linkArgsText = cmJoin(target.LinkAction.Args, " ");
+        if (type != cmStateEnums::STATIC_LIBRARY &&
+            linkArgsText.size() > 2048) {
+          std::vector<std::string> rspArgs = target.LinkAction.Args;
+          target.LinkAction.ResponseFile =
+            cmStrCat("CMakeFiles/reprobuild/rsp/", target.LinkAction.Var, "-",
+                     nextRsp++, ".rsp");
+          std::string const rspFull =
+            cmStrCat(binaryDir, "/", target.LinkAction.ResponseFile);
+          if (!ReprobuildWriteResponseFile(rspFull, rspArgs)) {
             this->GetCMakeInstance()->IssueMessage(
               MessageType::FATAL_ERROR,
               cmStrCat("Could not write Reprobuild response file: ", rspFull));
             return;
           }
-          action.Args = { cmStrCat("@", action.ResponseFile) };
-          action.Inputs.push_back(action.ResponseFile);
-        }
-        if (target.HcrEnabled && (lang == "C" || lang == "CXX")) {
-          target.HcrObjects.push_back(ReprobuildHcrObject{
-            sourcePath, objRel, action.Id, lang });
-        }
-        target.CompileActions.push_back(std::move(action));
-      }
-
-      for (auto const& item : dyndepDdis) {
-        std::string const& lang = item.first;
-        std::vector<std::string> const& ddis = item.second;
-        if (ddis.empty()) {
-          continue;
-        }
-        std::string const stem =
-          cmStrCat("CMakeFiles/reprobuild/dyndep/", target.Var, "-", lang);
-        std::string const tdiRel = cmStrCat(stem, "DependInfo.json");
-        std::string const mapRel = cmStrCat(stem, ".map");
-        std::string const ddRel = cmStrCat(stem, ".dd");
-        std::string const fragmentRel = cmStrCat(stem, ".rbdyn");
-        if (!ReprobuildWriteTargetDependInfo(
-              cmStrCat(binaryDir, "/", tdiRel), gt, lg.get(), lang, config,
-              dyndepCxxModuleSources[lang]) ||
-            !ReprobuildWriteDyndepActionMap(
-              cmStrCat(binaryDir, "/", mapRel), dyndepActionMaps[lang])) {
-          this->GetCMakeInstance()->IssueMessage(
-            MessageType::FATAL_ERROR,
-            cmStrCat("Could not write Reprobuild ", lang,
-                     " dyndep metadata for target ", gt->GetName()));
-          return;
+          target.LinkAction.Args = { cmStrCat(
+            "@", target.LinkAction.ResponseFile) };
+          target.LinkAction.Inputs.push_back(target.LinkAction.ResponseFile);
         }
 
-        ReprobuildAction dyndep;
-        dyndep.Id = ReprobuildSafeId(cmStrCat("dyndep-", gt->GetName(), "-",
-                                              lang, configSuffix));
-        dyndep.Var =
-          ReprobuildNimIdent("action", nextActionVar++, dyndep.Id);
-        dyndep.ToolId =
-          ReprobuildSafeId(cmStrCat("reprobuild-cmake-", dyndep.Var));
-        dyndep.Deps = dyndepScanActions[lang];
-        dyndep.Inputs = ddis;
-        dyndep.Inputs.push_back(tdiRel);
-        dyndep.Inputs.push_back(mapRel);
-        if (declareOutputs) {
-          dyndep.Outputs = { ddRel, fragmentRel,
-                             cmStrCat(cmSystemTools::GetFilenamePath(ddRel),
-                                      "/", lang, "Modules.json") };
-          if (lang == "CXX") {
-            for (auto const& mapEntry : dyndepActionMaps[lang]) {
-              dyndep.Outputs.push_back(cmStrCat(mapEntry.first, ".modmap"));
-            }
-          }
-        }
-        dyndep.Cacheable = false;
-
-        std::vector<std::string> dyndepLines;
-        std::string command = cmStrCat(
-          ReprobuildShellSingleQuote(cmSystemTools::GetCMakeCommand()),
-          " -E cmake_ninja_dyndep --tdi=", ReprobuildShellSingleQuote(tdiRel),
-          " --lang=", lang);
-        if (lang == "CXX") {
-          std::string modmapFormat =
-            lg->GetMakefile()->GetSafeDefinition("CMAKE_CXX_MODULE_MAP_FORMAT");
-          if (modmapFormat.empty()) {
-            this->GetCMakeInstance()->IssueMessage(
-              MessageType::FATAL_ERROR,
-              "The Reprobuild generator M6 CXX module path requires "
-              "CMAKE_CXX_MODULE_MAP_FORMAT.");
-            return;
-          }
-          command += cmStrCat(" --modmapfmt=", modmapFormat);
-        }
-        command += cmStrCat(" --dd=", ReprobuildShellSingleQuote(ddRel));
-        for (std::string const& ddi : ddis) {
-          command += " ";
-          command += ReprobuildShellSingleQuote(ddi);
-        }
-        dyndepLines.push_back(command);
-        std::string fragmentCommand =
-          "candidate='/Users/zahary/metacraft/reprobuild/build/bin/"
-          "repro-cmake-dyndep-fragment'; "
-          "if [ -x \"$candidate\" ]; then conv=\"$candidate\"; else "
-          "conv='repro-cmake-dyndep-fragment'; fi; "
-          "\"$conv\" --out ";
-        fragmentCommand += ReprobuildShellSingleQuote(fragmentRel);
-        fragmentCommand += " --map ";
-        fragmentCommand += ReprobuildShellSingleQuote(mapRel);
-        for (std::string const& ddi : ddis) {
-          fragmentCommand += " ";
-          fragmentCommand += ReprobuildShellSingleQuote(ddi);
-        }
-        dyndepLines.push_back(fragmentCommand);
-        std::string const dyndepWrapper =
-          cmStrCat(wrapperDir, "/", dyndep.ToolId);
-        if (!ReprobuildWriteCommandScript(dyndepWrapper, binaryDir,
-                                          dyndepLines)) {
-          this->GetCMakeInstance()->IssueMessage(
-            MessageType::FATAL_ERROR,
-            cmStrCat("Could not write Reprobuild dyndep wrapper: ",
-                     dyndepWrapper));
-          return;
-        }
-        usedTools.insert(dyndep.ToolId);
-        for (ReprobuildAction& compile : target.CompileActions) {
-          if (compile.DynamicDepsFile == fragmentRel) {
-            ReprobuildAppendUnique(compile.Deps, dyndep.Id);
-          }
-        }
-        target.CustomActions.push_back(std::move(dyndep));
-      }
-
-      auto objectOutputFor = [&](cmGeneratorTarget* objectTarget,
-                                 cmSourceFile const* source) {
-        return ReprobuildConfigFullPath(
-          binaryDir,
-          cmStrCat(objectTarget->GetObjectDirectory(config),
-                   objectTarget->GetObjectName(source)),
-          config, multiConfig);
-      };
-      auto appendObjectLibraryOutputs = [&](cmGeneratorTarget* objectTarget,
-                                            std::vector<std::string>& objects,
-                                            std::vector<std::string>& deps) {
-        std::vector<cmSourceFile const*> objectSources;
-        objectTarget->GetObjectSources(objectSources, config);
-        for (cmSourceFile const* objectSource : objectSources) {
-          std::string const objRel = objectOutputFor(objectTarget, objectSource);
-          ReprobuildAppendUnique(objects, objRel);
-          ReprobuildAppendUnique(
-            deps, ReprobuildSafeId(cmStrCat("compile-",
-                                            objectTarget->GetName(), "-",
-                                            objRel, configSuffix)));
-        }
-      };
-
-      auto appendCustomEventActions =
-        [&](std::vector<cmCustomCommand> const& commands,
-            std::string const& stage, std::vector<ReprobuildAction>& actions) {
-          unsigned int eventIndex = 0;
-          for (cmCustomCommand const& cc : commands) {
-            cmCustomCommandGenerator ccg(cc, commandConfig, lg.get(), false,
-                                         config);
-            std::vector<std::string> commandLines;
-            for (unsigned int i = 0; i < ccg.GetNumberOfCommands(); ++i) {
-              std::string commandLine;
-              std::string const workingDirectory = ccg.GetWorkingDirectory();
-              if (!workingDirectory.empty()) {
-                commandLine += "cd ";
-                commandLine += ReprobuildShellSingleQuote(workingDirectory);
-                commandLine += " && ";
-              }
-              commandLine += ReprobuildShellSingleQuote(ccg.GetCommand(i));
-              ccg.AppendArguments(i, commandLine);
-              commandLines.push_back(commandLine);
-            }
-            if (commandLines.empty()) {
-              continue;
-            }
-            retargetCommandConfigExecutables(ccg, commandLines);
-
-            ReprobuildAction event;
-            event.Id = ReprobuildSafeId(cmStrCat(stage, "-", gt->GetName(),
-                                                 "-", eventIndex++,
-                                                 configSuffix));
-            event.Var = ReprobuildNimIdent("action", nextActionVar++,
-                                           event.Id);
-            event.ToolId =
-              ReprobuildSafeId(cmStrCat("reprobuild-cmake-", event.Var));
-            event.Pool = cc.GetUsesTerminal() ? "console" : cc.GetJobPool();
-            event.Inputs = ccg.GetDepends();
-            event.Cacheable = false;
-            for (std::string const& byproduct : ccg.GetByproducts()) {
-              ReprobuildAppendCleanFile(cleanFiles,
-                                        lg->GetCurrentBinaryDirectory(),
-                                        byproduct);
-              if (declareOutputs) {
-                event.Outputs.push_back(ReprobuildRelativeTo(
-                  binaryDir,
-                  cmSystemTools::CollapseFullPath(
-                    byproduct, lg->GetCurrentBinaryDirectory())));
-              }
-            }
-            std::string const wrapperPath =
-              cmStrCat(wrapperDir, "/", event.ToolId);
-            if (!ReprobuildWriteCommandScript(wrapperPath, "", commandLines)) {
-              this->GetCMakeInstance()->IssueMessage(
-                MessageType::FATAL_ERROR,
-                cmStrCat("Could not write Reprobuild build-event wrapper: ",
-                         wrapperPath));
-              return false;
-            }
-            usedTools.insert(event.ToolId);
-            actions.push_back(std::move(event));
-          }
-          return true;
-        };
-
-      if (!appendCustomEventActions(gt->GetPreBuildCommands(), "pre-build",
-                                    target.PreBuildActions) ||
-          !appendCustomEventActions(gt->GetPreLinkCommands(), "pre-link",
-                                    target.PreLinkActions) ||
-          !appendCustomEventActions(gt->GetPostBuildCommands(), "post-build",
-                                    target.PostBuildActions)) {
-        return;
-      }
-      for (ReprobuildAction& compile : target.CompileActions) {
-        for (ReprobuildAction const& preBuild : target.PreBuildActions) {
-          ReprobuildAppendUnique(compile.Deps, preBuild.Id);
-        }
-      }
-
-      for (ReprobuildAction const& compile : target.CompileActions) {
-        target.ObjectOutputs.insert(target.ObjectOutputs.end(),
-                                    compile.Outputs.begin(),
-                                    compile.Outputs.end());
-      }
-
-      std::vector<std::string> cudaDeviceLinkActionIds;
-      if (targetHasCudaSources &&
-          (gt->GetPropertyAsBool("CUDA_SEPARABLE_COMPILATION") ||
-           gt->GetPropertyAsBool("CUDA_RESOLVE_DEVICE_SYMBOLS")) &&
-          type != cmStateEnums::OBJECT_LIBRARY) {
-        cmMakefile const* mf = lg->GetMakefile();
-        if (mf->GetSafeDefinition("CMAKE_REPROBUILD_CUDA_PROFILE") ==
-              "ClangFatbinary" &&
-            mf->GetSafeDefinition("CMAKE_CUDA_COMPILER_ID") != "Clang" &&
-            mf->GetSafeDefinition("CMAKE_CUDA_COMPILER_ID") != "AppleClang") {
-          this->GetCMakeInstance()->IssueMessage(
-            MessageType::FATAL_ERROR,
-            "Reprobuild profile unavailable: Clang CUDA fatbinary and "
-            "registration-stub profile requires a Clang CUDA compiler.");
-          return;
-        }
-        std::string const deviceObjRel = ReprobuildConfigFullPath(
-          binaryDir,
-          cmStrCat(gt->GetObjectDirectory(config),
-                   "cmake_device_link", mf->GetSafeDefinition(
-                                          "CMAKE_CUDA_OUTPUT_EXTENSION")),
-          config, multiConfig);
-        ReprobuildAction deviceLink;
-        deviceLink.Id =
-          ReprobuildSafeId(cmStrCat("device-link-", gt->GetName(),
-                                    configSuffix));
-        deviceLink.Var =
-          ReprobuildNimIdent("action", nextActionVar++, deviceLink.Id);
-        deviceLink.ToolId = ReprobuildToolId("CUDA");
-        usedTools.insert(deviceLink.ToolId);
-        std::string const cudaCompilerId =
-          mf->GetSafeDefinition("CMAKE_CUDA_COMPILER_ID");
-        if (cudaCompilerId == "Clang" || cudaCompilerId == "AppleClang") {
-          std::string architecturesStr =
-            gt->GetSafeProperty("CUDA_ARCHITECTURES");
-          if (cmIsOff(architecturesStr)) {
-            this->GetCMakeInstance()->IssueMessage(
-              MessageType::FATAL_ERROR,
-              "CUDA_SEPARABLE_COMPILATION on Clang requires "
-              "CUDA_ARCHITECTURES to be set.");
-            return;
-          }
-          cmList architectures{ architecturesStr };
-          if (architectures.empty()) {
-            this->GetCMakeInstance()->IssueMessage(
-              MessageType::FATAL_ERROR,
-              "Reprobuild profile unavailable: Clang CUDA fatbinary and "
-              "registration-stub flow requires CUDA_ARCHITECTURES.");
-            return;
-          }
-          std::string const cudaDeviceLinker =
-            mf->GetSafeDefinition("CMAKE_CUDA_DEVICE_LINKER");
-          std::string const cudaFatbinary =
-            mf->GetSafeDefinition("CMAKE_CUDA_FATBINARY");
-          if (cudaDeviceLinker.empty() || cudaFatbinary.empty()) {
-            this->GetCMakeInstance()->IssueMessage(
-              MessageType::FATAL_ERROR,
-              "Reprobuild profile unavailable: Clang CUDA fatbinary and "
-              "registration-stub tools were not found.");
-            return;
-          }
-          std::string const dlinkToolId =
-            ReprobuildSafeId("reprobuild-cmake-cuda-device-linker");
-          std::string const fatbinaryToolId =
-            ReprobuildSafeId("reprobuild-cmake-cuda-fatbinary");
-          if (!ReprobuildWriteWrapper(cmStrCat(wrapperDir, "/", dlinkToolId),
-                                      cudaDeviceLinker) ||
-              !ReprobuildWriteWrapper(
-                cmStrCat(wrapperDir, "/", fatbinaryToolId), cudaFatbinary)) {
-            this->GetCMakeInstance()->IssueMessage(
-              MessageType::FATAL_ERROR,
-              "Could not write Reprobuild Clang CUDA tool wrappers.");
-            return;
-          }
-          usedTools.insert(dlinkToolId);
-          usedTools.insert(fatbinaryToolId);
-
-          std::string const registerRel = ReprobuildConfigFullPath(
-            binaryDir,
-            cmStrCat(gt->GetObjectDirectory(config),
-                     "cmake_cuda_register.h"),
-            config, multiConfig);
-          std::string const fatbinRel = ReprobuildConfigFullPath(
-            binaryDir,
-            cmStrCat(gt->GetObjectDirectory(config), "cmake_cuda_fatbin.h"),
-            config, multiConfig);
-          std::vector<std::string> cubinRels;
-          std::vector<std::string> cubinActionIds;
-          for (std::string const& architectureKind : architectures) {
-            std::string const architecture =
-              architectureKind.substr(0, architectureKind.find('-'));
-            std::string const cubinRel = ReprobuildConfigFullPath(
-              binaryDir,
-              cmStrCat(gt->GetObjectDirectory(config), "sm_", architecture,
-                       ".cubin"),
-              config, multiConfig);
-            ReprobuildAction cubinLink;
-            cubinLink.Id = ReprobuildSafeId(
-              cmStrCat("cuda-device-link-", gt->GetName(), "-sm-",
-                       architecture, configSuffix));
-            cubinLink.Var =
-              ReprobuildNimIdent("action", nextActionVar++, cubinLink.Id);
-            cubinLink.ToolId = dlinkToolId;
-            cubinLink.Args = { cmStrCat("-arch=sm_", architecture) };
-            if (cubinRels.empty()) {
-              cubinLink.Args.push_back(
-                cmStrCat("--register-link-binaries=", registerRel));
-            }
-            cubinLink.Args.push_back("-o");
-            cubinLink.Args.push_back(cubinRel);
-            cm::append(cubinLink.Args, linkObjects);
-            cubinLink.Inputs = linkObjects;
-            for (ReprobuildAction const& compile : target.CompileActions) {
-              ReprobuildAppendUnique(cubinLink.Deps, compile.Id);
-            }
-            if (declareOutputs) {
-              cubinLink.Outputs = { cubinRel };
-              if (cubinRels.empty()) {
-                cubinLink.Outputs.push_back(registerRel);
-              }
-            } else {
-              cubinLink.Cacheable = false;
-            }
-            ReprobuildAppendCleanFile(cleanFiles, binaryDir, cubinRel);
-            if (cubinRels.empty()) {
-              ReprobuildAppendCleanFile(cleanFiles, binaryDir, registerRel);
-            }
-            cubinRels.push_back(cubinRel);
-            cubinActionIds.push_back(cubinLink.Id);
-            target.CustomActions.push_back(std::move(cubinLink));
-          }
-
-          ReprobuildAction fatbinary;
-          fatbinary.Id =
-            ReprobuildSafeId(cmStrCat("cuda-fatbinary-", gt->GetName(),
-                                      configSuffix));
-          fatbinary.Var =
-            ReprobuildNimIdent("action", nextActionVar++, fatbinary.Id);
-          fatbinary.ToolId = fatbinaryToolId;
-          fatbinary.Args = { "-64", "-cmdline=--compile-only",
-                             "-compress-all", "-link",
-                             cmStrCat("--embedded-fatbin=", fatbinRel) };
-          for (std::size_t i = 0; i < cubinRels.size(); ++i) {
-            std::string const architecture =
-              architectures[i].substr(0, architectures[i].find('-'));
-            fatbinary.Args.push_back(
-              cmStrCat("-im=profile=sm_", architecture, ",file=",
-                       cubinRels[i]));
-            fatbinary.Inputs.push_back(cubinRels[i]);
-            fatbinary.Deps.push_back(cubinActionIds[i]);
-          }
-          if (declareOutputs) {
-            fatbinary.Outputs = { fatbinRel };
-          } else {
-            fatbinary.Cacheable = false;
-          }
-          ReprobuildAppendCleanFile(cleanFiles, binaryDir, fatbinRel);
-          std::string const fatbinaryActionId = fatbinary.Id;
-          target.CustomActions.push_back(std::move(fatbinary));
-
-          ReprobuildAction stubCompile;
-          stubCompile.Id =
-            ReprobuildSafeId(cmStrCat("cuda-registration-stub-",
-                                      gt->GetName(), configSuffix));
-          stubCompile.Var =
-            ReprobuildNimIdent("action", nextActionVar++, stubCompile.Id);
-          stubCompile.ToolId = ReprobuildToolId("CUDA");
-          usedTools.insert(stubCompile.ToolId);
-          ReprobuildAppendCommonCompileArgs(stubCompile.Args, lg.get(), gt,
-                                            config, "CUDA");
-          cmLinkLineDeviceComputer deviceLinkComputer(
-            lg.get(), lg->GetStateSnapshot().GetDirectory());
-          std::string linkLibs;
-          std::string linkFlags;
-          std::string frameworkPath;
-          std::string linkPath;
-          lg->GetDeviceLinkFlags(deviceLinkComputer, config, linkLibs,
-                                 linkFlags, frameworkPath, linkPath, gt);
-          ReprobuildAppendParsed(stubCompile.Args, linkFlags);
-          stubCompile.Args.push_back(
-            "-D__CUDA_INCLUDE_COMPILER_INTERNAL_HEADERS__");
-          stubCompile.Args.push_back("-D__NV_EXTRA_INITIALIZATION=\"\"");
-          stubCompile.Args.push_back("-D__NV_EXTRA_FINALIZATION=\"\"");
-          stubCompile.Args.push_back(cmStrCat(
-            "-DREGISTERLINKBINARYFILE=\\\"", registerRel, "\\\""));
-          stubCompile.Args.push_back(
-            cmStrCat("-DFATBINFILE=\\\"", fatbinRel, "\\\""));
-          ReprobuildAppendParsed(
-            stubCompile.Args,
-            mf->GetSafeDefinition("_CMAKE_COMPILE_AS_CUDA_FLAG"));
-          std::string const linkStub =
-            cmStrCat(mf->GetSafeDefinition(
-                       "CMAKE_CUDA_COMPILER_TOOLKIT_LIBRARY_ROOT"),
-                     "/bin/crt/link.stub");
-          stubCompile.Args.push_back("-c");
-          stubCompile.Args.push_back(linkStub);
-          stubCompile.Args.push_back("-o");
-          stubCompile.Args.push_back(deviceObjRel);
-          stubCompile.Inputs = { fatbinRel, registerRel, linkStub };
-          stubCompile.Deps = { fatbinaryActionId };
-          if (declareOutputs) {
-            stubCompile.Outputs = { deviceObjRel };
-          } else {
-            stubCompile.Cacheable = false;
-          }
-          ReprobuildAppendCleanFile(cleanFiles, binaryDir, deviceObjRel);
-          cudaDeviceLinkActionIds.push_back(stubCompile.Id);
-          target.CustomActions.push_back(std::move(stubCompile));
-          ReprobuildAppendUnique(linkObjects, deviceObjRel);
-          sawCudaDeviceLink = true;
-          sawCudaClangFatbinary = true;
-          continue;
-        } else {
-          deviceLink.Args.push_back("-dlink");
-        }
-        deviceLink.Args.push_back("-o");
-        deviceLink.Args.push_back(deviceObjRel);
-        cm::append(deviceLink.Args, linkObjects);
-        deviceLink.Inputs = linkObjects;
-        for (ReprobuildAction const& compile : target.CompileActions) {
-          ReprobuildAppendUnique(deviceLink.Deps, compile.Id);
-        }
-        if (declareOutputs) {
-          deviceLink.Outputs = { deviceObjRel };
-        } else {
-          deviceLink.Cacheable = false;
-        }
-        ReprobuildAppendCleanFile(cleanFiles, binaryDir, deviceObjRel);
-        cudaDeviceLinkActionIds.push_back(deviceLink.Id);
-        target.CustomActions.push_back(std::move(deviceLink));
-        ReprobuildAppendUnique(linkObjects, deviceObjRel);
-        sawCudaDeviceLink = true;
-      }
-
-      if (type == cmStateEnums::OBJECT_LIBRARY) {
-        buildTargets.push_back(std::move(target));
-        continue;
-      }
-
-      std::string linkLang = gt->GetLinkerLanguage(config);
-      if (linkLang != "C" && linkLang != "CXX") {
-        linkLang = sources.front()->GetLanguage();
-      }
-      usedLanguages.insert(linkLang);
-
-      target.LinkAction.Id =
-        ReprobuildSafeId(cmStrCat("link-", gt->GetName(), configSuffix));
-      target.LinkAction.Var =
-        ReprobuildNimIdent("action", nextActionVar++, target.LinkAction.Id);
-      target.LinkAction.Pool = ReprobuildPoolProperty(gt, nullptr,
-                                                      "JOB_POOL_LINK", "");
-      for (ReprobuildAction const& compile : target.CompileActions) {
-        ReprobuildAppendUnique(target.LinkAction.Deps, compile.Id);
-      }
-      for (std::string const& deviceLinkAction : cudaDeviceLinkActionIds) {
-        ReprobuildAppendUnique(target.LinkAction.Deps, deviceLinkAction);
-      }
-      for (ReprobuildAction& preLink : target.PreLinkActions) {
-        for (ReprobuildAction const& compile : target.CompileActions) {
-          ReprobuildAppendUnique(preLink.Deps, compile.Id);
-        }
-      }
-
-      std::vector<std::string> linkDependencyActions;
-      std::vector<std::string> linkLibraryInputs;
-      auto appendLinkedTarget = [&](cmGeneratorTarget const* depTargetConst,
-                                    bool includeObjectLibraryOutputs) {
-        cmGeneratorTarget* depTarget =
-          const_cast<cmGeneratorTarget*>(depTargetConst);
-        if (!depTarget || depTarget->IsImported()) {
-          return;
-        }
-        auto depType = depTarget->GetType();
-        if (type == cmStateEnums::STATIC_LIBRARY &&
-            depType != cmStateEnums::OBJECT_LIBRARY) {
-          return;
-        }
-        if (depType == cmStateEnums::OBJECT_LIBRARY) {
-          if (includeObjectLibraryOutputs) {
-            appendObjectLibraryOutputs(depTarget, linkObjects,
-                                       linkDependencyActions);
-          }
-          return;
-        }
-        if (depType == cmStateEnums::STATIC_LIBRARY ||
-            depType == cmStateEnums::SHARED_LIBRARY ||
-            depType == cmStateEnums::MODULE_LIBRARY ||
-            depType == cmStateEnums::EXECUTABLE) {
-          cmStateEnums::ArtifactType artifact =
-            depTarget->HasImportLibrary(config)
-            ? cmStateEnums::ImportLibraryArtifact
-            : cmStateEnums::RuntimeBinaryArtifact;
-          std::string const depPath = ReprobuildRelativeTo(
-            binaryDir, depTarget->GetFullPath(config, artifact, true));
-          ReprobuildAppendUnique(
-            linkLibraryInputs,
-            ReprobuildConfigPath(depPath, config, multiConfig));
-          ReprobuildAppendUnique(linkDependencyActions,
-                                ReprobuildSafeId(cmStrCat("link-",
-                                                          depTarget->GetName(),
-                                                          configSuffix)));
-        }
-      };
-
-      // M27: external objects whose underlying source file is produced by
-      // an attached ``add_custom_command`` must use the literal path the
-      // command writes to (no per-config subdir). Reprobuild does NOT
-      // rewrite the COMMAND argv, so the on-disk path is exactly what the
-      // user spelled in OUTPUT. Other external objects (raw .obj source
-      // files added as ``add_library`` inputs that Reprobuild does NOT
-      // build itself) likewise live at the literal path the user provided
-      // — there is no Reprobuild-controlled per-config artifact for them.
-      // Either way the right link-line input is the unprefixed path. We
-      // continue to call ``ReprobuildConfigFullPath`` for object-library
-      // outputs above (handled via ``appendLinkedTarget`` — those DO live
-      // under ``<config>/`` because Reprobuild itself writes them).
-      auto appendExternalObjectLinkInput =
-        [&](cmSourceFile const* sf) {
-          ReprobuildAppendUnique(
-            linkObjects,
-            ReprobuildCustomCommandFullPath(binaryDir, sf->GetFullPath()));
-        };
-      std::vector<cmSourceFile const*> externalObjects;
-      gt->GetExternalObjects(externalObjects, config);
-      for (cmSourceFile const* externalObject : externalObjects) {
-        std::string const& objLib = externalObject->GetObjectLibrary();
-        if (!objLib.empty()) {
-          appendLinkedTarget(lg->FindGeneratorTargetToUse(objLib), true);
-        } else {
-          appendExternalObjectLinkInput(externalObject);
-        }
-      }
-      if (cmComputeLinkInformation* cli = gt->GetLinkInformation(config)) {
-        for (cmComputeLinkInformation::Item const& item : cli->GetItems()) {
-          if (item.Target) {
-            appendLinkedTarget(item.Target, false);
-          } else if (item.ObjectSource) {
-            std::string const& objLib = item.ObjectSource->GetObjectLibrary();
-            if (!objLib.empty()) {
-              appendLinkedTarget(lg->FindGeneratorTargetToUse(objLib), true);
-            } else {
-              appendExternalObjectLinkInput(item.ObjectSource);
-            }
-          }
-        }
-      }
-      for (std::string const& depAction : linkDependencyActions) {
-        for (ReprobuildAction& preLink : target.PreLinkActions) {
-          ReprobuildAppendUnique(preLink.Deps, depAction);
-        }
-        ReprobuildAppendUnique(target.LinkAction.Deps, depAction);
-      }
-      for (ReprobuildAction const& preLink : target.PreLinkActions) {
-        ReprobuildAppendUnique(target.LinkAction.Deps, preLink.Id);
-      }
-
-      std::string const output = ReprobuildConfigFullPath(
-        binaryDir, gt->GetFullPath(config), config, multiConfig);
-      std::string const realOutput = ReprobuildConfigFullPath(
-        binaryDir,
-        gt->GetFullPath(config, cmStateEnums::RuntimeBinaryArtifact, true),
-        config, multiConfig);
-      ReprobuildAppendCleanFile(cleanFiles, binaryDir, output);
-      ReprobuildAppendCleanFile(cleanFiles, binaryDir, realOutput);
-      if (gt->IsBundleOnApple()) {
-        std::string plistFull;
-        if (gt->IsAppBundleOnApple()) {
-          plistFull = cmStrCat(
-            gt->GetDirectory(config), "/",
-            gt->GetAppBundleDirectory(config,
-                                      cmGeneratorTarget::ContentLevel),
-            "/Info.plist");
-        } else if (gt->IsFrameworkOnApple()) {
-          plistFull = cmStrCat(
-            gt->GetDirectory(config), "/",
-            gt->GetFrameworkDirectory(config,
-                                      cmGeneratorTarget::FullLevel),
-            "/Resources/Info.plist");
-        } else if (gt->IsCFBundleOnApple()) {
-          plistFull = cmStrCat(
-            gt->GetDirectory(config), "/",
-            gt->GetCFBundleDirectory(config,
-                                     cmGeneratorTarget::ContentLevel),
-            "/Info.plist");
-        }
-        if (!plistFull.empty()) {
+        for (std::string const& cleanFile : ReprobuildEvaluateCleanFiles(
+               lg.get(), config, gt->GetProperty("ADDITIONAL_CLEAN_FILES"))) {
           ReprobuildAppendCleanFile(
-            cleanFiles, binaryDir,
-            ReprobuildConfigFullPath(binaryDir, plistFull, config,
-                                     multiConfig));
+            cleanFiles, lg->GetCurrentBinaryDirectory(), cleanFile);
         }
-      }
-      cmSystemTools::MakeDirectory(
-        cmSystemTools::GetFilenamePath(cmStrCat(binaryDir, "/", realOutput)));
-
-      if (type == cmStateEnums::STATIC_LIBRARY) {
-        std::string const arTool =
-          lg->GetMakefile()->GetSafeDefinition("CMAKE_AR");
-        std::string const ranlibTool =
-          lg->GetMakefile()->GetSafeDefinition("CMAKE_RANLIB");
-        if (arTool.empty()) {
-          this->GetCMakeInstance()->IssueMessage(
-            MessageType::FATAL_ERROR,
-            cmStrCat("Missing CMAKE_AR while writing static library target ",
-                     gt->GetName()));
-          return;
-        }
-        // Inline-exec: emit a single `ar rcs <output> <objects…>` invocation.
-        // The flags collapse what the old multi-step shell wrapper did
-        // (`rm -f output; ar qc output objects…; ranlib output`) into one
-        // direct call: `r` replaces matching members (so re-runs don't
-        // accumulate duplicates the way `qc` would), `c` suppresses the
-        // "creating archive" warning, and `s` writes the symbol table —
-        // i.e. ar performs its own ranlib step. CMAKE_RANLIB is not invoked
-        // separately on the modern toolchains the bench exercises; if an
-        // AIX-style toolchain ever needs a follow-up ranlib edge we can
-        // add it as a second inline-exec depending on this one.
-        std::vector<std::string> archiveArgv = { arTool, "rcs", output };
-        cm::append(archiveArgv, linkObjects);
-        target.LinkAction.Inline = true;
-        target.LinkAction.InlineArgv = std::move(archiveArgv);
-        target.LinkAction.Inputs = linkObjects;
-        if (declareOutputs) {
-          target.LinkAction.Outputs = { output };
-        }
-      } else {
-        usedTools.insert(ReprobuildToolId(linkLang));
-        std::string flags;
-        std::string linkFlags;
-        std::string linkLibs;
-        std::string frameworkPath;
-        std::string linkPath;
-        // Reprobuild runs actions from the build root.  Use the root local
-        // generator for link-line path conversion so CMake does not emit
-        // library references relative to a target subdirectory.
-        cmLinkLineComputer linkLineComputer(
-          rootLg, rootLg->GetStateSnapshot().GetDirectory());
-        lg->GetTargetFlags(&linkLineComputer, config, linkLibs, flags,
-                           linkFlags, frameworkPath, linkPath, gt);
-        lg->AppendDependencyInfoLinkerFlags(linkFlags, gt, config, linkLang);
-        if (cmComputeLinkInformation* cli = gt->GetLinkInformation(config)) {
-          std::string const rpath = linkLineComputer.ComputeRPath(*cli);
-          if (!rpath.empty()) {
-            if (!linkFlags.empty()) {
-              linkFlags += " ";
-            }
-            linkFlags += rpath;
+        // M27: clean files generated from custom-command OUTPUT/BYPRODUCTS
+        // use the literal user-specified path (no config prefix) — must
+        // agree with the corresponding ``custom.Outputs`` declarations and
+        // with where the COMMAND argv actually writes the artifact.
+        std::vector<cmSourceFile const*> customCommands;
+        gt->GetCustomCommands(customCommands, config);
+        for (cmSourceFile const* sf : customCommands) {
+          cmCustomCommandGenerator ccg(*sf->GetCustomCommand(), commandConfig,
+                                       lg.get(), false, config);
+          for (std::string const& customOutput : ccg.GetOutputs()) {
+            ReprobuildAppendCleanFile(
+              cleanFiles, binaryDir,
+              ReprobuildCustomCommandPath(
+                binaryDir, lg->GetCurrentBinaryDirectory(), customOutput));
+          }
+          for (std::string const& byproduct : ccg.GetByproducts()) {
+            ReprobuildAppendCleanFile(
+              cleanFiles, binaryDir,
+              ReprobuildCustomCommandPath(
+                binaryDir, lg->GetCurrentBinaryDirectory(), byproduct));
           }
         }
-        std::vector<std::string> linkArgs;
-        ReprobuildAppendParsed(linkArgs, flags);
-        ReprobuildAppendParsed(linkArgs, linkFlags);
-        ReprobuildAppendParsed(linkArgs, frameworkPath);
-        ReprobuildAppendParsed(linkArgs, linkPath);
-        if (linkLang == "Swift") {
-          std::string swiftFlags;
-          lg->GetTargetCompileFlags(gt, config, "Swift", swiftFlags, "");
-          ReprobuildAppendParsed(linkArgs, swiftFlags);
-          if (type == cmStateEnums::EXECUTABLE) {
-            linkArgs.push_back("-emit-executable");
-          } else if (type == cmStateEnums::SHARED_LIBRARY ||
-                     type == cmStateEnums::MODULE_LIBRARY) {
-            linkArgs.push_back("-emit-library");
+        std::vector<cmCustomCommand> buildEventCommands =
+          gt->GetPreBuildCommands();
+        cm::append(buildEventCommands, gt->GetPreLinkCommands());
+        cm::append(buildEventCommands, gt->GetPostBuildCommands());
+        for (cmCustomCommand const& cc : buildEventCommands) {
+          cmCustomCommandGenerator ccg(cc, commandConfig, lg.get(), false,
+                                       config);
+          for (std::string const& byproduct : ccg.GetByproducts()) {
+            ReprobuildAppendCleanFile(
+              cleanFiles, binaryDir,
+              ReprobuildCustomCommandPath(
+                binaryDir, lg->GetCurrentBinaryDirectory(), byproduct));
           }
         }
-        if (gt->HasSOName(config)) {
-          cmGeneratorTarget::Names const names = gt->GetLibraryNames(config);
-          std::string soname = names.SharedObject;
-          if (gt->GetType() == cmStateEnums::SHARED_LIBRARY) {
-            soname = cmStrCat(gt->GetInstallNameDirForBuildTree(config),
-                              soname);
-          }
-          std::string const soFlag = lg->GetMakefile()->GetSONameFlag(linkLang);
-          if (!soFlag.empty()) {
-            if (std::isspace(static_cast<unsigned char>(soFlag.back())) ||
-                !cmHasSuffix(soFlag, ",")) {
-              std::string trimmed = soFlag;
-              while (!trimmed.empty() &&
-                     std::isspace(static_cast<unsigned char>(trimmed.back()))) {
-                trimmed.pop_back();
-              }
-              linkArgs.push_back(trimmed);
-              linkArgs.push_back(soname);
-            } else {
-              linkArgs.push_back(cmStrCat(soFlag, soname));
-            }
-          }
-        }
-        linkArgs.push_back("-o");
-        linkArgs.push_back(realOutput);
-        cm::append(linkArgs, linkObjects);
-        ReprobuildAppendParsed(linkArgs, linkLibs);
-        if (target.HcrEnabled && ReprobuildContainsLtoFlag(linkArgs)) {
-          this->GetCMakeInstance()->IssueMessage(
-            MessageType::FATAL_ERROR,
-            cmStrCat("Reprobuild HCR profile unavailable for target '",
-                     gt->GetName(),
-                     "': link flags request LTO/linker-plugin behavior, "
-                     "which is incompatible with HCR linkgraph evidence."));
-          return;
-        }
-        target.LinkAction.ToolId = ReprobuildToolId(linkLang);
-        target.LinkAction.Args = linkArgs;
-        target.LinkAction.Inputs = linkObjects;
-        for (std::string const& linkLibraryInput : linkLibraryInputs) {
-          ReprobuildAppendUnique(target.LinkAction.Inputs, linkLibraryInput);
-        }
-        if (declareOutputs) {
-          target.LinkAction.Outputs = { realOutput };
-        }
-        if (gt->HasImportLibrary(config)) {
-          std::string const importOutput = ReprobuildRelativeTo(
-            binaryDir,
-            gt->GetFullPath(config, cmStateEnums::ImportLibraryArtifact, true));
-          std::string const importOutputConfig =
-            ReprobuildConfigPath(importOutput, config, multiConfig);
-          if (!importOutput.empty()) {
-            ReprobuildAppendCleanFile(cleanFiles, binaryDir,
-                                      importOutputConfig);
-            if (declareOutputs) {
-              ReprobuildAppendUnique(target.LinkAction.Outputs,
-                                     importOutputConfig);
-            }
-            sawImportLibraryOutput = true;
-            // The link command is hand-built above and -- unlike CMake's
-            // CMAKE_<LANG>_CREATE_SHARED_LIBRARY rule -- carries no import
-            // library flag. A GNU-family linker would therefore produce the
-            // DLL but never the import library (.dll.a) declared as an output
-            // just above, so a consumer opening that output fails. Emit the
-            // flag explicitly. (MSVC's linker writes the import library for a
-            // /DLL automatically and needs no flag.)
-            std::string const linkerId = lg->GetMakefile()->GetSafeDefinition(
-              cmStrCat("CMAKE_", linkLang, "_COMPILER_ID"));
-            std::string const linkerSimId =
-              lg->GetMakefile()->GetSafeDefinition(
-                cmStrCat("CMAKE_", linkLang, "_SIMULATE_ID"));
-            bool const gnuStyleLinker =
-              linkerId == "GNU" ||
-              ((linkerId == "Clang" || linkerId == "AppleClang") &&
-               linkerSimId != "MSVC");
-            if (gnuStyleLinker) {
-              target.LinkAction.Args.push_back(
-                cmStrCat("-Wl,--out-implib,", importOutputConfig));
-            }
-          }
-        }
-        if (declareOutputs && gt->HasLinkDependencyFile(config)) {
-          target.LinkAction.Depfile = lg->GetLinkDependencyFile(gt, config);
-          ReprobuildAppendCleanFile(cleanFiles, binaryDir,
-                                    target.LinkAction.Depfile);
-          sawLinkDepfile = true;
-        }
-        // Tier 2a + 2c: lift the link action to inline-exec. The compiler
-        // path is fully resolved (CMAKE_<LANG>_COMPILER) and the action is
-        // self-contained. Build InlineArgv from target.LinkAction.Args
-        // AFTER the HasImportLibrary block above has appended its
-        // -Wl,--out-implib flag, so InlineArgv stays a faithful copy of
-        // the final argv list.
-        {
-          cmMakefile const* linkMf = lg->GetMakefile();
-          std::string const linkerPath =
-            linkMf->GetSafeDefinition(ReprobuildCompilerVar(linkLang));
-          if (!linkerPath.empty()) {
-            target.LinkAction.Inline = true;
-            target.LinkAction.InlineArgv.clear();
-            target.LinkAction.InlineArgv.push_back(linkerPath);
-            for (std::string const& arg : target.LinkAction.Args) {
-              target.LinkAction.InlineArgv.push_back(arg);
-            }
-            target.LinkAction.InlineCwd = binaryDir;
-          }
-        }
-      }
-      if (!declareOutputs) {
-        target.LinkAction.Cacheable = false;
-      }
-      target.HasLinkAction = true;
-
-      if (type == cmStateEnums::SHARED_LIBRARY && output != realOutput) {
-        cmGeneratorTarget::Names const names = gt->GetLibraryNames(config);
-        std::string const soName = ReprobuildRelativeTo(
-          binaryDir,
-          cmStrCat(gt->GetDirectory(config), "/", names.SharedObject));
-        ReprobuildAction symlinkAction;
-        symlinkAction.Id =
-          ReprobuildSafeId(cmStrCat("symlink-", gt->GetName(),
-                                    configSuffix));
-        symlinkAction.Var = ReprobuildNimIdent("action", nextActionVar++,
-                                               symlinkAction.Id);
-        // Inline-exec both symlink flavours: a framework's "Versions/Current"
-        // shortcut uses `cmake -E create_symlink`, an ordinary shared-library
-        // soname chain uses `cmake -E cmake_symlink_library`. Both are
-        // single direct cmake.exe invocations — no shell, no wrapper script.
-        std::string const cmakeCmd = cmSystemTools::GetCMakeCommand();
-        symlinkAction.Inline = true;
-        symlinkAction.InlineCwd = binaryDir;
-        if (gt->IsFrameworkOnApple()) {
-          std::string const frameworkLinkTarget = cmStrCat(
-            "Versions/Current/", cmSystemTools::GetFilenameName(realOutput));
-          symlinkAction.InlineArgv = {
-            cmakeCmd, "-E", "create_symlink", frameworkLinkTarget, output
-          };
-        } else {
-          symlinkAction.InlineArgv = {
-            cmakeCmd, "-E", "cmake_symlink_library",
-            realOutput, soName, output
-          };
-        }
-        symlinkAction.Inputs = { realOutput };
-        if (declareOutputs) {
-          symlinkAction.Outputs = { output };
-        } else {
-          symlinkAction.Cacheable = false;
-        }
-        if (soName != output && soName != realOutput) {
-          if (declareOutputs) {
-            symlinkAction.Outputs.insert(symlinkAction.Outputs.begin(), soName);
-          }
-          ReprobuildAppendCleanFile(cleanFiles, binaryDir, soName);
-        }
-        ReprobuildAppendCleanFile(cleanFiles, binaryDir, output);
-        symlinkAction.Deps = { target.LinkAction.Id };
-        sawSymlinkOutput = true;
-        target.SymlinkActions.push_back(std::move(symlinkAction));
-      }
-
-      if (target.HcrEnabled) {
-        if (target.HcrObjects.empty()) {
-          this->GetCMakeInstance()->IssueMessage(
-            MessageType::FATAL_ERROR,
-            cmStrCat("Reprobuild HCR profile unavailable for target '",
-                     gt->GetName(),
-                     "': no C or CXX object compile actions were available "
-                     "for affected object lookup."));
-          return;
-        }
-        ReprobuildAction linkGraph;
-        linkGraph.Id =
-          ReprobuildSafeId(cmStrCat("hcr-linkgraph-", gt->GetName(),
-                                    configSuffix));
-        linkGraph.Var =
-          ReprobuildNimIdent("action", nextActionVar++, linkGraph.Id);
-        linkGraph.ToolId =
-          ReprobuildSafeId(cmStrCat("reprobuild-cmake-", linkGraph.Var));
-        linkGraph.Inputs = { realOutput };
-        linkGraph.Cacheable = false;
-        std::string const linkGraphRel =
-          cmStrCat("CMakeFiles/reprobuild/hcr/", linkGraph.Var,
-                   ".linkgraph");
-        if (declareOutputs) {
-          linkGraph.Outputs = { linkGraphRel };
-        }
-        std::vector<std::string> lines;
-        lines.push_back(cmStrCat("out=", ReprobuildShellSingleQuote(linkGraphRel),
-                                 "; bin=", ReprobuildShellSingleQuote(realOutput),
-                                 "; mkdir -p \"$(dirname \"$out\")\"; "
-                                 "tmp=\"$out.tmp\"; "
-                                 "{ printf '%s\\n' "
-                                 "'schema_id=reprobuild.hcr.linkgraph-evidence.v1'; "
-                                 "printf 'target=%s\\n' ",
-                                 ReprobuildShellSingleQuote(target.Name),
-                                 "; printf 'binary=%s\\n' \"$bin\"; "
-                                 "if command -v file >/dev/null 2>&1; then "
-                                 "printf '%s\\n' 'file_begin'; file \"$bin\"; "
-                                 "printf '%s\\n' 'file_end'; fi; "
-                                 "if command -v nm >/dev/null 2>&1; then "
-                                 "printf '%s\\n' 'symbols_begin'; "
-                                 "nm -an \"$bin\" 2>&1 | head -200; "
-                                 "printf '%s\\n' 'symbols_end'; fi; "
-                                 "if command -v otool >/dev/null 2>&1; then "
-                                 "printf '%s\\n' 'load_commands_begin'; "
-                                 "otool -l \"$bin\" 2>&1 | head -400; "
-                                 "printf '%s\\n' 'load_commands_end'; "
-                                 "elif command -v readelf >/dev/null 2>&1; then "
-                                 "printf '%s\\n' 'elf_symbols_begin'; "
-                                 "readelf -Ws \"$bin\" 2>&1 | head -400; "
-                                 "printf '%s\\n' 'elf_symbols_end'; fi; "
-                                 "} > \"$tmp\"; test -s \"$tmp\"; "
-                                 "mv \"$tmp\" \"$out\""));
-        std::string const wrapperPath =
-          cmStrCat(wrapperDir, "/", linkGraph.ToolId);
-        if (!ReprobuildWriteCommandScript(wrapperPath, binaryDir, lines)) {
-          this->GetCMakeInstance()->IssueMessage(
-            MessageType::FATAL_ERROR,
-            cmStrCat("Could not write Reprobuild HCR linkgraph wrapper: ",
-                     wrapperPath));
-          return;
-        }
-        usedTools.insert(linkGraph.ToolId);
-        target.HcrLinkOutput = realOutput;
-        target.HcrLinkGraph = linkGraphRel;
-        target.HcrLinkGraphAction = linkGraph.Id;
-        ReprobuildAppendCleanFile(cleanFiles, binaryDir, linkGraphRel);
-        target.PostBuildActions.insert(target.PostBuildActions.begin(),
-                                       std::move(linkGraph));
-      }
-
-      std::string finalDep = target.LinkAction.Id;
-      if (!target.SymlinkActions.empty()) {
-        finalDep = target.SymlinkActions.back().Id;
-      }
-      for (ReprobuildAction& postBuild : target.PostBuildActions) {
-        ReprobuildAppendUnique(postBuild.Deps, finalDep);
-        finalDep = postBuild.Id;
-      }
-      std::string const linkArgsText = cmJoin(target.LinkAction.Args, " ");
-      if (type != cmStateEnums::STATIC_LIBRARY && linkArgsText.size() > 2048) {
-        std::vector<std::string> rspArgs = target.LinkAction.Args;
-        target.LinkAction.ResponseFile =
-          cmStrCat("CMakeFiles/reprobuild/rsp/", target.LinkAction.Var, "-",
-                   nextRsp++, ".rsp");
-        std::string const rspFull =
-          cmStrCat(binaryDir, "/", target.LinkAction.ResponseFile);
-        if (!ReprobuildWriteResponseFile(rspFull, rspArgs)) {
-          this->GetCMakeInstance()->IssueMessage(
-            MessageType::FATAL_ERROR,
-            cmStrCat("Could not write Reprobuild response file: ", rspFull));
-          return;
-        }
-        target.LinkAction.Args = { cmStrCat("@", target.LinkAction.ResponseFile) };
-        target.LinkAction.Inputs.push_back(target.LinkAction.ResponseFile);
+        buildTargets.push_back(std::move(target));
       }
 
       for (std::string const& cleanFile : ReprobuildEvaluateCleanFiles(
-             lg.get(), config, gt->GetProperty("ADDITIONAL_CLEAN_FILES"))) {
-        ReprobuildAppendCleanFile(cleanFiles,
-                                  lg->GetCurrentBinaryDirectory(), cleanFile);
+             lg.get(), config,
+             lg->GetMakefile()->GetProperty("ADDITIONAL_CLEAN_FILES"))) {
+        ReprobuildAppendCleanFile(cleanFiles, lg->GetCurrentBinaryDirectory(),
+                                  cleanFile);
       }
-      // M27: clean files generated from custom-command OUTPUT/BYPRODUCTS
-      // use the literal user-specified path (no config prefix) — must
-      // agree with the corresponding ``custom.Outputs`` declarations and
-      // with where the COMMAND argv actually writes the artifact.
-      std::vector<cmSourceFile const*> customCommands;
-      gt->GetCustomCommands(customCommands, config);
-      for (cmSourceFile const* sf : customCommands) {
-        cmCustomCommandGenerator ccg(*sf->GetCustomCommand(), commandConfig,
-                                     lg.get(), false, config);
-        for (std::string const& customOutput : ccg.GetOutputs()) {
-          ReprobuildAppendCleanFile(
-            cleanFiles, binaryDir,
-            ReprobuildCustomCommandPath(
-              binaryDir, lg->GetCurrentBinaryDirectory(), customOutput));
-        }
-        for (std::string const& byproduct : ccg.GetByproducts()) {
-          ReprobuildAppendCleanFile(
-            cleanFiles, binaryDir,
-            ReprobuildCustomCommandPath(
-              binaryDir, lg->GetCurrentBinaryDirectory(), byproduct));
-        }
-      }
-      std::vector<cmCustomCommand> buildEventCommands =
-        gt->GetPreBuildCommands();
-      cm::append(buildEventCommands, gt->GetPreLinkCommands());
-      cm::append(buildEventCommands, gt->GetPostBuildCommands());
-      for (cmCustomCommand const& cc : buildEventCommands) {
-        cmCustomCommandGenerator ccg(cc, commandConfig, lg.get(), false,
-                                     config);
-        for (std::string const& byproduct : ccg.GetByproducts()) {
-          ReprobuildAppendCleanFile(
-            cleanFiles, binaryDir,
-            ReprobuildCustomCommandPath(
-              binaryDir, lg->GetCurrentBinaryDirectory(), byproduct));
-        }
-      }
-      buildTargets.push_back(std::move(target));
-    }
-
-    for (std::string const& cleanFile : ReprobuildEvaluateCleanFiles(
-           lg.get(), config,
-           lg->GetMakefile()->GetProperty("ADDITIONAL_CLEAN_FILES"))) {
-      ReprobuildAppendCleanFile(cleanFiles, lg->GetCurrentBinaryDirectory(),
-                                cleanFile);
-    }
     }
   }
 
@@ -4815,9 +4847,8 @@ void cmGlobalReprobuildGenerator::WriteProviderMetadata()
   for (ReprobuildTarget& target : buildTargets) {
     std::vector<std::string> deps;
     for (std::string const& depName : target.TargetDeps) {
-      std::string const depTargetName =
-        ReprobuildTargetName(depName, target.OutputConfig,
-                             target.CommandConfig, multiConfig);
+      std::string const depTargetName = ReprobuildTargetName(
+        depName, target.OutputConfig, target.CommandConfig, multiConfig);
       // A build event may name its own TARGET_FILE. Its position in the
       // target's action chain already orders that reference; feeding the
       // terminal action back into the initial actions creates a cycle.
@@ -4853,8 +4884,8 @@ void cmGlobalReprobuildGenerator::WriteProviderMetadata()
       target.IsUtility = true;
       target.IncludeInAll = false;
       target.UtilityAction.Id = ReprobuildSafeId(cmStrCat("builtin-", name));
-      target.UtilityAction.Var = ReprobuildNimIdent(
-        "action", nextActionVar++, target.UtilityAction.Id);
+      target.UtilityAction.Var =
+        ReprobuildNimIdent("action", nextActionVar++, target.UtilityAction.Id);
       target.UtilityAction.Pool = usesTerminal ? "console" : "";
       target.UtilityAction.Deps = deps;
       target.UtilityAction.Cacheable = false;
@@ -4873,23 +4904,21 @@ void cmGlobalReprobuildGenerator::WriteProviderMetadata()
     helpTargets.push_back(name);
   };
   bool const skipInstallRules = rootMf->IsOn("CMAKE_SKIP_INSTALL_RULES");
-  if (!skipInstallRules && cmSystemTools::FileExists(
-                             cmStrCat(binaryDir, "/cmake_install.cmake"))) {
-    if (!addBuiltinTarget("install",
-                          { cmakeCmd, "-P", "cmake_install.cmake" },
+  if (!skipInstallRules &&
+      cmSystemTools::FileExists(cmStrCat(binaryDir, "/cmake_install.cmake"))) {
+    if (!addBuiltinTarget("install", { cmakeCmd, "-P", "cmake_install.cmake" },
                           allTargetDeps, true) ||
         !addBuiltinTarget("install/local",
-                          { cmakeCmd, "-DCMAKE_INSTALL_LOCAL_ONLY=1",
-                            "-P", "cmake_install.cmake" },
+                          { cmakeCmd, "-DCMAKE_INSTALL_LOCAL_ONLY=1", "-P",
+                            "cmake_install.cmake" },
                           {}, true) ||
         !addBuiltinTarget("install/strip",
-                          { cmakeCmd, "-DCMAKE_INSTALL_DO_STRIP=1",
-                            "-P", "cmake_install.cmake" },
+                          { cmakeCmd, "-DCMAKE_INSTALL_DO_STRIP=1", "-P",
+                            "cmake_install.cmake" },
                           allTargetDeps, true) ||
-        !addBuiltinTarget("preinstall",
-                          { cmakeCmd, "-E", "echo",
-                            "Built target preinstall" },
-                          allTargetDeps, false)) {
+        !addBuiltinTarget(
+          "preinstall", { cmakeCmd, "-E", "echo", "Built target preinstall" },
+          allTargetDeps, false)) {
       return;
     }
     addHelpTargetName("install");
@@ -4925,20 +4954,18 @@ void cmGlobalReprobuildGenerator::WriteProviderMetadata()
     } else {
       packageDeps = allTargetDeps;
     }
-    if (!addBuiltinTarget(
-          "package",
-          { cpackCmd, "--config", "./CPackConfig.cmake" },
-          packageDeps, false)) {
+    if (!addBuiltinTarget("package",
+                          { cpackCmd, "--config", "./CPackConfig.cmake" },
+                          packageDeps, false)) {
       return;
     }
     addHelpTargetName("package");
   }
-  if (cmSystemTools::FileExists(cmStrCat(binaryDir,
-                                         "/CPackSourceConfig.cmake"))) {
+  if (cmSystemTools::FileExists(
+        cmStrCat(binaryDir, "/CPackSourceConfig.cmake"))) {
     if (!addBuiltinTarget(
           "package_source",
-          { cpackCmd, "--config", "./CPackSourceConfig.cmake" },
-          {}, false)) {
+          { cpackCmd, "--config", "./CPackSourceConfig.cmake" }, {}, false)) {
       return;
     }
     addHelpTargetName("package_source");
@@ -4950,14 +4977,13 @@ void cmGlobalReprobuildGenerator::WriteProviderMetadata()
   // available since the user just invoked it.
   if (!addBuiltinTarget("help",
                         { cmakeCmd, "-E", "echo",
-                          cmStrCat(
-                            "The Reprobuild generator provides: ",
-                            cmJoin(helpTargets, " ")) },
+                          cmStrCat("The Reprobuild generator provides: ",
+                                   cmJoin(helpTargets, " ")) },
                         {}, false) ||
       !addBuiltinTarget("rebuild_cache",
                         { cmakeCmd, "--regenerate-during-build", "-S",
-                          this->GetCMakeInstance()->GetHomeDirectory(),
-                          "-B", binaryDir },
+                          this->GetCMakeInstance()->GetHomeDirectory(), "-B",
+                          binaryDir },
                         {}, true)) {
     return;
   }
@@ -5029,7 +5055,8 @@ void cmGlobalReprobuildGenerator::WriteProviderMetadata()
   for (auto const& entry : cleanFilesByConfig) {
     allCleanFiles.insert(entry.second.begin(), entry.second.end());
   }
-  std::string const cleanManifestFile = cmStrCat(providerDir, "/clean.manifest");
+  std::string const cleanManifestFile =
+    cmStrCat(providerDir, "/clean.manifest");
   cmsys::ofstream cleanManifest(cleanManifestFile.c_str());
   if (!cleanManifest) {
     this->GetCMakeInstance()->IssueMessage(
@@ -5077,8 +5104,7 @@ void cmGlobalReprobuildGenerator::WriteProviderMetadata()
   metadata << "m3_action_state=generated\n";
   metadata << "m4_action_state=generated\n";
   metadata << "m4_import_library_outputs="
-           << (sawImportLibraryOutput ? "generated"
-                                      : "not_applicable_on_host")
+           << (sawImportLibraryOutput ? "generated" : "not_applicable_on_host")
            << "\n";
   metadata << "m4_debug_symbol_outputs=not_applicable_on_host\n";
   metadata << "m4_link_depfiles="
@@ -5113,8 +5139,9 @@ void cmGlobalReprobuildGenerator::WriteProviderMetadata()
   metadata << "clean_manifest=" << cleanManifestFile << "\n";
   metadata << "cmake_regeneration=enabled\n";
   metadata << "cmake_regeneration_suppressed="
-           << (this->GlobalSettingIsOn("CMAKE_SUPPRESS_REGENERATION") ? "true"
-                                                                       : "false")
+           << (this->GlobalSettingIsOn("CMAKE_SUPPRESS_REGENERATION")
+                 ? "true"
+                 : "false")
            << "\n";
   metadata << "cmake_command=" << cmSystemTools::GetCMakeCommand() << "\n";
   metadata << "cmake_regeneration_check_file=CMakeFiles/Makefile.cmake\n";
@@ -5153,18 +5180,17 @@ void cmGlobalReprobuildGenerator::WriteProviderMetadata()
   }
   metadata << "targets=all,default," << cmJoin(targetNames, ",") << "\n";
   metadata << "m10_hcr_targets="
-           << (hcrTargetNames.empty() ? "not_enabled" : "generated")
-           << "\n";
+           << (hcrTargetNames.empty() ? "not_enabled" : "generated") << "\n";
   metadata << "hcr_targets=" << cmJoin(hcrTargetNames, ",") << "\n";
-  std::string const hcrMetadataFile = cmStrCat(providerDir, "/hcr.metadata.json");
+  std::string const hcrMetadataFile =
+    cmStrCat(providerDir, "/hcr.metadata.json");
   metadata << "hcr_metadata=" << hcrMetadataFile << "\n";
 
   cmsys::ofstream hcrMetadata(hcrMetadataFile.c_str());
   if (!hcrMetadata) {
     this->GetCMakeInstance()->IssueMessage(
       MessageType::FATAL_ERROR,
-      cmStrCat("Could not write Reprobuild HCR metadata: ",
-               hcrMetadataFile));
+      cmStrCat("Could not write Reprobuild HCR metadata: ", hcrMetadataFile));
     return;
   }
   hcrMetadata << "{\n"
@@ -5172,7 +5198,8 @@ void cmGlobalReprobuildGenerator::WriteProviderMetadata()
               << "  \"binaryDir\": " << ReprobuildJsonEscape(binaryDir)
               << ",\n"
               << "  \"sourceDir\": "
-              << ReprobuildJsonEscape(this->GetCMakeInstance()->GetHomeDirectory())
+              << ReprobuildJsonEscape(
+                   this->GetCMakeInstance()->GetHomeDirectory())
               << ",\n"
               << "  \"targets\": [";
   char const* hcrTargetSep = "";
@@ -5233,8 +5260,8 @@ void cmGlobalReprobuildGenerator::WriteProviderMetadata()
   }
   provider << "\n  build:\n";
   for (ReprobuildPool const& pool : pools) {
-    provider << "    discard buildPool(" << ReprobuildEscape(pool.Name)
-             << ", " << pool.Capacity << "'u32)\n";
+    provider << "    discard buildPool(" << ReprobuildEscape(pool.Name) << ", "
+             << pool.Capacity << "'u32)\n";
   }
   auto writeAction = [&provider,
                       &declaredActionPath](ReprobuildAction const& action) {
@@ -5248,8 +5275,7 @@ void cmGlobalReprobuildGenerator::WriteProviderMetadata()
       }
       provider << ")";
     } else {
-      provider << "publicCliCall("
-               << ReprobuildEscape(action.ToolId) << ", "
+      provider << "publicCliCall(" << ReprobuildEscape(action.ToolId) << ", "
                << ReprobuildEscape(action.ToolId) << ", \"\", "
                << ReprobuildEscape(cmStrCat(action.ToolId, ".call"))
                << ", @[cliArgSeq(\"args\", ";
@@ -5262,6 +5288,10 @@ void cmGlobalReprobuildGenerator::WriteProviderMetadata()
     ReprobuildWriteStringArray(provider, action.Inputs);
     provider << ", outputs = ";
     ReprobuildWriteStringArray(provider, action.Outputs);
+    if (!action.OptionalOutputs.empty()) {
+      provider << ", optionalOutputs = ";
+      ReprobuildWriteStringArray(provider, action.OptionalOutputs);
+    }
     provider << ", pool = " << ReprobuildEscape(action.Pool)
              << ", poolUnits = 1'u32";
     if (!action.Depfile.empty()) {
@@ -5300,14 +5330,13 @@ void cmGlobalReprobuildGenerator::WriteProviderMetadata()
                << ReprobuildEscape(declaredActionPath) << ")]";
     }
     provider << ", commandStatsId = "
-             << ReprobuildEscape(ReprobuildCommandStatsId(action.Id))
-             << ")\n";
+             << ReprobuildEscape(ReprobuildCommandStatsId(action.Id)) << ")\n";
   };
   for (ReprobuildTarget const& target : buildTargets) {
     if (target.IsUtility) {
       writeAction(target.UtilityAction);
-      provider << "    let " << target.Var
-               << " = target(" << ReprobuildEscape(target.Name) << ", "
+      provider << "    let " << target.Var << " = target("
+               << ReprobuildEscape(target.Name) << ", "
                << target.UtilityAction.Var << ")\n";
     } else {
       std::vector<std::string> actionVars;
@@ -5340,15 +5369,14 @@ void cmGlobalReprobuildGenerator::WriteProviderMetadata()
         actionVars.push_back(action.Var);
       }
       if (target.HasLinkAction && target.PreBuildActions.empty() &&
-          target.CustomActions.empty() &&
-          target.PreLinkActions.empty() && target.SymlinkActions.empty() &&
-          target.PostBuildActions.empty()) {
-        provider << "    let " << target.Var
-                 << " = target(" << ReprobuildEscape(target.Name) << ", "
+          target.CustomActions.empty() && target.PreLinkActions.empty() &&
+          target.SymlinkActions.empty() && target.PostBuildActions.empty()) {
+        provider << "    let " << target.Var << " = target("
+                 << ReprobuildEscape(target.Name) << ", "
                  << target.LinkAction.Var << ")\n";
       } else {
-        provider << "    let " << target.Var
-                 << " = target(" << ReprobuildEscape(target.Name) << ", @[";
+        provider << "    let " << target.Var << " = target("
+                 << ReprobuildEscape(target.Name) << ", @[";
         char const* actionSep = "";
         for (std::string const& actionVar : actionVars) {
           provider << actionSep << actionVar;
@@ -5359,18 +5387,17 @@ void cmGlobalReprobuildGenerator::WriteProviderMetadata()
     }
   }
   if (multiConfig) {
-    using TargetConfigKey =
-      std::tuple<std::string, std::string, std::string>;
+    using TargetConfigKey = std::tuple<std::string, std::string, std::string>;
     std::map<TargetConfigKey, std::string> targetVarsByConfig;
     std::map<std::string, std::vector<ReprobuildTarget const*>>
       nativeTargetsByBase;
     std::vector<ReprobuildTarget const*> nativeAllTargets;
     for (ReprobuildTarget const& target : buildTargets) {
       if (!target.BaseName.empty()) {
-        targetVarsByConfig.emplace(
-          TargetConfigKey{ target.BaseName, target.OutputConfig,
-                           target.CommandConfig },
-          target.Var);
+        targetVarsByConfig.emplace(TargetConfigKey{ target.BaseName,
+                                                    target.OutputConfig,
+                                                    target.CommandConfig },
+                                   target.Var);
         if (!target.IsCrossConfig) {
           nativeTargetsByBase[target.BaseName].push_back(&target);
         }
@@ -5391,9 +5418,8 @@ void cmGlobalReprobuildGenerator::WriteProviderMetadata()
     };
 
     for (std::string const& config : configs) {
-      std::string const var =
-        ReprobuildNimIdent("target", nextTargetVar++,
-                           cmStrCat("all-", config));
+      std::string const var = ReprobuildNimIdent("target", nextTargetVar++,
+                                                 cmStrCat("all-", config));
       provider << "    let " << var << " = aggregate("
                << ReprobuildEscape(cmStrCat("all:", config))
                << ", targets = @[";
@@ -5408,8 +5434,8 @@ void cmGlobalReprobuildGenerator::WriteProviderMetadata()
       }
       provider << "])\n";
       provider << "    discard exportTarget("
-               << ReprobuildEscape(cmStrCat("default:", config)) << ", "
-               << var << ")\n";
+               << ReprobuildEscape(cmStrCat("default:", config)) << ", " << var
+               << ")\n";
     }
 
     for (auto const& entry : nativeTargetsByBase) {
@@ -5425,8 +5451,7 @@ void cmGlobalReprobuildGenerator::WriteProviderMetadata()
           char const* targetSep = "";
           for (std::string const& outputConfig : this->CrossConfigs) {
             std::string const targetVar =
-              commandConfigTargetVar(entry.first, outputConfig,
-                                     commandConfig);
+              commandConfigTargetVar(entry.first, outputConfig, commandConfig);
             if (targetVar.empty()) {
               continue;
             }
@@ -5436,17 +5461,15 @@ void cmGlobalReprobuildGenerator::WriteProviderMetadata()
           provider << "])\n";
         }
 
-        std::string const var =
-          ReprobuildNimIdent("target", nextTargetVar++,
-                             cmStrCat(entry.first, "-all"));
+        std::string const var = ReprobuildNimIdent(
+          "target", nextTargetVar++, cmStrCat(entry.first, "-all"));
         provider << "    let " << var << " = aggregate("
                  << ReprobuildEscape(cmStrCat(entry.first, ":all"))
                  << ", targets = @[";
         char const* targetSep = "";
         for (std::string const& outputConfig : this->CrossConfigs) {
-          std::string const targetVar =
-            commandConfigTargetVar(entry.first, outputConfig,
-                                   this->DefaultFileConfig);
+          std::string const targetVar = commandConfigTargetVar(
+            entry.first, outputConfig, this->DefaultFileConfig);
           if (targetVar.empty()) {
             continue;
           }
@@ -5473,9 +5496,8 @@ void cmGlobalReprobuildGenerator::WriteProviderMetadata()
         provider << "])\n";
       }
 
-      std::string const var =
-        ReprobuildNimIdent("target", nextTargetVar++,
-                           cmStrCat(entry.first, "-all"));
+      std::string const var = ReprobuildNimIdent(
+        "target", nextTargetVar++, cmStrCat(entry.first, "-all"));
       provider << "    let " << var << " = aggregate("
                << ReprobuildEscape(cmStrCat(entry.first, ":all"))
                << ", targets = @[";
@@ -5487,16 +5509,14 @@ void cmGlobalReprobuildGenerator::WriteProviderMetadata()
       provider << "])\n";
     }
     for (auto const& entry : nativeTargetsByBase) {
-      std::string const var =
-        ReprobuildNimIdent("target", nextTargetVar++,
-                           cmStrCat(entry.first, "-default"));
+      std::string const var = ReprobuildNimIdent(
+        "target", nextTargetVar++, cmStrCat(entry.first, "-default"));
       provider << "    let " << var << " = aggregate("
                << ReprobuildEscape(entry.first) << ", targets = @[";
       char const* targetSep = "";
       for (std::string const& outputConfig : this->DefaultConfigs) {
-        std::string const targetVar =
-          commandConfigTargetVar(entry.first, outputConfig,
-                                 this->DefaultFileConfig);
+        std::string const targetVar = commandConfigTargetVar(
+          entry.first, outputConfig, this->DefaultFileConfig);
         if (targetVar.empty()) {
           continue;
         }
@@ -5513,9 +5533,8 @@ void cmGlobalReprobuildGenerator::WriteProviderMetadata()
         if (target->OutputConfig != config || target->BaseName.empty()) {
           continue;
         }
-        std::string const targetVar =
-          commandConfigTargetVar(target->BaseName, config,
-                                 this->DefaultFileConfig);
+        std::string const targetVar = commandConfigTargetVar(
+          target->BaseName, config, this->DefaultFileConfig);
         if (targetVar.empty()) {
           continue;
         }
@@ -5560,8 +5579,7 @@ void cmGlobalReprobuildGenerator::WriteProviderMetadata()
     for (ReprobuildAction const& action : target.CompileActions) {
       compileCommands << sep << "  {\n"
                       << "    \"directory\": "
-                      << ReprobuildJsonEscape(action.CompileDirectory)
-                      << ",\n"
+                      << ReprobuildJsonEscape(action.CompileDirectory) << ",\n"
                       << "    \"command\": "
                       << ReprobuildJsonEscape(action.CompileCommand) << ",\n"
                       << "    \"file\": "
@@ -5584,8 +5602,7 @@ void cmGlobalReprobuildGenerator::WriteProviderMetadata()
   }
   launcherState << "action_state=generated\n";
   launcherState << "provider=" << providerFile << "\n";
-  launcherState << "targets=all,default," << cmJoin(targetNames, ",")
-                << "\n";
+  launcherState << "targets=all,default," << cmJoin(targetNames, ",") << "\n";
 
   // Tier 2a + 2c: emit ``trycompile.rbsz`` next to ``reprobuild.nim`` for
   // every CMake-generated project. The engine routes any work-dir
@@ -5606,7 +5623,7 @@ void cmGlobalReprobuildGenerator::WriteProviderMetadata()
   // Per Provider-Compile-Tiering.md §"2a/2c".
   {
     std::vector<std::string> directUsedTools(usedTools.begin(),
-                                              usedTools.end());
+                                             usedTools.end());
     std::vector<ReprobuildAction const*> directActions;
     auto pushAction = [&](ReprobuildAction const& action) {
       directActions.push_back(&action);
@@ -5704,10 +5721,10 @@ void cmGlobalReprobuildGenerator::WriteProviderMetadata()
         nativeTargetsByBase;
       for (ReprobuildTarget const& target : buildTargets) {
         if (!target.BaseName.empty()) {
-          targetNamesByConfig.emplace(
-            TargetConfigKey{ target.BaseName, target.OutputConfig,
-                             target.CommandConfig },
-            target.Name);
+          targetNamesByConfig.emplace(TargetConfigKey{ target.BaseName,
+                                                       target.OutputConfig,
+                                                       target.CommandConfig },
+                                      target.Name);
           if (!target.IsCrossConfig) {
             nativeTargetsByBase[target.BaseName].push_back(&target);
           }
@@ -5728,8 +5745,7 @@ void cmGlobalReprobuildGenerator::WriteProviderMetadata()
         if (!this->CrossConfigs.empty()) {
           for (std::string const& commandConfig : configs) {
             ReprobuildTryCompileCrossConfigDescriptor descriptor;
-            descriptor.Name =
-              cmStrCat(entry.first, ":all:", commandConfig);
+            descriptor.Name = cmStrCat(entry.first, ":all:", commandConfig);
             descriptor.ConfigName = commandConfig;
             descriptor.BaseName = entry.first;
             for (std::string const& outputConfig : this->CrossConfigs) {
@@ -5853,8 +5869,7 @@ void cmGlobalReprobuildGenerator::WriteProviderMetadata()
     if (!ReprobuildWriteTryCompileMetadata(
           tryCompileMetadataFile, directUsedTools, pools, directActions,
           directTargets, defaultTargetName, envelopeCrossConfigs,
-          crossConfigDescriptors, envelopeDefaultConfigs,
-          directActionEnv)) {
+          crossConfigDescriptors, envelopeDefaultConfigs, directActionEnv)) {
       // Best-effort: log a non-fatal message and continue. The
       // reprobuild.nim slow-path remains available.
       this->GetCMakeInstance()->IssueMessage(
@@ -5889,8 +5904,8 @@ cmGlobalReprobuildGenerator::GenerateBuildCommand(
     std::string const nativeMake = ReprobuildFindNativeMakeOnPath();
     if (!nativeMake.empty()) {
       return this->cmGlobalUnixMakefileGenerator3::GenerateBuildCommand(
-        nativeMake, projectName, projectDir, targetNames, config, jobs, verbose,
-        buildOptions, makeOptions, isInTryCompile);
+        nativeMake, projectName, projectDir, targetNames, config, jobs,
+        verbose, buildOptions, makeOptions, isInTryCompile);
     }
   }
   if (cleanTarget) {
@@ -5967,8 +5982,8 @@ cmGlobalReprobuildGenerator::GenerateBuildCommand(
       makeCommand.Add(cmStrCat(projectDir, "#", target));
     }
     makeCommand.Add("--tool-provisioning=path");
-    makeCommand.Add(cmStrCat("--work-root=", projectDir,
-                             "/CMakeFiles/reprobuild"));
+    makeCommand.Add(
+      cmStrCat("--work-root=", projectDir, "/CMakeFiles/reprobuild"));
     if (isInTryCompile == BuildTryCompile::Yes) {
       makeCommand.Add("--progress=none");
       makeCommand.Add("--measure=none");

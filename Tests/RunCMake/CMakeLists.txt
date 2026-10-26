@@ -250,6 +250,14 @@ add_test(NAME e2e_cmake_reprobuild_generator_configure_smoke
     # `check_provider_metadata` -- unrunnable here.
     -DTEST_REPROBUILD_REPRO=${_ReprobuildBin}
     -P ${_ReprobuildGeneratorTestDir}/e2e.cmake)
+add_test(NAME e2e_cmake_reprobuild_conditional_msvc_import_library
+  COMMAND ${CMAKE_CMAKE_COMMAND}
+    -DCMAKE_COMMAND=${CMAKE_CMAKE_COMMAND}
+    -DTEST_MODE=conditional_msvc_import_library
+    -DTEST_BINARY_ROOT=${_ReprobuildGeneratorTestBin}/conditional-msvc-import-library
+    -DTEST_C_COMPILER=${CMAKE_C_COMPILER}
+    -DTEST_REPROBUILD_REPRO=${_ReprobuildBin}
+    -P ${_ReprobuildGeneratorTestDir}/e2e.cmake)
 add_test(NAME e2e_cmake_reprobuild_trycompile_source_staging
   COMMAND ${CMAKE_CMAKE_COMMAND}
     -DCMAKE_COMMAND=${CMAKE_CMAKE_COMMAND}

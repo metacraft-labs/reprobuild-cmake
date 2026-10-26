@@ -1,3 +1,6 @@
+# The conditional_msvc_import_library case forces MSVC-ABI Clang's identity
+# solely to inspect Windows link metadata on Linux. No Windows binary is linked;
+# engine tests separately execute real processes and cache restoration.
 cmake_minimum_required(VERSION 3.10)
 
 foreach(var IN ITEMS CMAKE_COMMAND TEST_MODE TEST_BINARY_ROOT TEST_C_COMPILER)
@@ -150,7 +153,7 @@ add_executable(hello main.c)
 endfunction()
 
 # The directories a GNU-style C driver searches for `#include <...>`, as it
-# reports them itself under `-v`, normalised the way CMake normalises its
+# reports them itself under `-v`, normalized the way CMake normalizes its
 # implicit include directories.
 function(compiler_reported_include_dirs compiler scratch_dir out_var)
   file(WRITE "${scratch_dir}/empty.c" "")
@@ -2323,7 +2326,7 @@ elseif(TEST_MODE STREQUAL "trycompile_source_staging")
   # The generator compiles a self-contained try_compile source from a
   # content-addressed copy under the store, so its path does not depend on
   # the configure's scratch dir. A copy only sees the files beside it, so a
-  # source that includes a neighbour must be compiled where it is: the
+  # source that includes a neighbor must be compiled where it is: the
   # compiler ABI probe (CMakeCCompilerABI.c includes CMakeCompilerABI.h) used
   # to fail on every configure, leaving CMAKE_SIZEOF_VOID_P unset.
   set(store_root "${TEST_BINARY_ROOT}/store")
@@ -3728,6 +3731,32 @@ elseif(TEST_MODE STREQUAL "hcr_rejects_incompatible_target")
     "OBJECT_LIBRARY")
   run_hcr_reject_case("asm-source"
     "uses language 'ASM'")
+elseif(TEST_MODE STREQUAL "conditional_msvc_import_library")
+  # This is a generator metadata test: forcing the compiler identity lets a
+  # Linux host exercise Windows' platform graph without pretending to execute
+  # an MSVC linker. Real link/cache behavior is covered by engine tests.
+  set(source_dir "${TEST_BINARY_ROOT}/src")
+  set(binary_dir "${TEST_BINARY_ROOT}/build")
+  file(MAKE_DIRECTORY "${source_dir}")
+  file(WRITE "${source_dir}/CMakeLists.txt"
+    "cmake_minimum_required(VERSION 3.20)\n"
+    "project(ConditionalImport C)\n"
+    "add_library(no_exports SHARED no_exports.c)\n"
+    "set_target_properties(no_exports PROPERTIES ARCHIVE_OUTPUT_DIRECTORY custom-import)\n")
+  file(WRITE "${source_dir}/no_exports.c" "static int internal_value = 1;\n")
+  run_configure("${source_dir}" "${binary_dir}" TRUE ""
+    "-DCMAKE_SYSTEM_NAME=Windows"
+    "-DCMAKE_C_COMPILER_ID=Clang"
+    "-DCMAKE_C_SIMULATE_ID=MSVC"
+    "-DCMAKE_C_COMPILER_FRONTEND_VARIANT=MSVC"
+    "-DCMAKE_C_COMPILER_VERSION=19.1"
+    "-DCMAKE_C_COMPILER_FORCED=TRUE"
+    "-DCMAKE_C_COMPILER_WORKS=TRUE"
+    "-DCMAKE_RC_COMPILER=${TEST_C_COMPILER}")
+  file(READ "${binary_dir}/reprobuild.nim" provider)
+  assert_contains("${provider}" "optionalOutputs = @[\"custom-import/no_exports.lib\"]" "MSVC conditional import library")
+  assert_contains("${provider}" "\"-Xlinker\", \"/IMPLIB:custom-import/no_exports.lib\"" "MSVC import library location")
+  assert_not_contains("${provider}" "outputs = @[\"no_exports.dll\", \"custom-import/no_exports.lib\"]" "MSVC obligatory outputs")
 else()
   message(FATAL_ERROR "Unknown TEST_MODE: ${TEST_MODE}")
 endif()
