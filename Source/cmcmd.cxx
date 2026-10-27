@@ -46,6 +46,7 @@
 #if !defined(CMAKE_BOOTSTRAP)
 #  include "cmDependsFortran.h" // For -E cmake_copy_f90_mod callback.
 #  include "cmFileTime.h"
+#  include "cmGlobalReprobuildGenerator.h"
 
 #  include "bindexplib.h"
 #endif
@@ -1253,6 +1254,16 @@ int cmcmd::ExecuteCMakeCommand(std::vector<std::string> const& args,
     if (args[1] == "__run_co_compile") {
       return cmcmd::HandleCoCompileCommands(args);
     }
+
+#ifndef CMAKE_BOOTSTRAP
+    // Reprobuild generator: a link step whose import library is an
+    // obligatory output (see cmGlobalReprobuildGenerator.h). The bootstrap
+    // CMake has no Reprobuild generator, so it never emits this command.
+    if (args[1] ==
+        cmGlobalReprobuildGenerator::LinkWithImportLibraryCommand()) {
+      return cmGlobalReprobuildGenerator::RunLinkWithImportLibrary(args);
+    }
+#endif
 
     // Echo string
     if (args[1] == "echo") {

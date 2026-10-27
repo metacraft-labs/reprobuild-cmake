@@ -1,6 +1,10 @@
-# The conditional_msvc_import_library case forces MSVC-ABI Clang's identity
-# solely to inspect Windows link metadata on Linux. No Windows binary is linked;
-# engine tests separately execute real processes and cache restoration.
+# The msvc_import_library_metadata case forces MSVC-ABI Clang's identity (and
+# names librarian paths that need not exist) solely to inspect the Windows link
+# metadata the generator emits, on any host. Nothing is linked in that case;
+# msvc_import_library_build links for real with MSVC link.exe on Windows, and
+# msvc_import_library_cache links for real with lld-link (told to write no
+# import library, as link.exe does for an image without exports) and checks
+# that a cache hit restores the import library the link step created.
 cmake_minimum_required(VERSION 3.10)
 
 foreach(var IN ITEMS CMAKE_COMMAND TEST_MODE TEST_BINARY_ROOT TEST_C_COMPILER)
@@ -478,7 +482,8 @@ function(run_direct_repro_build binary_dir target socket out_var)
       "${TEST_REPROBUILD_REPRO}" build
       "${binary_dir}#${target}"
       --tool-provisioning=path
-      "--work-root=${binary_dir}/CMakeFiles/reprobuild")
+      "--work-root=${binary_dir}/CMakeFiles/reprobuild"
+      ${ARGN})
   execute_process(
     COMMAND ${command}
     OUTPUT_VARIABLE stdout
@@ -1243,6 +1248,136 @@ endfunction()
 function(assert_file_not_exists path label)
   if(EXISTS "${path}")
     message(FATAL_ERROR "${label} unexpectedly produced file: ${path}")
+  endif()
+endfunction()
+
+# --- MSVC import libraries ------------------------------------------------
+# An MSVC-ABI link's import library is an obligatory output. MSVC link.exe
+# writes none for an image that exports nothing, so the generator's link
+# step creates the empty one lld-link and GNU ld would have written
+# (reprobuild-pm spec/CMake-Reprobuild-Generator.md, "Link And Archive
+# Actions" > "Import libraries").
+
+# A project with every shape the rule covers. `noexp` is a DLL that exports
+# nothing; `withexp` exports withexp_value, so link.exe writes its import
+# library itself; `flip` exports flip_value until the test removes the
+# export; `plugin_host` is an executable with ENABLE_EXPORTS that exports
+# nothing. `app` links against all of them except `flip`, so it only links
+# if the import libraries the link step created are usable.
+function(write_msvc_import_library_project source_dir)
+  file(REMOVE_RECURSE "${source_dir}")
+  file(MAKE_DIRECTORY "${source_dir}")
+  file(WRITE "${source_dir}/CMakeLists.txt"
+    "cmake_minimum_required(VERSION 3.29)\n"
+    "project(ReprobuildMsvcImportLibrary C)\n"
+    "add_library(noexp SHARED noexp.c)\n"
+    "add_library(withexp SHARED withexp.c)\n"
+    "add_library(flip SHARED flip.c)\n"
+    "add_executable(plugin_host host.c)\n"
+    "set_target_properties(plugin_host PROPERTIES ENABLE_EXPORTS ON)\n"
+    "add_executable(app main.c)\n"
+    "target_link_libraries(app PRIVATE noexp withexp plugin_host)\n")
+  file(WRITE "${source_dir}/noexp.c"
+    "static int noexp_internal = 1;\n"
+    "int noexp_unexported(void) { return noexp_internal; }\n")
+  file(WRITE "${source_dir}/withexp.c"
+    "__declspec(dllexport) int withexp_value(void) { return 42; }\n")
+  file(WRITE "${source_dir}/flip.c"
+    "__declspec(dllexport) int flip_value(void) { return 7; }\n")
+  file(WRITE "${source_dir}/host.c" "int main(void) { return 0; }\n")
+  file(WRITE "${source_dir}/main.c"
+    "__declspec(dllimport) int withexp_value(void);\n"
+    "int main(void) { return withexp_value() == 42 ? 0 : 1; }\n")
+endfunction()
+
+# Builds without a RunQuota socket of its own (the Windows cases), through
+# the generator's `cmake --build` front end.
+function(run_reprobuild_build_without_runquota binary_dir out_var)
+  set(env_args)
+  if(DEFINED TEST_REPROBUILD_REPRO AND
+     NOT "${TEST_REPROBUILD_REPRO}" STREQUAL "")
+    require_tool("${TEST_REPROBUILD_REPRO}" "repro")
+    list(APPEND env_args "REPROBUILD_REPRO=${TEST_REPROBUILD_REPRO}")
+  endif()
+  set(command "${CMAKE_COMMAND}" -E env ${env_args}
+    "${CMAKE_COMMAND}" --build "${binary_dir}")
+  execute_process(
+    COMMAND ${command}
+    OUTPUT_VARIABLE stdout
+    ERROR_VARIABLE stderr
+    RESULT_VARIABLE result
+    ENCODING UTF8)
+  set(output "${stdout}\n${stderr}")
+  if(NOT result EQUAL 0)
+    message(FATAL_ERROR
+      "Reprobuild build failed.\n"
+      "Command: ${command}\n"
+      "Output:\n${output}")
+  endif()
+  set(${out_var} "${output}" PARENT_SCOPE)
+endfunction()
+
+# Asserts that `path` is a COFF import library for `image_stem` (the
+# image's file name without extension): an archive (`!<arch>\n`, the
+# ar format the PE/COFF specification uses for libraries) carrying that
+# image's import descriptor. Every import library has one, including an
+# empty one.
+#   https://learn.microsoft.com/en-us/windows/win32/debug/pe-format#archive-library-file-format
+function(assert_import_library path image_stem label)
+  assert_file_exists("${path}" "${label}")
+  file(READ "${path}" magic LIMIT 8 HEX)
+  if(NOT magic STREQUAL "213c617263683e0a")
+    message(FATAL_ERROR "${label}: ${path} is not an archive (starts ${magic}).")
+  endif()
+  file(STRINGS "${path}" descriptor REGEX "__IMPORT_DESCRIPTOR_${image_stem}")
+  if(descriptor STREQUAL "")
+    message(FATAL_ERROR
+      "${label}: ${path} carries no __IMPORT_DESCRIPTOR_${image_stem}.")
+  endif()
+endfunction()
+
+# True (in out_var) when the library at `path` imports `symbol`.
+function(import_library_names path symbol out_var)
+  file(STRINGS "${path}" found REGEX "${symbol}")
+  if(found STREQUAL "")
+    set(${out_var} FALSE PARENT_SCOPE)
+  else()
+    set(${out_var} TRUE PARENT_SCOPE)
+  endif()
+endfunction()
+
+# The checks every build of write_msvc_import_library_project must pass.
+function(check_msvc_import_library_build binary_dir label)
+  assert_import_library("${binary_dir}/noexp.lib" noexp
+    "${label}: exportless DLL")
+  import_library_names("${binary_dir}/noexp.lib" noexp_unexported leaked)
+  if(leaked)
+    message(FATAL_ERROR "${label}: noexp.lib imports a symbol noexp.dll does not export.")
+  endif()
+  assert_import_library("${binary_dir}/plugin_host.lib" plugin_host
+    "${label}: exportless ENABLE_EXPORTS executable")
+  # The MSVC librarian writes an export file beside the library it creates;
+  # the link step removes it, since it is undeclared and not reproducible.
+  # link.exe writes none for an image without exports.
+  foreach(stem IN ITEMS noexp plugin_host)
+    assert_file_not_exists("${binary_dir}/${stem}.exp"
+      "${label}: export file of the created ${stem}.lib")
+  endforeach()
+  # link.exe wrote withexp's library itself: it carries the export, and
+  # link.exe's export file sits beside it. The link step's empty library
+  # would have neither.
+  assert_import_library("${binary_dir}/withexp.lib" withexp
+    "${label}: exporting DLL")
+  import_library_names("${binary_dir}/withexp.lib" withexp_value has_export)
+  if(NOT has_export)
+    message(FATAL_ERROR "${label}: withexp.lib lacks withexp_value; the linker's import library was replaced.")
+  endif()
+  assert_file_exists("${binary_dir}/withexp.exp" "${label}: link.exe export file")
+  # The consumer linked against every import library, including the empty
+  # ones; running it proves the image loads with them.
+  execute_process(COMMAND "${binary_dir}/app.exe" RESULT_VARIABLE app_result)
+  if(NOT app_result EQUAL 0)
+    message(FATAL_ERROR "${label}: app.exe exited ${app_result}.")
   endif()
 endfunction()
 
@@ -3731,20 +3866,22 @@ elseif(TEST_MODE STREQUAL "hcr_rejects_incompatible_target")
     "OBJECT_LIBRARY")
   run_hcr_reject_case("asm-source"
     "uses language 'ASM'")
-elseif(TEST_MODE STREQUAL "conditional_msvc_import_library")
-  # This is a generator metadata test: forcing the compiler identity lets a
-  # Linux host exercise Windows' platform graph without pretending to execute
-  # an MSVC linker. Real link/cache behavior is covered by engine tests.
+elseif(TEST_MODE STREQUAL "msvc_import_library_metadata")
+  # Generator metadata on any host. Forcing an MSVC-ABI Clang identity lets a
+  # non-Windows host see the Windows link graph; the librarian paths are
+  # recorded, never run. The real links are msvc_import_library_build and
+  # msvc_import_library_cache.
   set(source_dir "${TEST_BINARY_ROOT}/src")
   set(binary_dir "${TEST_BINARY_ROOT}/build")
+  file(REMOVE_RECURSE "${source_dir}")
   file(MAKE_DIRECTORY "${source_dir}")
   file(WRITE "${source_dir}/CMakeLists.txt"
     "cmake_minimum_required(VERSION 3.20)\n"
-    "project(ConditionalImport C)\n"
+    "project(MsvcImportLibraryMetadata C)\n"
     "add_library(no_exports SHARED no_exports.c)\n"
     "set_target_properties(no_exports PROPERTIES ARCHIVE_OUTPUT_DIRECTORY custom-import)\n")
   file(WRITE "${source_dir}/no_exports.c" "static int internal_value = 1;\n")
-  run_configure("${source_dir}" "${binary_dir}" TRUE ""
+  set(forced_msvc_clang
     "-DCMAKE_SYSTEM_NAME=Windows"
     "-DCMAKE_C_COMPILER_ID=Clang"
     "-DCMAKE_C_SIMULATE_ID=MSVC"
@@ -3753,10 +3890,213 @@ elseif(TEST_MODE STREQUAL "conditional_msvc_import_library")
     "-DCMAKE_C_COMPILER_FORCED=TRUE"
     "-DCMAKE_C_COMPILER_WORKS=TRUE"
     "-DCMAKE_RC_COMPILER=${TEST_C_COMPILER}")
+
+  # An LLVM toolchain: the empty library comes from llvm-dlltool.
+  set(dlltool "${TEST_BINARY_ROOT}/llvm/bin/llvm-dlltool")
+  run_configure("${source_dir}" "${binary_dir}" TRUE "" ${forced_msvc_clang}
+    "-DCMAKE_C_COMPILER_ARCHITECTURE_ID=x64"
+    "-DCMAKE_DLLTOOL=${dlltool}")
   file(READ "${binary_dir}/reprobuild.nim" provider)
-  assert_contains("${provider}" "optionalOutputs = @[\"custom-import/no_exports.lib\"]" "MSVC conditional import library")
-  assert_contains("${provider}" "\"-Xlinker\", \"/IMPLIB:custom-import/no_exports.lib\"" "MSVC import library location")
-  assert_not_contains("${provider}" "outputs = @[\"no_exports.dll\", \"custom-import/no_exports.lib\"]" "MSVC obligatory outputs")
+  assert_contains("${provider}"
+    "outputs = @[\"no_exports.dll\", \"custom-import/no_exports.lib\"]"
+    "MSVC import library is obligatory")
+  assert_not_contains("${provider}" "optionalOutputs" "MSVC import library")
+  assert_contains("${provider}" "/IMPLIB:custom-import/no_exports.lib"
+    "MSVC import library location")
+  string(REGEX MATCH
+    "\"-E\", \"__reprobuild_link_with_import_library\", \"custom-import/no_exports\\.lib\", \"[^\"]*/llvm-dlltool\", \"-m\", \"i386:x86-64\", \"-d\", \"(CMakeFiles/reprobuild/empty-import/[^\"]+\\.def)\", \"-l\", \"custom-import/no_exports\\.lib\", \"--\", "
+    link_step "${provider}")
+  if(NOT link_step)
+    message(FATAL_ERROR "The link step does not create the empty import library with llvm-dlltool.\n${provider}")
+  endif()
+  set(def_file "${binary_dir}/${CMAKE_MATCH_1}")
+  assert_contains("${provider}" "\"${CMAKE_MATCH_1}\"]"
+    "the definition file is a declared input")
+  file(READ "${def_file}" def_text)
+  assert_contains("${def_text}" "LIBRARY \"no_exports.dll\"\nEXPORTS\n"
+    "empty import library definition")
+
+  # An MSVC toolchain without llvm-dlltool: the MSVC librarian writes it, and
+  # /Brepro keeps its bytes reproducible. A dlltool that is not
+  # llvm-dlltool (binutils) is not used for an MSVC-ABI image.
+  set(librarian "${TEST_BINARY_ROOT}/msvc/bin/lib.exe")
+  run_configure("${source_dir}" "${binary_dir}" TRUE "" ${forced_msvc_clang}
+    "-DCMAKE_C_COMPILER_ARCHITECTURE_ID=ARM64"
+    "-DCMAKE_AR=${librarian}"
+    "-DCMAKE_DLLTOOL=${TEST_BINARY_ROOT}/binutils/bin/dlltool")
+  file(READ "${binary_dir}/reprobuild.nim" provider)
+  assert_matches("${provider}"
+    "\"__reprobuild_link_with_import_library\", \"custom-import/no_exports\\.lib\", \"[^\"]*/msvc/bin/lib\\.exe\", \"/NOLOGO\", \"/Brepro\", \"/DEF:CMakeFiles/reprobuild/empty-import/[^\"]+\\.def\", \"/OUT:custom-import/no_exports\\.lib\", \"/MACHINE:ARM64\", \"--\", "
+    "MSVC librarian creates the empty import library")
+
+  # A target machine the generator cannot name fails the configure rather
+  # than emitting a link step that cannot keep its promise.
+  run_configure("${source_dir}" "${binary_dir}" FALSE
+    "the target machine is unknown" ${forced_msvc_clang}
+    "-DCMAKE_C_COMPILER_ARCHITECTURE_ID=IA64"
+    "-DCMAKE_DLLTOOL=${dlltool}")
+elseif(TEST_MODE STREQUAL "msvc_import_library_build")
+  # Real links with MSVC link.exe, driven by a clang that targets the MSVC
+  # ABI (TEST_C_COMPILER), through `cmake --build` and Reprobuild.
+  if(NOT CMAKE_HOST_WIN32)
+    message(FATAL_ERROR "msvc_import_library_build links with MSVC link.exe and needs a Windows host.")
+  endif()
+  set(source_dir "${TEST_BINARY_ROOT}/src")
+  write_msvc_import_library_project("${source_dir}")
+
+  # Two independent builds of the same sources with llvm-dlltool (the
+  # clang toolchain's own) creating the empty libraries.
+  foreach(build IN ITEMS dlltool-1 dlltool-2)
+    set(binary_dir "${TEST_BINARY_ROOT}/${build}")
+    run_configure("${source_dir}" "${binary_dir}" TRUE "" "-DCMAKE_LINKER_TYPE=MSVC")
+    file(GLOB compiler_info_files "${binary_dir}/CMakeFiles/*/CMakeCCompiler.cmake")
+    list(GET compiler_info_files 0 compiler_info_file)
+    file(READ "${compiler_info_file}" compiler_info)
+    assert_contains("${compiler_info}" "set(CMAKE_C_SIMULATE_ID \"MSVC\")"
+      "TEST_C_COMPILER must target the MSVC ABI")
+    assert_contains("${compiler_info}" "set(CMAKE_C_COMPILER_LINKER_ID \"MSVC\")"
+      "the link must use MSVC link.exe")
+    run_reprobuild_build_without_runquota("${binary_dir}" build_output)
+    check_msvc_import_library_build("${binary_dir}" "${build}")
+    file(READ "${binary_dir}/reprobuild.nim" provider)
+    assert_matches("${provider}"
+      "\"__reprobuild_link_with_import_library\", \"noexp\\.lib\", \"[^\"]*llvm-dlltool(\\.exe)?\", "
+      "${build}: llvm-dlltool creates the empty import library")
+    assert_contains("${provider}" "\"-fuse-ld=link\"" "${build}: link.exe link")
+  endforeach()
+  foreach(lib IN ITEMS noexp plugin_host)
+    file(SHA256 "${TEST_BINARY_ROOT}/dlltool-1/${lib}.lib" first)
+    file(SHA256 "${TEST_BINARY_ROOT}/dlltool-2/${lib}.lib" second)
+    if(NOT first STREQUAL second)
+      message(FATAL_ERROR "${lib}.lib differs between two builds: ${first} vs ${second}")
+    endif()
+    set(dlltool_${lib}_sha "${first}")
+  endforeach()
+
+  # The MSVC librarian, when the toolchain offers no llvm-dlltool. A
+  # binutils-named dlltool is not one, so naming a path that does not exist
+  # leaves the librarian (MSVC link.exe in /LIB mode) as the only choice.
+  set(binary_dir "${TEST_BINARY_ROOT}/librarian")
+  run_configure("${source_dir}" "${binary_dir}" TRUE "" "-DCMAKE_LINKER_TYPE=MSVC"
+    "-DCMAKE_DLLTOOL=${TEST_BINARY_ROOT}/no-llvm/dlltool.exe")
+  file(READ "${binary_dir}/reprobuild.nim" provider)
+  assert_matches("${provider}"
+    "\"__reprobuild_link_with_import_library\", \"noexp\\.lib\", \"[^\"]*[Ll][Ii][Nn][Kk]\\.exe\", \"/LIB\", \"/NOLOGO\", \"/Brepro\", "
+    "librarian: MSVC link.exe /LIB creates the empty import library")
+  run_reprobuild_build_without_runquota("${binary_dir}" build_output)
+  check_msvc_import_library_build("${binary_dir}" "librarian")
+  file(SHA256 "${binary_dir}/noexp.lib" librarian_first)
+  # A missing import library is produced again by the next build, with the
+  # same bytes (the link edge re-runs: on this host a monitored link edge is
+  # not published to the cache, see msvc_import_library_cache).
+  file(REMOVE "${binary_dir}/noexp.lib")
+  run_reprobuild_build_without_runquota("${binary_dir}" build_output)
+  check_msvc_import_library_build("${binary_dir}" "librarian rebuild")
+  file(SHA256 "${binary_dir}/noexp.lib" librarian_second)
+  if(NOT librarian_first STREQUAL librarian_second)
+    message(FATAL_ERROR "The librarian's noexp.lib is not reproducible: ${librarian_first} vs ${librarian_second}")
+  endif()
+
+  # An earlier link's import library never survives a link that exports
+  # nothing: link.exe would leave the old file in place.
+  set(binary_dir "${TEST_BINARY_ROOT}/dlltool-1")
+  assert_import_library("${binary_dir}/flip.lib" flip "flip with its export")
+  import_library_names("${binary_dir}/flip.lib" flip_value has_export)
+  if(NOT has_export)
+    message(FATAL_ERROR "flip.lib lacks flip_value before the export is removed.")
+  endif()
+  file(WRITE "${source_dir}/flip.c" "int flip_value(void) { return 7; }\n")
+  run_reprobuild_build_without_runquota("${binary_dir}" build_output)
+  assert_import_library("${binary_dir}/flip.lib" flip "flip without its export")
+  import_library_names("${binary_dir}/flip.lib" flip_value has_export)
+  if(has_export)
+    message(FATAL_ERROR "flip.lib still imports flip_value after flip.dll stopped exporting it.")
+  endif()
+elseif(TEST_MODE STREQUAL "msvc_import_library_cache")
+  # A cache hit restores the import library the link step created. lld-link
+  # is told to write no import library (/noimplib), which is what link.exe
+  # does for an image that exports nothing, so the link step must create it.
+  # Cross-links a Windows DLL and executable without any SDK or C runtime
+  # (-nostdlib, /nodefaultlib, explicit entry points), so it runs on a host
+  # with only clang, lld-link and llvm-dlltool. Not registered on Windows,
+  # whose monitored link edges are not published to the cache.
+  # TEST_C_COMPILER stays the host compiler (the shared smoke configure above
+  # links a host executable); TEST_MSVC_C_COMPILER is the clang that targets
+  # the MSVC ABI.
+  if(NOT DEFINED TEST_MSVC_C_COMPILER OR "${TEST_MSVC_C_COMPILER}" STREQUAL "")
+    message(FATAL_ERROR "TEST_MSVC_C_COMPILER is required")
+  endif()
+  set(TEST_C_COMPILER "${TEST_MSVC_C_COMPILER}")
+  set(source_dir "${TEST_BINARY_ROOT}/src")
+  set(binary_dir "${TEST_BINARY_ROOT}/build")
+  file(REMOVE_RECURSE "${source_dir}")
+  file(MAKE_DIRECTORY "${source_dir}")
+  file(WRITE "${source_dir}/CMakeLists.txt"
+    "cmake_minimum_required(VERSION 3.29)\n"
+    "project(MsvcImportLibraryCache C)\n"
+    "set(CMAKE_C_USING_LINKER_DEFAULT -fuse-ld=lld)\n"
+    "add_library(noexp SHARED noexp.c)\n"
+    "add_executable(app main.c)\n"
+    "target_link_libraries(app PRIVATE noexp)\n")
+  file(WRITE "${source_dir}/noexp.c" "static int noexp_internal = 1;\n")
+  file(WRITE "${source_dir}/main.c" "int main(void) { return 0; }\n")
+  # The project selects lld as `-fuse-ld=lld`, clang's spelling for lld
+  # (lld-link for an MSVC target) on every host; Windows-Clang.cmake spells
+  # the default `-fuse-ld=lld-link`, which only clang on Windows accepts.
+  # The generator's compile and link lines do not carry
+  # CMAKE_C_COMPILER_TARGET (filed in reprobuild-pm as
+  # 2026-10-27-reprobuild-cmake-drops-the-compiler-target-from-its-command-lines.md),
+  # so the flags repeat it.
+  set(target_flag "--target=x86_64-pc-windows-msvc")
+  # /Brepro: without it lld-link stamps the image with the current time,
+  # which the engine reports as unblessed entropy and refuses to cache.
+  set(no_runtime
+    "${target_flag} -nostdlib -Xlinker /nodefaultlib -Xlinker /Brepro")
+  run_configure("${source_dir}" "${binary_dir}" TRUE ""
+    "-DCMAKE_SYSTEM_NAME=Windows"
+    "-DCMAKE_C_COMPILER_TARGET=x86_64-pc-windows-msvc"
+    "-DCMAKE_C_FLAGS=${target_flag}"
+    "-DCMAKE_TRY_COMPILE_TARGET_TYPE=STATIC_LIBRARY"
+    "-DCMAKE_C_STANDARD_LIBRARIES="
+    "-DCMAKE_SHARED_LINKER_FLAGS=${no_runtime} -Xlinker /noentry -Xlinker /noimplib"
+    "-DCMAKE_EXE_LINKER_FLAGS=${no_runtime} -Xlinker /entry:main -Xlinker /subsystem:console")
+  # A deleted output is restored from the cache only under
+  # --restore-cached-outputs (reprobuild S7); without it a missing output
+  # re-runs its edge. The flag also makes the build store output payloads.
+  # A private action cache keeps an earlier run's records out of the result.
+  set(restore --restore-cached-outputs --log=actions --progress=none
+    "--action-cache-root=${TEST_BINARY_ROOT}/action-cache")
+  start_runquota("${TEST_BINARY_ROOT}" runquota_socket runquota_pid)
+  run_direct_repro_build("${binary_dir}" all "${runquota_socket}" first_output ${restore})
+  assert_import_library("${binary_dir}/noexp.lib" noexp "created import library")
+  assert_file_exists("${binary_dir}/app.exe" "consumer linked against it")
+  file(SHA256 "${binary_dir}/noexp.lib" created_sha)
+  file(READ "${binary_dir}/reprobuild.nim" provider)
+  assert_matches("${provider}"
+    "\"__reprobuild_link_with_import_library\", \"noexp\\.lib\", \"[^\"]*llvm-dlltool[^\"]*\", "
+    "llvm-dlltool creates the empty import library")
+  assert_contains("${provider}" "/noimplib" "lld-link writes no import library")
+  # The process trees of lld-link and llvm-dlltool read entropy
+  # (arc4random), so the engine publishes the link edge only once its
+  # determinism probe has seen a second run with identical inputs write
+  # identical outputs. Run it once more for that.
+  file(REMOVE "${binary_dir}/noexp.lib" "${binary_dir}/noexp.dll")
+  run_direct_repro_build("${binary_dir}" all "${runquota_socket}" second_output ${restore})
+  file(SHA256 "${binary_dir}/noexp.lib" recreated_sha)
+  if(NOT created_sha STREQUAL recreated_sha)
+    message(FATAL_ERROR "A second link wrote a different noexp.lib: ${created_sha} vs ${recreated_sha}")
+  endif()
+  file(REMOVE "${binary_dir}/noexp.lib" "${binary_dir}/noexp.dll")
+  run_direct_repro_build("${binary_dir}" all "${runquota_socket}" third_output ${restore})
+  stop_runquota("${runquota_pid}")
+  # The earlier builds' output says whether the link edge was published.
+  assert_contains("${third_output}" "action: link-noexp status=asCacheHit launched=false"
+    "the link edge is served from the cache (first build:\n${first_output}\nsecond build:\n${second_output}\n)")
+  assert_import_library("${binary_dir}/noexp.lib" noexp "restored import library")
+  file(SHA256 "${binary_dir}/noexp.lib" restored_sha)
+  if(NOT created_sha STREQUAL restored_sha)
+    message(FATAL_ERROR "The restored noexp.lib differs: ${created_sha} vs ${restored_sha}")
+  endif()
 else()
   message(FATAL_ERROR "Unknown TEST_MODE: ${TEST_MODE}")
 endif()

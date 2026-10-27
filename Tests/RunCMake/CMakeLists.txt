@@ -250,14 +250,44 @@ add_test(NAME e2e_cmake_reprobuild_generator_configure_smoke
     # `check_provider_metadata` -- unrunnable here.
     -DTEST_REPROBUILD_REPRO=${_ReprobuildBin}
     -P ${_ReprobuildGeneratorTestDir}/e2e.cmake)
-add_test(NAME e2e_cmake_reprobuild_conditional_msvc_import_library
+add_test(NAME e2e_cmake_reprobuild_msvc_import_library_metadata
   COMMAND ${CMAKE_CMAKE_COMMAND}
     -DCMAKE_COMMAND=${CMAKE_CMAKE_COMMAND}
-    -DTEST_MODE=conditional_msvc_import_library
-    -DTEST_BINARY_ROOT=${_ReprobuildGeneratorTestBin}/conditional-msvc-import-library
+    -DTEST_MODE=msvc_import_library_metadata
+    -DTEST_BINARY_ROOT=${_ReprobuildGeneratorTestBin}/msvc-import-library-metadata
     -DTEST_C_COMPILER=${CMAKE_C_COMPILER}
-    -DTEST_REPROBUILD_REPRO=${_ReprobuildBin}
+    -DTEST_REPROBUILD_REPRO=${_ReprobuildBin}${CMAKE_EXECUTABLE_SUFFIX}
     -P ${_ReprobuildGeneratorTestDir}/e2e.cmake)
+# The real MSVC import-library links need a clang that can target the MSVC
+# ABI: link.exe itself on Windows, and lld-link + llvm-dlltool elsewhere
+# (whose monitored link edges, unlike Windows', are published to the cache).
+find_program(_ReprobuildMsvcClang NAMES clang)
+if(_ReprobuildMsvcClang AND CMAKE_HOST_WIN32)
+  add_test(NAME e2e_cmake_reprobuild_msvc_import_library_build
+    COMMAND ${CMAKE_CMAKE_COMMAND}
+      -DCMAKE_COMMAND=${CMAKE_CMAKE_COMMAND}
+      -DTEST_MODE=msvc_import_library_build
+      -DTEST_BINARY_ROOT=${_ReprobuildGeneratorTestBin}/msvc-import-library-build
+      -DTEST_C_COMPILER=${_ReprobuildMsvcClang}
+      -DTEST_REPROBUILD_REPRO=${_ReprobuildBin}${CMAKE_EXECUTABLE_SUFFIX}
+      -P ${_ReprobuildGeneratorTestDir}/e2e.cmake)
+elseif(_ReprobuildMsvcClang)
+  find_program(_ReprobuildLldLink NAMES lld-link)
+  find_program(_ReprobuildLlvmDlltool NAMES llvm-dlltool)
+  if(_ReprobuildLldLink AND _ReprobuildLlvmDlltool)
+    add_test(NAME e2e_cmake_reprobuild_msvc_import_library_cache
+      COMMAND ${CMAKE_CMAKE_COMMAND}
+        -DCMAKE_COMMAND=${CMAKE_CMAKE_COMMAND}
+        -DTEST_MODE=msvc_import_library_cache
+        -DTEST_BINARY_ROOT=${_ReprobuildGeneratorTestBin}/msvc-import-library-cache
+        -DTEST_C_COMPILER=${CMAKE_C_COMPILER}
+        -DTEST_MSVC_C_COMPILER=${_ReprobuildMsvcClang}
+        -DTEST_REPROBUILD_REPRO=${_ReprobuildBin}
+        -DTEST_REPROBUILD_SOURCE_ROOT=${_ReprobuildSourceRoot}
+        -DTEST_RUNQUOTAD=${_RunQuotaDaemonBin}
+        -P ${_ReprobuildGeneratorTestDir}/e2e.cmake)
+  endif()
+endif()
 add_test(NAME e2e_cmake_reprobuild_trycompile_source_staging
   COMMAND ${CMAKE_CMAKE_COMMAND}
     -DCMAKE_COMMAND=${CMAKE_CMAKE_COMMAND}

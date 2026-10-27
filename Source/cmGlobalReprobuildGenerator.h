@@ -39,8 +39,8 @@ public:
   std::unique_ptr<cmLocalGenerator> CreateLocalGenerator(
     cmMakefile* mf) override;
 
-  void EnableLanguage(std::vector<std::string> const& languages, cmMakefile* mf,
-                      bool optional) override;
+  void EnableLanguage(std::vector<std::string> const& languages,
+                      cmMakefile* mf, bool optional) override;
 
   // Override the base UnixMakefileGenerator3 search (which looks for
   // gmake/make/smake). Reprobuild is the build tool that consumes this
@@ -79,6 +79,29 @@ public:
     BuildTryCompile isInTryCompile = BuildTryCompile::No) override;
 
   void PrimeProviderMetadata();
+
+  // The command name of the internal `cmake -E` step that links a target
+  // with an import library and guarantees that library exists afterwards.
+  static char const* LinkWithImportLibraryCommand()
+  {
+    return "__reprobuild_link_with_import_library";
+  }
+
+  // Implements `cmake -E __reprobuild_link_with_import_library
+  //   <import-library> <create-command...> -- <link-command...>`.
+  //
+  // Runs <link-command>; when it exits 0 without writing <import-library>
+  // (MSVC link.exe writes none for an image that exports nothing), runs
+  // <create-command>, which must write an empty import library for the
+  // image. A previous build's <import-library> is removed first, so a
+  // library from an older link that did export symbols never survives a
+  // link that exports none, and an export file (`<name>.exp`) that
+  // <create-command> writes beside the library is removed again. Returns
+  // the process exit code to report: the link's own code when the link
+  // fails, in which case <create-command> does not run.
+  // See spec/CMake-Reprobuild-Generator.md (reprobuild-pm), "Link And
+  // Archive Actions" > "Import libraries".
+  static int RunLinkWithImportLibrary(std::vector<std::string> const& args);
 
 private:
   void WriteProviderMetadata();

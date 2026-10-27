@@ -6,6 +6,7 @@
 #include <algorithm>
 #include <cctype>
 #include <cstdlib>
+#include <iostream>
 #include <map>
 #include <set>
 #include <sstream>
@@ -25,6 +26,7 @@
 #include "cmCustomCommandGenerator.h"
 #include "cmDocumentationEntry.h"
 #include "cmFileSetMetadata.h"
+#include "cmGeneratedFileStream.h"
 #include "cmGeneratorExpression.h"
 #include "cmGeneratorFileSet.h"
 #include "cmGeneratorFileSets.h"
@@ -1015,6 +1017,199 @@ bool ReprobuildCompilerIsMsvc(cmMakefile const* mf, std::string const& lang)
     "MSVC";
 }
 
+// ---------------------------------------------------------------------------
+// The import library of an MSVC-ABI link is an OBLIGATORY output.
+//
+// A consumer of a DLL names its import library as a link input whether or
+// not the DLL exports anything, so the link edge must always produce it.
+// lld-link and GNU ld (`--out-implib`) always write one -- for an image that
+// exports nothing, an import library holding only the import descriptor --
+// but MSVC link.exe writes none in that case. The link edge therefore runs
+// as `cmake -E __reprobuild_link_with_import_library` (implemented by
+// cmGlobalReprobuildGenerator::RunLinkWithImportLibrary below), which links
+// and then, only when no import library was written, creates the empty one
+// the other linkers would have written. Specified in reprobuild-pm
+// spec/CMake-Reprobuild-Generator.md, "Link And Archive Actions" >
+// "Import libraries".
+//
+// The empty library is built from a module-definition file that names the
+// image and has an empty EXPORTS section:
+//   https://learn.microsoft.com/en-us/cpp/build/reference/module-definition-dot-def-files
+//   https://learn.microsoft.com/en-us/cpp/build/reference/library
+//   https://learn.microsoft.com/en-us/cpp/build/reference/exports
+// ---------------------------------------------------------------------------
+
+// The machine an import library is written for, in the spelling of each
+// tool that can write one.
+struct ReprobuildImportLibraryMachine
+{
+  // lib.exe / link.exe /MACHINE: values.
+  std::string Msvc;
+  // llvm-dlltool -m values.
+  std::string Dlltool;
+};
+
+// Maps CMAKE_<LANG>_COMPILER_ARCHITECTURE_ID (CMakePlatformId.h.in spells
+// the MSVC-ABI targets x64, X86, ARM64, ARM64EC and ARMV<n>[I]) to the
+// machine. Returns false for a target this function cannot name, which the
+// caller reports instead of guessing.
+bool ReprobuildImportLibraryMachineFor(std::string const& architectureId,
+                                       ReprobuildImportLibraryMachine& out)
+{
+  std::string const arch = cmSystemTools::LowerCase(architectureId);
+  if (arch == "x64" || arch == "amd64" || arch == "x86_64") {
+    out = { "X64", "i386:x86-64" };
+  } else if (arch == "x86" || arch == "i386" || arch == "i686") {
+    out = { "X86", "i386" };
+  } else if (arch == "arm64ec") {
+    out = { "ARM64EC", "arm64ec" };
+  } else if (arch == "arm64" || arch == "aarch64") {
+    out = { "ARM64", "arm64" };
+  } else if (arch == "arm" || cmHasLiteralPrefix(arch, "armv")) {
+    out = { "ARM", "arm" };
+  } else {
+    return false;
+  }
+  return true;
+}
+
+// The lower-cased file name of `path` without an `.exe` suffix, so that a
+// tool can be recognized by name on every host.
+std::string ReprobuildToolStem(std::string const& path)
+{
+  std::string name =
+    cmSystemTools::LowerCase(cmSystemTools::GetFilenameName(path));
+  if (cmHasLiteralSuffix(name, ".exe")) {
+    name.resize(name.size() - 4);
+  }
+  return name;
+}
+
+// True for `llvm-dlltool` and its versioned spellings (`llvm-dlltool-18`).
+bool ReprobuildIsLlvmDlltool(std::string const& path)
+{
+  std::string const stem = ReprobuildToolStem(path);
+  return stem == "llvm-dlltool" || cmHasLiteralPrefix(stem, "llvm-dlltool-");
+}
+
+// The command that writes an empty import library `importLibrary` from the
+// module-definition file `defFile`, using a tool CMake already resolved for
+// this toolchain. In order of preference:
+//
+//  1. llvm-dlltool: CMAKE_DLLTOOL, or the llvm-dlltool beside an llvm-lib
+//     CMAKE_AR (LLVM installs both side by side). LLVM writes import
+//     libraries without timestamps, and lld-link writes its own import
+//     library with the same writer (llvm::object::writeImportLibrary), so
+//     for an image that exports nothing the bytes equal what lld-link
+//     writes.
+//  2. The MSVC librarian: lib.exe as CMAKE_AR, else the MSVC linker in
+//     /LIB mode (CMAKE_<LANG>_COMPILER_LINKER when its id is MSVC, or a
+//     `link` CMAKE_LINKER), which is the same tool. `/Brepro` (accepted,
+//     but not documented, by lib.exe) zeroes the timestamps, so the library
+//     is byte-for-byte reproducible. lib.exe also writes `<name>.exp`
+//     beside it, which is not reproducible; RunLinkWithImportLibrary
+//     removes it again.
+//     https://learn.microsoft.com/en-us/cpp/build/reference/overview-of-lib
+//     https://learn.microsoft.com/en-us/cpp/build/reference/building-an-import-library-and-export-file
+//
+// Returns an empty vector, with `error` set, when the toolchain offers no
+// such tool or the target machine cannot be named.
+std::vector<std::string> ReprobuildEmptyImportLibraryCommand(
+  cmMakefile const* mf, std::string const& lang, std::string const& defFile,
+  std::string const& importLibrary, std::string& error)
+{
+  std::string const architectureId = mf->GetSafeDefinition(
+    cmStrCat("CMAKE_", lang, "_COMPILER_ARCHITECTURE_ID"));
+  ReprobuildImportLibraryMachine machine;
+  if (!ReprobuildImportLibraryMachineFor(architectureId, machine)) {
+    error = cmStrCat("the target machine is unknown (CMAKE_", lang,
+                     "_COMPILER_ARCHITECTURE_ID is \"", architectureId, "\")");
+    return {};
+  }
+
+  std::string dlltool;
+  std::string const declaredDlltool = mf->GetSafeDefinition("CMAKE_DLLTOOL");
+  std::string const ar = mf->GetSafeDefinition("CMAKE_AR");
+  if (ReprobuildIsLlvmDlltool(declaredDlltool)) {
+    dlltool = declaredDlltool;
+  } else if (cmHasLiteralPrefix(ReprobuildToolStem(ar), "llvm-lib")) {
+    std::string const sibling =
+      cmStrCat(cmSystemTools::GetFilenamePath(ar), "/llvm-dlltool",
+               cmSystemTools::GetExecutableExtension());
+    if (cmSystemTools::FileExists(sibling, true)) {
+      dlltool = sibling;
+    }
+  }
+  if (!dlltool.empty()) {
+    return {
+      dlltool, "-m", machine.Dlltool, "-d", defFile, "-l", importLibrary
+    };
+  }
+
+  std::vector<std::string> librarian;
+  if (ReprobuildToolStem(ar) == "lib") {
+    librarian = { ar };
+  } else {
+    std::string linker;
+    if (mf->GetSafeDefinition(
+          cmStrCat("CMAKE_", lang, "_COMPILER_LINKER_ID")) == "MSVC") {
+      linker =
+        mf->GetSafeDefinition(cmStrCat("CMAKE_", lang, "_COMPILER_LINKER"));
+    }
+    if (linker.empty()) {
+      for (char const* var : { "CMAKE_LINKER_LINK", "CMAKE_LINKER" }) {
+        std::string const candidate = mf->GetSafeDefinition(var);
+        if (ReprobuildToolStem(candidate) == "link") {
+          linker = candidate;
+          break;
+        }
+      }
+    }
+    if (!linker.empty()) {
+      librarian = { linker, "/LIB" };
+    }
+  }
+  if (librarian.empty()) {
+    error = "the toolchain resolved neither llvm-dlltool (CMAKE_DLLTOOL, or "
+            "beside an llvm-lib CMAKE_AR) nor the MSVC librarian (lib.exe "
+            "as CMAKE_AR, or the MSVC linker)";
+    return {};
+  }
+  cm::append(librarian,
+             std::vector<std::string>{ "/NOLOGO", "/Brepro",
+                                       cmStrCat("/DEF:", defFile),
+                                       cmStrCat("/OUT:", importLibrary),
+                                       cmStrCat("/MACHINE:", machine.Msvc) });
+  return librarian;
+}
+
+// Writes the module-definition file for an empty import library of the
+// image `imageName`: `LIBRARY` for a DLL, `NAME` for an executable, and an
+// EXPORTS section with no entries. The name is quoted so that a file name
+// with spaces stays one token; Windows file names cannot contain `"`.
+// Rewritten only when its content changes, so its timestamp stays stable.
+bool ReprobuildWriteEmptyImportDefinition(std::string const& path,
+                                          std::string const& imageName,
+                                          bool isDll)
+{
+  cmSystemTools::MakeDirectory(cmSystemTools::GetFilenamePath(path));
+  cmGeneratedFileStream def(path);
+  if (!def) {
+    return false;
+  }
+  def.SetCopyIfDifferent(true);
+  def << "; The import library this image has when it exports nothing.\n"
+      << "; Written by the CMake Reprobuild generator; used only when the\n"
+      << "; linker writes no import library itself.\n"
+      << (isDll ? "LIBRARY" : "NAME") << " \"" << imageName << "\"\n"
+      << "EXPORTS\n";
+  bool const written = static_cast<bool>(def);
+  // Close() reports whether it REPLACED the file, which it does not when
+  // the content is unchanged; that is success here, not failure.
+  def.Close();
+  return written && cmSystemTools::FileExists(path, true);
+}
+
 std::string ReprobuildPoolProperty(cmGeneratorTarget* gt,
                                    cmSourceFile const* source,
                                    std::string const& targetProperty,
@@ -1796,6 +1991,98 @@ cmGlobalReprobuildGenerator::cmGlobalReprobuildGenerator(cmake* cm)
 }
 
 cmGlobalReprobuildGenerator::~cmGlobalReprobuildGenerator() = default;
+
+int cmGlobalReprobuildGenerator::RunLinkWithImportLibrary(
+  std::vector<std::string> const& args)
+{
+  // args: <cmake> <command> <import-library> <create...> -- <link...>
+  std::string const command = LinkWithImportLibraryCommand();
+  auto const createBegin =
+    args.begin() + std::min<std::size_t>(args.size(), 3);
+  auto const separator = std::find(createBegin, args.end(), std::string("--"));
+  if (args.size() < 3 || args[2].empty() || separator == createBegin ||
+      separator == args.end() || separator + 1 == args.end()) {
+    std::cerr << command << ": usage: cmake -E " << command
+              << " <import-library> <create-command...> -- "
+                 "<link-command...>\n";
+    return 1;
+  }
+  std::string const& importLibrary = args[2];
+  std::vector<std::string> const create(createBegin, separator);
+  std::vector<std::string> const link(separator + 1, args.end());
+
+  // A library left by an earlier link must not stand in for this one: when
+  // this link exports nothing, link.exe leaves an existing file untouched,
+  // and that file would describe exports the new image no longer has.
+  cmsys::Status const removed = cmSystemTools::RemoveFile(importLibrary);
+  if (!removed) {
+    std::cerr << command << ": cannot remove the previous import library "
+              << importLibrary << ": " << removed.GetString() << '\n';
+    return 1;
+  }
+
+  int linkResult = 0;
+  if (!cmSystemTools::RunSingleCommand(link, nullptr, nullptr, &linkResult,
+                                       nullptr,
+                                       cmSystemTools::OUTPUT_PASSTHROUGH)) {
+    std::cerr << command << ": could not run the link command: "
+              << cmSystemTools::PrintSingleCommand(link) << '\n';
+    return 1;
+  }
+  if (linkResult != 0) {
+    return linkResult;
+  }
+  if (cmSystemTools::FileExists(importLibrary, true)) {
+    // The linker wrote it (an image with exports, or lld-link / GNU ld).
+    return 0;
+  }
+
+  // The MSVC librarian writes an export file beside the library it creates
+  // (`<name>.exp` for `/OUT:<name>.lib`). Nothing consumes it, its bytes are
+  // not reproducible even under /Brepro, and a file the edge leaves behind
+  // without declaring it keeps the engine from restoring the edge's outputs
+  // from the cache (reprobuild's S7 complete-output-evidence gate). So an
+  // export file the create command writes is removed again; one that was
+  // already there is not this step's to touch.
+  std::string const exportFile = cmStrCat(
+    cmSystemTools::GetFilenamePath(importLibrary).empty()
+      ? std::string()
+      : cmStrCat(cmSystemTools::GetFilenamePath(importLibrary), '/'),
+    cmSystemTools::GetFilenameWithoutLastExtension(importLibrary), ".exp");
+  bool const exportFileExisted = cmSystemTools::FileExists(exportFile, true);
+
+  int createResult = 0;
+  if (!cmSystemTools::RunSingleCommand(create, nullptr, nullptr, &createResult,
+                                       nullptr,
+                                       cmSystemTools::OUTPUT_PASSTHROUGH)) {
+    std::cerr << command
+              << ": could not run the command that creates the empty import "
+                 "library: "
+              << cmSystemTools::PrintSingleCommand(create) << '\n';
+    return 1;
+  }
+  if (createResult != 0) {
+    std::cerr << command << ": creating the empty import library "
+              << importLibrary << " failed with exit code " << createResult
+              << ": " << cmSystemTools::PrintSingleCommand(create) << '\n';
+    return createResult;
+  }
+  if (!cmSystemTools::FileExists(importLibrary, true)) {
+    std::cerr << command << ": " << cmSystemTools::PrintSingleCommand(create)
+              << " exited 0 without writing " << importLibrary << '\n';
+    return 1;
+  }
+  if (!exportFileExisted && cmSystemTools::FileExists(exportFile, true)) {
+    cmsys::Status const removedExport = cmSystemTools::RemoveFile(exportFile);
+    if (!removedExport) {
+      std::cerr << command << ": cannot remove the export file " << exportFile
+                << " the librarian wrote: " << removedExport.GetString()
+                << '\n';
+      return 1;
+    }
+  }
+  return 0;
+}
 
 bool cmGlobalReprobuildGenerator::FindMakeProgram(cmMakefile* mf)
 {
@@ -4497,6 +4784,11 @@ void cmGlobalReprobuildGenerator::WriteProviderMetadata()
           if (declareOutputs) {
             target.LinkAction.Outputs = { realOutput };
           }
+          // Set below for an MSVC-ABI link with an import library: the
+          // command that creates an empty import library at
+          // `guaranteedImportLibrary` when the linker writes none.
+          std::string guaranteedImportLibrary;
+          std::vector<std::string> createEmptyImportLibrary;
           if (gt->HasImportLibrary(config)) {
             std::string const importOutput = ReprobuildRelativeTo(
               binaryDir,
@@ -4513,10 +4805,19 @@ void cmGlobalReprobuildGenerator::WriteProviderMetadata()
               // library flag. A GNU-family linker would therefore produce the
               // DLL but never the import library (.dll.a) declared as an
               // output just above, so a consumer opening that output fails.
-              // Emit the flag explicitly. MSVC produces an import library only
-              // when the DLL has exports, so its path is a conditional output.
-              // Its explicit /IMPLIB also preserves custom archive
-              // directories.
+              // Emit the flag explicitly. Its explicit /IMPLIB also
+              // preserves custom archive directories.
+              //
+              // The import library is an obligatory output under every
+              // linker. MSVC link.exe writes none for an image that exports
+              // nothing, so an MSVC-ABI link runs through
+              // `cmake -E __reprobuild_link_with_import_library`, which
+              // creates the empty library lld-link and GNU ld would have
+              // written (see ReprobuildEmptyImportLibraryCommand). Every
+              // MSVC-ABI link gets the step, not only link.exe ones: which
+              // linker the compiler driver runs depends on its defaults,
+              // `-fuse-ld`, LINKER_TYPE and user flags, and when the linker
+              // did write the library the step changes nothing.
               std::string const linkerId =
                 lg->GetMakefile()->GetSafeDefinition(
                   cmStrCat("CMAKE_", linkLang, "_COMPILER_ID"));
@@ -4529,9 +4830,7 @@ void cmGlobalReprobuildGenerator::WriteProviderMetadata()
               bool const msvcStyleLinker =
                 linkerId == "MSVC" || linkerSimId == "MSVC";
               if (declareOutputs) {
-                ReprobuildAppendUnique(msvcStyleLinker
-                                         ? target.LinkAction.OptionalOutputs
-                                         : target.LinkAction.Outputs,
+                ReprobuildAppendUnique(target.LinkAction.Outputs,
                                        importOutputConfig);
               }
               if (gnuStyleLinker) {
@@ -4548,6 +4847,42 @@ void cmGlobalReprobuildGenerator::WriteProviderMetadata()
                                                            : "-Xlinker");
                 target.LinkAction.Args.push_back(
                   cmStrCat("/IMPLIB:", importOutputConfig));
+
+                // Named after the action id, which is stable, rather than
+                // the Nim variable, whose ordinal shifts when a target is
+                // added earlier in the project: the path is a declared
+                // input, so a renamed file would change this edge's key.
+                std::string const defRel =
+                  cmStrCat("CMakeFiles/reprobuild/empty-import/",
+                           target.LinkAction.Id, ".def");
+                if (!ReprobuildWriteEmptyImportDefinition(
+                      cmStrCat(binaryDir, "/", defRel),
+                      cmSystemTools::GetFilenameName(realOutput),
+                      type != cmStateEnums::EXECUTABLE)) {
+                  this->GetCMakeInstance()->IssueMessage(
+                    MessageType::FATAL_ERROR,
+                    cmStrCat("Could not write the Reprobuild empty import "
+                             "library definition: ",
+                             binaryDir, "/", defRel));
+                  return;
+                }
+                std::string createError;
+                createEmptyImportLibrary = ReprobuildEmptyImportLibraryCommand(
+                  lg->GetMakefile(), linkLang, defRel, importOutputConfig,
+                  createError);
+                if (createEmptyImportLibrary.empty()) {
+                  this->GetCMakeInstance()->IssueMessage(
+                    MessageType::FATAL_ERROR,
+                    cmStrCat("Reprobuild cannot guarantee the import library ",
+                             importOutputConfig, " of target '", gt->GetName(),
+                             "': ", createError,
+                             ". The MSVC linker writes no import library for "
+                             "an image that exports nothing, so the link "
+                             "step creates an empty one."));
+                  return;
+                }
+                guaranteedImportLibrary = importOutputConfig;
+                target.LinkAction.Inputs.push_back(defRel);
               }
             }
           }
@@ -4570,11 +4905,32 @@ void cmGlobalReprobuildGenerator::WriteProviderMetadata()
             if (!linkerPath.empty()) {
               target.LinkAction.Inline = true;
               target.LinkAction.InlineArgv.clear();
+              if (!guaranteedImportLibrary.empty()) {
+                // Two steps in one edge: link, then create the empty import
+                // library if the linker wrote none. One edge, because the
+                // import library belongs to the link that names it.
+                target.LinkAction.InlineArgv = {
+                  cmSystemTools::GetCMakeCommand(), "-E",
+                  cmGlobalReprobuildGenerator::LinkWithImportLibraryCommand(),
+                  guaranteedImportLibrary
+                };
+                cm::append(target.LinkAction.InlineArgv,
+                           createEmptyImportLibrary);
+                target.LinkAction.InlineArgv.emplace_back("--");
+              }
               target.LinkAction.InlineArgv.push_back(linkerPath);
               for (std::string const& arg : target.LinkAction.Args) {
                 target.LinkAction.InlineArgv.push_back(arg);
               }
               target.LinkAction.InlineCwd = binaryDir;
+            } else if (!guaranteedImportLibrary.empty()) {
+              this->GetCMakeInstance()->IssueMessage(
+                MessageType::FATAL_ERROR,
+                cmStrCat("Reprobuild cannot guarantee the import library ",
+                         guaranteedImportLibrary, " of target '",
+                         gt->GetName(), "': CMAKE_", linkLang,
+                         "_COMPILER is not set."));
+              return;
             }
           }
         }
