@@ -262,6 +262,17 @@ add_test(NAME e2e_cmake_reprobuild_msvc_import_library_metadata
 # ABI: link.exe itself on Windows, and lld-link + llvm-dlltool elsewhere
 # (whose monitored link edges, unlike Windows', are published to the cache).
 find_program(_ReprobuildMsvcClang NAMES clang)
+if(_ReprobuildMsvcClang AND CMAKE_HOST_SYSTEM_NAME STREQUAL "Linux")
+  find_program(_ReprobuildTargetLld NAMES ld.lld)
+  if(_ReprobuildTargetLld)
+    add_test(NAME e2e_cmake_reprobuild_compiler_target
+      COMMAND ${CMAKE_CMAKE_COMMAND}
+        -DTEST_CMAKE=${CMAKE_CMAKE_COMMAND}
+        -DTEST_CLANG=${_ReprobuildMsvcClang}
+        -DTEST_BINARY_ROOT=${_ReprobuildGeneratorTestBin}/compiler-target
+        -P ${_ReprobuildGeneratorTestDir}/compiler-target.cmake)
+  endif()
+endif()
 if(_ReprobuildMsvcClang AND CMAKE_HOST_WIN32)
   add_test(NAME e2e_cmake_reprobuild_msvc_import_library_build
     COMMAND ${CMAKE_CMAKE_COMMAND}

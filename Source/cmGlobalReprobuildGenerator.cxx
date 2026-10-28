@@ -1287,12 +1287,30 @@ std::string ReprobuildSwiftCompileModeName(cmSwiftCompileMode mode)
   return "unknown";
 }
 
+// Match compiler placeholder expansion: the language's target option is a
+// prefix, which may join the target (--target=) or end in a separating space.
+// Keep it with compiler invocations, before user flags, on compiles and links;
+// archive tools do not accept compiler target options.
+void ReprobuildAppendCompilerTargetArgs(std::vector<std::string>& args,
+                                        cmMakefile const* mf,
+                                        std::string const& lang)
+{
+  std::string const target =
+    mf->GetSafeDefinition(cmStrCat("CMAKE_", lang, "_COMPILER_TARGET"));
+  std::string const option =
+    mf->GetSafeDefinition(cmStrCat("CMAKE_", lang, "_COMPILE_OPTIONS_TARGET"));
+  if (!target.empty() && !option.empty()) {
+    ReprobuildAppendParsed(args, cmStrCat(option, target));
+  }
+}
+
 void ReprobuildAppendCommonCompileArgs(std::vector<std::string>& args,
                                        cmLocalGenerator* lg,
                                        cmGeneratorTarget* gt,
                                        std::string const& config,
                                        std::string const& lang)
 {
+  ReprobuildAppendCompilerTargetArgs(args, lg->GetMakefile(), lang);
   std::string flags;
   lg->GetTargetCompileFlags(gt, config, lang, flags, "");
   ReprobuildAppendParsed(args, flags);
@@ -3648,6 +3666,7 @@ void cmGlobalReprobuildGenerator::WriteProviderMetadata()
           }
 
           std::vector<std::string> args;
+          ReprobuildAppendCompilerTargetArgs(args, mf, lang);
           std::string explicitLanguageFlags;
           gt->AddExplicitLanguageFlags(explicitLanguageFlags, *source);
           ReprobuildAppendParsed(args, explicitLanguageFlags);
@@ -4722,6 +4741,8 @@ void cmGlobalReprobuildGenerator::WriteProviderMetadata()
             }
           }
           std::vector<std::string> linkArgs;
+          ReprobuildAppendCompilerTargetArgs(linkArgs, lg->GetMakefile(),
+                                             linkLang);
           ReprobuildAppendParsed(linkArgs, flags);
           ReprobuildAppendParsed(linkArgs, linkFlags);
           ReprobuildAppendParsed(linkArgs, frameworkPath);

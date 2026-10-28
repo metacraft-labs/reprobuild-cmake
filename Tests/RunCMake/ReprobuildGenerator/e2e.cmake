@@ -4043,19 +4043,13 @@ elseif(TEST_MODE STREQUAL "msvc_import_library_cache")
   # The project selects lld as `-fuse-ld=lld`, clang's spelling for lld
   # (lld-link for an MSVC target) on every host; Windows-Clang.cmake spells
   # the default `-fuse-ld=lld-link`, which only clang on Windows accepts.
-  # The generator's compile and link lines do not carry
-  # CMAKE_C_COMPILER_TARGET (filed in reprobuild-pm as
-  # 2026-10-27-reprobuild-cmake-drops-the-compiler-target-from-its-command-lines.md),
-  # so the flags repeat it.
-  set(target_flag "--target=x86_64-pc-windows-msvc")
   # /Brepro: without it lld-link stamps the image with the current time,
   # which the engine reports as unblessed entropy and refuses to cache.
   set(no_runtime
-    "${target_flag} -nostdlib -Xlinker /nodefaultlib -Xlinker /Brepro")
+    "-nostdlib -Xlinker /nodefaultlib -Xlinker /Brepro")
   run_configure("${source_dir}" "${binary_dir}" TRUE ""
     "-DCMAKE_SYSTEM_NAME=Windows"
     "-DCMAKE_C_COMPILER_TARGET=x86_64-pc-windows-msvc"
-    "-DCMAKE_C_FLAGS=${target_flag}"
     "-DCMAKE_TRY_COMPILE_TARGET_TYPE=STATIC_LIBRARY"
     "-DCMAKE_C_STANDARD_LIBRARIES="
     "-DCMAKE_SHARED_LINKER_FLAGS=${no_runtime} -Xlinker /noentry -Xlinker /noimplib"
