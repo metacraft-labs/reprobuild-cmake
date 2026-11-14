@@ -5631,9 +5631,15 @@ void cmGlobalReprobuildGenerator::WriteProviderMetadata()
   provider << "import repro_project_dsl\n\n";
   provider << "package cmakeReprobuild:\n"
            << "  uses:\n";
+  // Each use is declared WITHOUT a version range. A wrapper stands for
+  // whichever tool CMake selected, and the project states no version for it,
+  // so any range written here would be invented. Reprobuild holds a declared
+  // range against the tool's `--version` report, and the placeholder
+  // `>=1.0 <2.0` this used to emit refused every real compiler (gcc 14 is
+  // not in it). The version is still probed and keyed into the tool's
+  // profile; it is just not refused.
   for (std::string const& tool : usedTools) {
-    provider << "    " << ReprobuildEscape(cmStrCat(tool, " >=1.0 <2.0"))
-             << "\n";
+    provider << "    " << ReprobuildEscape(tool) << "\n";
   }
   provider << "\n  build:\n";
   for (ReprobuildPool const& pool : pools) {
