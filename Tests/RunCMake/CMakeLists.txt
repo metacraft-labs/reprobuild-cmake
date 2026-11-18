@@ -272,6 +272,22 @@ if(_ReprobuildMsvcClang AND CMAKE_HOST_SYSTEM_NAME STREQUAL "Linux")
         -DTEST_BINARY_ROOT=${_ReprobuildGeneratorTestBin}/compiler-target
         -P ${_ReprobuildGeneratorTestDir}/compiler-target.cmake)
   endif()
+  # clang in its cl mode (clang-cl), linking Windows images with lld-link.
+  find_program(_ReprobuildDriverLldLink NAMES lld-link)
+  find_program(_ReprobuildDriverDlltool NAMES llvm-dlltool)
+  find_program(_ReprobuildDriverLlvmLib NAMES llvm-lib)
+  find_program(_ReprobuildDriverLlvmRc NAMES llvm-rc)
+  find_program(_ReprobuildDriverMake NAMES make)
+  if(_ReprobuildDriverLldLink AND _ReprobuildDriverDlltool AND
+     _ReprobuildDriverLlvmLib AND _ReprobuildDriverLlvmRc AND
+     _ReprobuildDriverMake)
+    add_test(NAME e2e_cmake_reprobuild_msvc_frontend_driver
+      COMMAND ${CMAKE_CMAKE_COMMAND}
+        -DTEST_CMAKE=${CMAKE_CMAKE_COMMAND}
+        -DTEST_CLANG_CL=${_ReprobuildMsvcClang}
+        -DTEST_BINARY_ROOT=${_ReprobuildGeneratorTestBin}/msvc-frontend-driver
+        -P ${_ReprobuildGeneratorTestDir}/msvc-frontend-driver.cmake)
+  endif()
 endif()
 if(_ReprobuildMsvcClang AND CMAKE_HOST_WIN32)
   add_test(NAME e2e_cmake_reprobuild_msvc_import_library_build

@@ -1017,6 +1017,62 @@ bool ReprobuildCompilerIsMsvc(cmMakefile const* mf, std::string const& lang)
     "MSVC";
 }
 
+// True when the compiler driver for `lang` takes cl.exe's command-line
+// syntax: cl.exe itself, or clang-cl (compiler id Clang, frontend variant
+// MSVC). Such a driver reads `-MD`/`-MT` as its runtime-library switches and
+// an unknown `/`-prefixed token as a file name, so neither the GNU depfile
+// flags nor the linker options CMake's Windows-MSVC module spells for the
+// linker itself (CMAKE_<LANG>_LINK_MODE LINKER) may be handed to it bare.
+bool ReprobuildDriverHasMsvcFrontend(cmMakefile const* mf,
+                                     std::string const& lang)
+{
+  return ReprobuildCompilerIsMsvc(mf, lang) ||
+    mf->GetSafeDefinition(
+      cmStrCat("CMAKE_", lang, "_COMPILER_FRONTEND_VARIANT")) == "MSVC";
+}
+
+// Appends the flags that make the compiler write a GCC-format depfile of
+// `objRel` to `depRel`. A GNU-frontend compiler gets `-MD -MT -MF`. An
+// MSVC-frontend driver gets CMAKE_DEPFILE_FLAGS_<LANG>, the flags CMake's
+// platform module defines for it and its Ninja generator uses (clang-cl:
+// `-clang:-MD -clang:-MT<DEP_TARGET> -clang:-MF<DEP_FILE>`), with the
+// placeholders substituted per argument so paths are never re-split.
+// Returns false when an MSVC-frontend driver has no such flags.
+bool ReprobuildAppendDepfileFlags(std::vector<std::string>& args,
+                                  cmMakefile const* mf,
+                                  std::string const& lang,
+                                  std::string const& objRel,
+                                  std::string const& depRel)
+{
+  if (!ReprobuildDriverHasMsvcFrontend(mf, lang)) {
+    args.push_back("-MD");
+    args.push_back("-MT");
+    args.push_back(objRel);
+    args.push_back("-MF");
+    args.push_back(depRel);
+    return true;
+  }
+  // cl.exe's own flags (`/showIncludes`, format `msvc`) are not a depfile.
+  std::string const format =
+    mf->GetSafeDefinition(cmStrCat("CMAKE_", lang, "_DEPFILE_FORMAT"));
+  if (!format.empty() && format != "gcc") {
+    return false;
+  }
+  std::string const flags =
+    mf->GetSafeDefinition(cmStrCat("CMAKE_DEPFILE_FLAGS_", lang));
+  std::vector<std::string> parsed;
+  ReprobuildAppendParsed(parsed, flags);
+  if (parsed.empty()) {
+    return false;
+  }
+  for (std::string& arg : parsed) {
+    cmSystemTools::ReplaceString(arg, "<DEP_TARGET>", objRel);
+    cmSystemTools::ReplaceString(arg, "<DEP_FILE>", depRel);
+    args.push_back(std::move(arg));
+  }
+  return true;
+}
+
 // ---------------------------------------------------------------------------
 // The import library of an MSVC-ABI link is an OBLIGATORY output.
 //
@@ -3966,11 +4022,20 @@ void cmGlobalReprobuildGenerator::WriteProviderMetadata()
                                            cmStrCat(objRel, ".modmap"));
               ReprobuildAppendParsed(args, modmapFlag);
             }
-            args.push_back("-MD");
-            args.push_back("-MT");
-            args.push_back(objRel);
-            args.push_back("-MF");
-            args.push_back(depRel);
+            if (!ReprobuildAppendDepfileFlags(args, mf, lang, objRel,
+                                              depRel)) {
+              this->GetCMakeInstance()->IssueMessage(
+                MessageType::FATAL_ERROR,
+                cmStrCat("The Reprobuild generator needs a GCC-format "
+                         "depfile from the ",
+                         lang,
+                         " compiler, whose MSVC frontend defines no "
+                         "CMAKE_DEPFILE_FLAGS_",
+                         lang,
+                         " for one; refusing to build without recognized "
+                         "dependency evidence."));
+              return;
+            }
             args.push_back("-o");
             args.push_back(objRel);
             args.push_back("-c");
@@ -4826,9 +4891,26 @@ void cmGlobalReprobuildGenerator::WriteProviderMetadata()
           ReprobuildAppendCompilerTargetArgs(linkArgs, lg->GetMakefile(),
                                              linkLang);
           ReprobuildAppendParsed(linkArgs, flags);
-          ReprobuildAppendParsed(linkArgs, linkFlags);
-          ReprobuildAppendParsed(linkArgs, frameworkPath);
-          ReprobuildAppendParsed(linkArgs, linkPath);
+          // CMAKE_<LANG>_LINK_MODE LINKER (clang-cl, cl.exe) means CMake
+          // spelled the linker options for the linker itself (`/debug`,
+          // `/subsystem:console`, `-LIBPATH:`, ...), because its own rule
+          // runs the linker directly. This edge runs the MSVC-frontend
+          // driver instead, which would read each such option as a file
+          // name, so they and the libraries go after a single `/link`,
+          // where the driver forwards them to the linker. Everything after
+          // `/link` goes to the linker, so the driver's own `-o` and the
+          // objects come first. A driver-mode frontend (IntelLLVM outside
+          // Visual Studio) already wraps its linker options and is left as
+          // it was.
+          bool const linkerOptionsAfterLink =
+            ReprobuildDriverHasMsvcFrontend(lg->GetMakefile(), linkLang) &&
+            lg->GetMakefile()->GetSafeDefinition(
+              cmStrCat("CMAKE_", linkLang, "_LINK_MODE")) == "LINKER";
+          if (!linkerOptionsAfterLink) {
+            ReprobuildAppendParsed(linkArgs, linkFlags);
+            ReprobuildAppendParsed(linkArgs, frameworkPath);
+            ReprobuildAppendParsed(linkArgs, linkPath);
+          }
           if (linkLang == "Swift") {
             std::string swiftFlags;
             lg->GetTargetCompileFlags(gt, config, "Swift", swiftFlags, "");
@@ -4868,6 +4950,23 @@ void cmGlobalReprobuildGenerator::WriteProviderMetadata()
           linkArgs.push_back("-o");
           linkArgs.push_back(realOutput);
           cm::append(linkArgs, linkObjects);
+          if (linkerOptionsAfterLink) {
+            linkArgs.push_back("/link");
+            // CMake's CMAKE_<LANG>_CREATE_SHARED_LIBRARY rule for this
+            // frontend tells the linker to write a DLL (`_DLL_DRIVER` in
+            // Windows-MSVC.cmake); no flag variable carries it.
+            if (type == cmStateEnums::SHARED_LIBRARY ||
+                type == cmStateEnums::MODULE_LIBRARY) {
+              linkArgs.push_back(
+                lg->GetMakefile()->GetSafeDefinition("CMAKE_SYSTEM_NAME") ==
+                    "WindowsKernelModeDriver"
+                  ? "-driver"
+                  : "/dll");
+            }
+            ReprobuildAppendParsed(linkArgs, linkFlags);
+            ReprobuildAppendParsed(linkArgs, frameworkPath);
+            ReprobuildAppendParsed(linkArgs, linkPath);
+          }
           ReprobuildAppendParsed(linkArgs, linkLibs);
           if (target.HcrEnabled && ReprobuildContainsLtoFlag(linkArgs)) {
             this->GetCMakeInstance()->IssueMessage(
@@ -4941,13 +5040,19 @@ void cmGlobalReprobuildGenerator::WriteProviderMetadata()
                   cmStrCat("-Wl,--out-implib,", importOutputConfig));
               } else if (msvcStyleLinker) {
                 // The action invokes the compiler driver. Pass the option to
-                // its linker using the driver's frontend convention.
-                std::string const frontend =
-                  lg->GetMakefile()->GetSafeDefinition(cmStrCat(
-                    "CMAKE_", linkLang, "_COMPILER_FRONTEND_VARIANT"));
-                target.LinkAction.Args.push_back(
-                  linkerId == "MSVC" || frontend == "MSVC" ? "/link"
-                                                           : "-Xlinker");
+                // its linker using the driver's frontend convention. A
+                // LINKER-mode MSVC-frontend line already ends in its one
+                // `/link` section (a second `/link` would reach the linker
+                // as an unknown option); another MSVC-frontend driver gets
+                // `/link` here; a GNU-frontend driver takes `-Xlinker`.
+                if (!linkerOptionsAfterLink) {
+                  std::string const frontend =
+                    lg->GetMakefile()->GetSafeDefinition(cmStrCat(
+                      "CMAKE_", linkLang, "_COMPILER_FRONTEND_VARIANT"));
+                  target.LinkAction.Args.push_back(
+                    linkerId == "MSVC" || frontend == "MSVC" ? "/link"
+                                                             : "-Xlinker");
+                }
                 target.LinkAction.Args.push_back(
                   cmStrCat("/IMPLIB:", importOutputConfig));
 
