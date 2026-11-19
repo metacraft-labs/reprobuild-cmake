@@ -343,7 +343,7 @@ std::string ReprobuildCanonicaliseTryCompileSourcePath(
 //
 // Format (little-endian, length-prefixed):
 //   magic        "RBCT"
-//   version      u16  (= 5; see AppendU16Le below)
+//   version      u16  (= 5, or 6 for a relocatable try_compile project)
 //   payloadLen   u32
 //   payload {
 //     usedTools  : string-seq
@@ -356,8 +356,8 @@ std::string ReprobuildCanonicaliseTryCompileSourcePath(
 //   }
 //
 // The version is a HARD GATE, not a hint: the decoder rejects anything
-// above ``TryCompileMetadataVersion`` outright (currently 5, accepting
-// 1-5). A `repro` older than the envelope this generator writes fails
+// above ``TryCompileMetadataVersion`` outright (currently 6, accepting
+// 1-6). A `repro` older than the envelope this generator writes fails
 // the configure with "unsupported trycompile.rbsz version", so the two
 // sides must be bumped together.
 //
@@ -1975,17 +1975,12 @@ bool ReprobuildCliSupportsProviderPriming(std::string const& repro)
     output.find("\"provider-cache-priming\"") != std::string::npos;
 }
 
-// Whether `repro build` takes `--action-output=all`, which prints every
-// action's captured stdout and stderr, succeeded actions included. A
-// try_compile needs it: CMake reads the compiler's implicit include and link
-// directories out of the compiler's `-v` output in the build tool's output,
-// and without the flag a successful `repro build` prints none of it. A `repro`
-// that predates the flag would reject it and fail every try_compile, so it is
-// passed only when `repro capabilities` lists `build-action-output`. Asked
-// once per CLI path: every try_compile of a configure runs in this process.
-bool ReprobuildCliSupportsActionOutput(std::string const& repro)
+// `repro capabilities --format=json` for one CLI path, or "" when it cannot
+// be asked. Asked once per CLI path: every try_compile of a configure runs in
+// this process.
+std::string const& ReprobuildCliCapabilities(std::string const& repro)
 {
-  static std::map<std::string, bool> answers;
+  static std::map<std::string, std::string> answers;
   auto known = answers.find(repro);
   if (known != answers.end()) {
     return known->second;
@@ -1996,10 +1991,65 @@ bool ReprobuildCliSupportsActionOutput(std::string const& repro)
   int ret = 0;
   bool const ok = cmSystemTools::RunSingleCommand(
     command, &output, nullptr, &ret, nullptr, cmSystemTools::OUTPUT_NONE);
-  bool const supported = ok && ret == 0 &&
-    output.find("\"build-action-output\"") != std::string::npos;
-  answers.emplace(repro, supported);
-  return supported;
+  return answers.emplace(repro, ok && ret == 0 ? output : std::string())
+    .first->second;
+}
+
+// Whether `repro build` takes `--action-output=all`, which prints every
+// action's captured stdout and stderr, succeeded actions included. A
+// try_compile needs it: CMake reads the compiler's implicit include and link
+// directories out of the compiler's `-v` output in the build tool's output,
+// and without the flag a successful `repro build` prints none of it. A `repro`
+// that predates the flag would reject it and fail every try_compile, so it is
+// passed only when `repro capabilities` lists `build-action-output`.
+bool ReprobuildCliSupportsActionOutput(std::string const& repro)
+{
+  return ReprobuildCliCapabilities(repro).find("\"build-action-output\"") !=
+    std::string::npos;
+}
+
+// Whether a try_compile's actions may be served from the action cache.
+// A hit must print the output its record's run captured, as a run would
+// (reprobuild-pm spec/Provider-Compile-Tiering.md, "A TryCompile hit must
+// replay the probe's output"): CMake computes the compiler's implicit
+// directories and every check_* FAIL_REGEX verdict from that output, and a
+// hit that printed nothing would make the configure differ from a cold one.
+// `repro capabilities` lists `build-action-output-replay` when its hits do.
+// Only then does the generator pass `--restore-cached-outputs`, without
+// which a probe in a fresh scratch directory re-runs on a hit (its records
+// are otherwise metadata-only and cannot put the outputs in place).
+bool ReprobuildCliReplaysCachedActionOutput(std::string const& repro)
+{
+  return ReprobuildCliCapabilities(repro).find(
+           "\"build-action-output-replay\"") != std::string::npos;
+}
+
+// Whether the `repro` that will build this project reads a v6
+// `trycompile.rbsz`, whose `relocatable` flag keys a try_compile project's
+// actions independently of the per-invocation scratch directory they run
+// in (reprobuild-pm issue 2026-10-10,
+// "trycompile-edge-cache-key-is-unique-to-its-configure"). A `repro` that
+// does not list `trycompile-relocatable-probes` rejects v6 and gets v5.
+bool ReprobuildCliRelocatesProbes(std::string const& repro)
+{
+  return ReprobuildCliCapabilities(repro).find(
+           "\"trycompile-relocatable-probes\"") != std::string::npos;
+}
+
+// The `repro` a try_compile build is handed: the same resolution as
+// `GenerateBuildCommand`.
+std::string ReprobuildCliForTryCompile(cmMakefile* mf)
+{
+  std::string repro = ReprobuildCliFromEnv();
+  std::string const makeProgram = mf->GetSafeDefinition("CMAKE_MAKE_PROGRAM");
+  if (repro.empty() && !makeProgram.empty() &&
+      !ReprobuildLooksLikeMakeProgram(makeProgram)) {
+    repro = makeProgram;
+  }
+  if (repro.empty()) {
+    repro = ReprobuildFindCliOnPath();
+  }
+  return repro;
 }
 }
 
@@ -2629,6 +2679,13 @@ struct ReprobuildTryCompileCrossConfigDescriptor
 // v5 appends each action's conditional output candidates after commandStatsId.
 // Older readers must not silently turn those paths into unrecorded byproducts.
 //
+// v6 appends a payload-level `relocatable` flag: every action of a
+// try_compile project computes the same thing in any scratch directory, so
+// the engine keys its argv relative to the cwd (outside its anchors) and the
+// cwd by depth, and two configures share a probe's result. Written only for
+// such a project, and only when `repro capabilities` lists
+// `trycompile-relocatable-probes`.
+//
 // A reader of version N MUST reject version N+1 (the cross-config target
 // shape, and now the env, would otherwise be invisible and the slow path
 // would silently disappear); the Nim decoder enforces that.
@@ -2642,7 +2699,7 @@ static bool ReprobuildWriteTryCompileMetadata(
   std::vector<ReprobuildTryCompileCrossConfigDescriptor> const&
     crossConfigTargets,
   std::vector<std::string> const& defaultConfigs,
-  std::vector<std::string> const& actionEnv)
+  std::vector<std::string> const& actionEnv, bool relocatable)
 {
   using namespace ReprobuildTryCompileEnvelope;
   std::string payload;
@@ -2677,9 +2734,15 @@ static bool ReprobuildWriteTryCompileMetadata(
   AppendStringSeq(payload, defaultConfigs);
   // v4 trailer: the env every action declares.
   AppendStringSeq(payload, actionEnv);
+  // v6 trailer: the project's actions are relocatable. Written, and the
+  // version raised to 6, only for a relocatable try_compile project whose
+  // `repro` reads v6; every other envelope stays v5, byte for byte.
+  if (relocatable) {
+    AppendBool(payload, true);
+  }
 
   std::string envelope = "RBCT";
-  AppendU16Le(envelope, 5);
+  AppendU16Le(envelope, relocatable ? 6 : 5);
   AppendU32Le(envelope, static_cast<std::uint32_t>(payload.size()));
   envelope.append(payload);
 
@@ -2757,6 +2820,14 @@ void cmGlobalReprobuildGenerator::WriteProviderMetadata()
   bool const multiConfig = this->IsMultiConfig();
   cmLocalGenerator* rootLg = this->LocalGenerators.front().get();
   cmMakefile* rootMf = this->LocalGenerators.front()->GetMakefile();
+  // A try_compile project whose `repro` keys its actions relocatably
+  // (`ReprobuildCliRelocatesProbes`): its envelope is v6 with the
+  // `relocatable` flag, its declared `PATH` leaves out the scratch wrapper
+  // directory, and its compiles declare their depfiles as outputs, so a
+  // probe served from another configure's record finds every file it needs.
+  bool const relocatableProbe =
+    this->GetCMakeInstance()->GetIsInTryCompile() &&
+    ReprobuildCliRelocatesProbes(ReprobuildCliForTryCompile(rootMf));
   if (!this->GetCMakeInstance()->GetState()->GetCacheEntryValue(
         "CMAKE_REPROBUILD_HCR")) {
     rootMf->AddCacheDefinition(
@@ -4020,6 +4091,17 @@ void cmGlobalReprobuildGenerator::WriteProviderMetadata()
           }
           if (declareOutputs && lang != "Fortran") {
             action.Depfile = depRel;
+            // A relocatable probe's compile is served by RESTORING its
+            // outputs into a fresh scratch directory, and the engine stores
+            // no payloads for an action that leaves an undeclared file
+            // behind (reprobuild's S7 gate): the depfile it writes beside
+            // the object is that file. Its content names the object
+            // cwd-relatively and the source and headers absolutely under
+            // the store and the toolchain, so it is the same file in every
+            // scratch directory and restoring it is exact.
+            if (relocatableProbe) {
+              ReprobuildAppendUnique(action.Outputs, depRel);
+            }
           }
           if (declareOutputs &&
               (lang == "Fortran" ||
@@ -5425,8 +5507,15 @@ void cmGlobalReprobuildGenerator::WriteProviderMetadata()
   // at every one of them. The sibling defect in `repro_cli_support` was
   // exactly this shape: a fourth lowering site ~400 lines from the other
   // three was missed by a sweep of "the lowering sites".
+  //
+  // A relocatable try_compile project (`relocatableProbe`) leaves its
+  // wrapper directory off: that directory lies inside the per-invocation
+  // scratch directory, the declared `PATH` is keyed by value, and a probe's
+  // actions are all inline-exec with absolute tool paths, so nothing in them
+  // finds a program there (it holds only tool profiles).
   std::string const declaredActionPath = ReprobuildDeclaredActionPath(
-    rootMf, usedLanguages, wrapperDir, cmSystemTools::GetCMakeCommand());
+    rootMf, usedLanguages, relocatableProbe ? std::string() : wrapperDir,
+    cmSystemTools::GetCMakeCommand());
 
   std::set<std::string> allCleanFiles;
   for (auto const& entry : cleanFilesByConfig) {
@@ -6252,7 +6341,8 @@ void cmGlobalReprobuildGenerator::WriteProviderMetadata()
     if (!ReprobuildWriteTryCompileMetadata(
           tryCompileMetadataFile, directUsedTools, pools, directActions,
           directTargets, defaultTargetName, envelopeCrossConfigs,
-          crossConfigDescriptors, envelopeDefaultConfigs, directActionEnv)) {
+          crossConfigDescriptors, envelopeDefaultConfigs, directActionEnv,
+          relocatableProbe)) {
       // Best-effort: log a non-fatal message and continue. The
       // reprobuild.nim slow-path remains available.
       this->GetCMakeInstance()->IssueMessage(
@@ -6377,6 +6467,11 @@ cmGlobalReprobuildGenerator::GenerateBuildCommand(
       // ReprobuildCliSupportsActionOutput.
       if (ReprobuildCliSupportsActionOutput(repro)) {
         makeCommand.Add("--action-output=all");
+        // Served from cache only by a `repro` whose hits replay the
+        // probe's output; see ReprobuildCliReplaysCachedActionOutput.
+        if (ReprobuildCliReplaysCachedActionOutput(repro)) {
+          makeCommand.Add("--restore-cached-outputs");
+        }
       }
     } else {
       makeCommand.Add("--log=actions");

@@ -371,6 +371,18 @@ cm::optional<cmTryCompileResult> cmCoreTryCompile::TryCompileCode(
     }
   }
 
+  // Under the Reprobuild generator a try_compile's actions are cached by a
+  // key that covers their command lines and declared outputs, and the
+  // random `cmTC_<hex>` name reaches both (`-MT`/`-MF`/`-o`, the per-target
+  // directory), so no two configures could ever share a probe's result.
+  // Inside a unique scratch directory the name cannot collide with another
+  // invocation's, so it is fixed there. The random name stays everywhere
+  // else, including the old signature's shared `CMakeFiles/CMakeTmp`.
+  if (this->SrcFileSignature && useUniqueBinaryDirectory &&
+      this->Makefile->GetGlobalGenerator()->GetName() == "Reprobuild") {
+    targetName = "cmTC";
+  }
+
   std::vector<std::string> targets;
   if (arguments.LinkLibraries) {
     for (std::string const& i : *arguments.LinkLibraries) {
