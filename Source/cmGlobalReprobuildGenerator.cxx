@@ -2042,7 +2042,7 @@ std::string ReprobuildCliForTryCompile(cmMakefile* mf)
 {
   std::string repro = ReprobuildCliFromEnv();
   std::string const makeProgram = mf->GetSafeDefinition("CMAKE_MAKE_PROGRAM");
-  if (repro.empty() && !makeProgram.empty() &&
+  if (repro.empty() && !makeProgram.empty() && !cmIsNOTFOUND(makeProgram) &&
       !ReprobuildLooksLikeMakeProgram(makeProgram)) {
     repro = makeProgram;
   }
@@ -6424,10 +6424,18 @@ cmGlobalReprobuildGenerator::GenerateBuildCommand(
     return cmStrCat(normalizedTarget, ":", effectiveConfig);
   };
 
+  // A try_compile build is handed an EMPTY make program; the cache's
+  // CMAKE_MAKE_PROGRAM is what names the `repro` then, as it does for the
+  // Makefile generators (`SelectMakeProgram`). This must be the same `repro`
+  // `ReprobuildCliForTryCompile` asked for its capabilities when the
+  // envelope was written, or a v6 envelope could reach a `repro` that
+  // rejects it.
+  std::string const selectedMake = this->SelectMakeProgram(makeProgram);
   std::string repro = ReprobuildCliFromEnv();
-  if (repro.empty() && !makeProgram.empty() &&
-      !ReprobuildLooksLikeMakeProgram(makeProgram)) {
-    repro = makeProgram;
+  if (repro.empty() && !selectedMake.empty() &&
+      !cmIsNOTFOUND(selectedMake) &&
+      !ReprobuildLooksLikeMakeProgram(selectedMake)) {
+    repro = selectedMake;
   }
   if (repro.empty()) {
     repro = ReprobuildFindCliOnPath();
