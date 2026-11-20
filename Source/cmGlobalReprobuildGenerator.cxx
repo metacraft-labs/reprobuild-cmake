@@ -446,8 +446,10 @@ std::string ReprobuildRspQuote(std::string const& value)
   }
   bool needsQuotes = false;
   for (char ch : value) {
+    // GCC's response-file reader takes `'` as a quote too; inside the
+    // double quotes written below it is literal.
     if (std::isspace(static_cast<unsigned char>(ch)) || ch == '"' ||
-        ch == '\\') {
+        ch == '\\' || ch == '\'') {
       needsQuotes = true;
       break;
     }
@@ -466,8 +468,38 @@ std::string ReprobuildRspQuote(std::string const& value)
   return out;
 }
 
+// Quotes one response-file argument for a tool that reads its response file
+// with the Windows command-line rules (link.exe, lld-link, lib.exe,
+// llvm-lib): a backslash is literal unless it precedes a double quote.
+std::string ReprobuildRspQuoteWindows(std::string const& value)
+{
+  if (value.empty()) {
+    return "\"\"";
+  }
+  if (value.find_first_of(" \t\r\n\"") == std::string::npos) {
+    return value;
+  }
+  std::string out = "\"";
+  std::size_t backslashes = 0;
+  for (char ch : value) {
+    if (ch == '\\') {
+      ++backslashes;
+    } else if (ch == '"') {
+      out.append(backslashes + 1, '\\');
+      backslashes = 0;
+    } else {
+      backslashes = 0;
+    }
+    out.push_back(ch);
+  }
+  out.append(backslashes, '\\');
+  out.push_back('"');
+  return out;
+}
+
 bool ReprobuildWriteResponseFile(std::string const& path,
-                                 std::vector<std::string> const& args)
+                                 std::vector<std::string> const& args,
+                                 bool windowsQuoting = false)
 {
   cmSystemTools::MakeDirectory(cmSystemTools::GetFilenamePath(path));
   cmsys::ofstream out(path.c_str());
@@ -475,7 +507,9 @@ bool ReprobuildWriteResponseFile(std::string const& path,
     return false;
   }
   for (std::string const& arg : args) {
-    out << ReprobuildRspQuote(arg) << "\n";
+    out << (windowsQuoting ? ReprobuildRspQuoteWindows(arg)
+                           : ReprobuildRspQuote(arg))
+        << "\n";
   }
   return true;
 }
@@ -1029,6 +1063,56 @@ bool ReprobuildDriverHasMsvcFrontend(cmMakefile const* mf,
   return ReprobuildCompilerIsMsvc(mf, lang) ||
     mf->GetSafeDefinition(
       cmStrCat("CMAKE_", lang, "_COMPILER_FRONTEND_VARIANT")) == "MSVC";
+}
+
+// True when CMake's own link rule for `lang` runs the linker itself rather
+// than the compiler driver (CMAKE_<LANG>_LINK_MODE LINKER: clang-cl and
+// cl.exe), so that it spells every linker option for the linker (`/debug`,
+// `/subsystem:console`, `-LIBPATH:`, ...). The link edge then runs that
+// linker too, with what the rule passes it; see the link action below.
+bool ReprobuildLinkRunsMsvcLinker(cmMakefile const* mf,
+                                  std::string const& lang)
+{
+  return ReprobuildDriverHasMsvcFrontend(mf, lang) &&
+    mf->GetSafeDefinition(cmStrCat("CMAKE_", lang, "_LINK_MODE")) == "LINKER";
+}
+
+// The program database an MSVC-style link line (link.exe, lld-link) writes,
+// or the empty string when it writes none. Each `/debug` option applies in
+// turn: `/debug`, `/debug:full`, `/debug:fastlink`, `/debug:ghash` and
+// `/debug:noghash` turn the PDB on and `/debug:none` turns it off. lld-link's
+// `/debug:dwarf` and `/debug:symtab` (and their `no` forms) leave it as it
+// was (measured, lld-link 18.1.3). A value this does not know counts as
+// turning it on, so that a wrong guess shows as a declared output that is
+// missing, never as an undeclared write. The path is the last `/pdb:` on the
+// line: the generator's own, unless the project's flags name another.
+std::string ReprobuildMsvcLinkPdb(std::vector<std::string> const& args)
+{
+  bool writes = false;
+  std::string path;
+  for (std::string const& arg : args) {
+    if (arg.size() < 5 || (arg[0] != '/' && arg[0] != '-')) {
+      continue;
+    }
+    std::string const option = cmSystemTools::LowerCase(arg.substr(1));
+    if (option == "debug") {
+      writes = true;
+    } else if (cmHasLiteralPrefix(option, "debug:")) {
+      // lld-link takes a comma-separated list; each item applies in turn.
+      for (std::string const& kind :
+           cmSystemTools::SplitString(option.substr(6), ',')) {
+        if (kind == "none") {
+          writes = false;
+        } else if (kind != "dwarf" && kind != "symtab" && kind != "nodwarf" &&
+                   kind != "nosymtab") {
+          writes = true;
+        }
+      }
+    } else if (cmHasLiteralPrefix(option, "pdb:")) {
+      path = arg.substr(5);
+    }
+  }
+  return writes ? path : std::string();
 }
 
 // Appends the flags that make the compiler write a GCC-format depfile of
@@ -3974,17 +4058,27 @@ void cmGlobalReprobuildGenerator::WriteProviderMetadata()
                   "CMAKE_CXX_COMPILER_CLANG_SCAN_DEPS.");
                 return;
               }
+              // As CMAKE_CXX_SCANDEP_SOURCE (Compiler/Clang-CXX.cmake): an
+              // MSVC-frontend driver takes the output and dependency
+              // options only behind `-clang:`. Bare, clang-cl reads `-MT`
+              // and `-MD` as its runtime-library switches and writes no
+              // depfile.
+              std::string const clangOption =
+                ReprobuildDriverHasMsvcFrontend(mf, lang) ? "-clang:" : "";
               std::vector<std::string> scanLines;
               scanLines.push_back(cmStrCat(
                 ReprobuildShellSingleQuote(scanner), " -format=p1689 -- ",
                 ReprobuildShellSingleQuote(
                   mf->GetSafeDefinition(ReprobuildCompilerVar(lang))),
                 " ", cmJoin(args, " "), " -x c++ ",
-                ReprobuildShellSingleQuote(sourceArg), " -c -o ",
-                ReprobuildShellSingleQuote(objRel), " -MT ",
-                ReprobuildShellSingleQuote(ddiRel), " -MD -MF ",
-                ReprobuildShellSingleQuote(scanDepRel), " > ",
-                ReprobuildShellSingleQuote(ddiRel)));
+                ReprobuildShellSingleQuote(sourceArg), " -c ", clangOption,
+                "-o ",
+                ReprobuildShellSingleQuote(cmStrCat(clangOption, objRel)), " ",
+                clangOption, "-MT ",
+                ReprobuildShellSingleQuote(cmStrCat(clangOption, ddiRel)), " ",
+                clangOption, "-MD ", clangOption, "-MF ",
+                ReprobuildShellSingleQuote(cmStrCat(clangOption, scanDepRel)),
+                " > ", ReprobuildShellSingleQuote(ddiRel)));
               std::string const scanWrapper =
                 cmStrCat(wrapperDir, "/", scan.ToolId);
               if (!ReprobuildWriteCommandScript(scanWrapper, binaryDir,
@@ -4855,8 +4949,36 @@ void cmGlobalReprobuildGenerator::WriteProviderMetadata()
           // separately on the modern toolchains the bench exercises; if an
           // AIX-style toolchain ever needs a follow-up ranlib edge we can
           // add it as a second inline-exec depending on this one.
-          std::vector<std::string> archiveArgv = { arTool, "rcs", output };
+          std::vector<std::string> archiveArgv = { arTool };
+          if (ReprobuildDriverHasMsvcFrontend(lg->GetMakefile(), linkLang)) {
+            // The librarian of an MSVC-frontend toolchain (lib.exe,
+            // llvm-lib) reads `rcs` as an input file. Its line is CMake's
+            // CMAKE_<LANG>_CREATE_STATIC_LIBRARY (Windows-MSVC.cmake):
+            // `<CMAKE_AR> /nologo<platform flags> <LINK_FLAGS> /out:<TARGET>
+            // <OBJECTS>`. `/out:` replaces the library, so a re-run
+            // accumulates nothing. The platform flags are the rule's
+            // machine flag under policy CMP0197 NEW.
+            cmMakefile const* arMf = lg->GetMakefile();
+            ReprobuildAppendParsed(archiveArgv,
+                                   arMf->GetSafeDefinition("CMAKE_CL_NOLOGO"));
+            ReprobuildAppendParsed(
+              archiveArgv, arMf->GetSafeDefinition("_PLATFORM_ARCHIVE_FLAGS"));
+            std::string staticLibraryFlags;
+            lg->GetStaticLibraryFlags(staticLibraryFlags, config, linkLang,
+                                      gt);
+            ReprobuildAppendParsed(archiveArgv, staticLibraryFlags);
+            archiveArgv.push_back(cmStrCat("/out:", output));
+          } else {
+            archiveArgv.push_back("rcs");
+            archiveArgv.push_back(output);
+          }
           cm::append(archiveArgv, linkObjects);
+          if (ReprobuildDriverHasMsvcFrontend(lg->GetMakefile(), linkLang)) {
+            // The arguments after the program, for the response file a
+            // long line is passed in (below).
+            target.LinkAction.Args.assign(archiveArgv.begin() + 1,
+                                          archiveArgv.end());
+          }
           target.LinkAction.Inline = true;
           target.LinkAction.InlineArgv = std::move(archiveArgv);
           target.LinkAction.Inputs = linkObjects;
@@ -4888,25 +5010,47 @@ void cmGlobalReprobuildGenerator::WriteProviderMetadata()
             }
           }
           std::vector<std::string> linkArgs;
-          ReprobuildAppendCompilerTargetArgs(linkArgs, lg->GetMakefile(),
-                                             linkLang);
-          ReprobuildAppendParsed(linkArgs, flags);
-          // CMAKE_<LANG>_LINK_MODE LINKER (clang-cl, cl.exe) means CMake
-          // spelled the linker options for the linker itself (`/debug`,
-          // `/subsystem:console`, `-LIBPATH:`, ...), because its own rule
-          // runs the linker directly. This edge runs the MSVC-frontend
-          // driver instead, which would read each such option as a file
-          // name, so they and the libraries go after a single `/link`,
-          // where the driver forwards them to the linker. Everything after
-          // `/link` goes to the linker, so the driver's own `-o` and the
-          // objects come first. A driver-mode frontend (IntelLLVM outside
-          // Visual Studio) already wraps its linker options and is left as
-          // it was.
-          bool const linkerOptionsAfterLink =
-            ReprobuildDriverHasMsvcFrontend(lg->GetMakefile(), linkLang) &&
-            lg->GetMakefile()->GetSafeDefinition(
-              cmStrCat("CMAKE_", linkLang, "_LINK_MODE")) == "LINKER";
-          if (!linkerOptionsAfterLink) {
+          // CMAKE_<LANG>_LINK_MODE LINKER (clang-cl, cl.exe): CMake's own
+          // rule runs the linker it resolved, not the compiler driver, and
+          // spells every option for that linker. This edge does the same.
+          // The driver cannot stand in: it runs its own default linker
+          // (clang-cl takes a linker name in `-fuse-ld=`, not the path
+          // CMake resolved), it reads an unknown `/`-prefixed token as a
+          // file name, and it adds library directories of its own. The
+          // line is the rule's (CMAKE_<LANG>_LINK_EXECUTABLE and
+          // CMAKE_<LANG>_CREATE_SHARED_LIBRARY in Windows-MSVC.cmake):
+          //
+          //   <linker> /nologo <objects> /out:<image> /pdb:<pdb> [/dll]
+          //     /version:<major>.<minor> <platform flags> <linker flags>
+          //     <library paths> <libraries> [/IMPLIB:<lib>]
+          //
+          // A driver-mode frontend (IntelLLVM outside Visual Studio)
+          // already wraps its linker options and keeps the driver line.
+          bool const msvcLinkerLine =
+            ReprobuildLinkRunsMsvcLinker(lg->GetMakefile(), linkLang);
+          // The program run by the link edge: the linker for a LINKER-mode
+          // link, the compiler driver otherwise.
+          std::string linkProgram = lg->GetMakefile()->GetSafeDefinition(
+            ReprobuildCompilerVar(linkLang));
+          // Set when the link writes a program database: its path, which
+          // the edge declares.
+          std::string linkPdb;
+          if (msvcLinkerLine) {
+            linkProgram = gt->GetLinkerTool(linkLang, config);
+            if (linkProgram.empty()) {
+              this->GetCMakeInstance()->IssueMessage(
+                MessageType::FATAL_ERROR,
+                cmStrCat("Reprobuild cannot link target '", gt->GetName(),
+                         "': CMake resolved no linker for ", linkLang,
+                         " (CMAKE_LINKER is not set)."));
+              return;
+            }
+          } else {
+            ReprobuildAppendCompilerTargetArgs(linkArgs, lg->GetMakefile(),
+                                               linkLang);
+            ReprobuildAppendParsed(linkArgs, flags);
+          }
+          if (!msvcLinkerLine) {
             ReprobuildAppendParsed(linkArgs, linkFlags);
             ReprobuildAppendParsed(linkArgs, frameworkPath);
             ReprobuildAppendParsed(linkArgs, linkPath);
@@ -4947,27 +5091,64 @@ void cmGlobalReprobuildGenerator::WriteProviderMetadata()
               }
             }
           }
-          linkArgs.push_back("-o");
-          linkArgs.push_back(realOutput);
-          cm::append(linkArgs, linkObjects);
-          if (linkerOptionsAfterLink) {
-            linkArgs.push_back("/link");
-            // CMake's CMAKE_<LANG>_CREATE_SHARED_LIBRARY rule for this
-            // frontend tells the linker to write a DLL (`_DLL_DRIVER` in
-            // Windows-MSVC.cmake); no flag variable carries it.
+          if (msvcLinkerLine) {
+            cmMakefile const* linkMf = lg->GetMakefile();
+            ReprobuildAppendParsed(
+              linkArgs, linkMf->GetSafeDefinition("CMAKE_CL_NOLOGO"));
+            cm::append(linkArgs, linkObjects);
+            linkArgs.push_back(cmStrCat("/out:", realOutput));
+            // `/pdb:` names the program database at CMake's configured
+            // path (PDB_OUTPUT_DIRECTORY, PDB_NAME); without it the linker
+            // would choose a path beside the image.
+            std::string const pdbPath =
+              ReprobuildConfigFullPath(binaryDir,
+                                       cmStrCat(gt->GetPDBDirectory(config),
+                                                "/", gt->GetPDBName(config)),
+                                       config, multiConfig);
+            linkArgs.push_back(cmStrCat("/pdb:", pdbPath));
+            // The rule tells the linker to write a DLL (`_DLL_DRIVER`); no
+            // flag variable carries it.
             if (type == cmStateEnums::SHARED_LIBRARY ||
                 type == cmStateEnums::MODULE_LIBRARY) {
               linkArgs.push_back(
-                lg->GetMakefile()->GetSafeDefinition("CMAKE_SYSTEM_NAME") ==
+                linkMf->GetSafeDefinition("CMAKE_SYSTEM_NAME") ==
                     "WindowsKernelModeDriver"
                   ? "-driver"
                   : "/dll");
             }
+            int versionMajor = 0;
+            int versionMinor = 0;
+            gt->GetTargetVersion(versionMajor, versionMinor);
+            linkArgs.push_back(
+              cmStrCat("/version:", versionMajor, ".", versionMinor));
+            // Windows-MSVC.cmake writes these into the rule text only: the
+            // machine flag under policy CMP0197 NEW, and the subsystem
+            // flags of WindowsCE and WindowsKernelModeDriver.
+            ReprobuildAppendParsed(
+              linkArgs, linkMf->GetSafeDefinition("_PLATFORM_LINK_FLAGS"));
             ReprobuildAppendParsed(linkArgs, linkFlags);
             ReprobuildAppendParsed(linkArgs, frameworkPath);
             ReprobuildAppendParsed(linkArgs, linkPath);
+            ReprobuildAppendParsed(linkArgs, linkLibs);
+            // The project's flags may name another program database: the
+            // last `/pdb:` wins. The path is the linker's, relative to the
+            // build root the edge runs in.
+            std::string const writtenPdb = ReprobuildMsvcLinkPdb(linkArgs);
+            if (!writtenPdb.empty()) {
+              linkPdb = ReprobuildConfigFullPath(
+                binaryDir,
+                cmSystemTools::CollapseFullPath(writtenPdb, binaryDir), "",
+                false);
+              cmSystemTools::MakeDirectory(cmSystemTools::GetFilenamePath(
+                cmStrCat(binaryDir, "/", linkPdb)));
+              ReprobuildAppendCleanFile(cleanFiles, binaryDir, linkPdb);
+            }
+          } else {
+            linkArgs.push_back("-o");
+            linkArgs.push_back(realOutput);
+            cm::append(linkArgs, linkObjects);
+            ReprobuildAppendParsed(linkArgs, linkLibs);
           }
-          ReprobuildAppendParsed(linkArgs, linkLibs);
           if (target.HcrEnabled && ReprobuildContainsLtoFlag(linkArgs)) {
             this->GetCMakeInstance()->IssueMessage(
               MessageType::FATAL_ERROR,
@@ -4985,6 +5166,9 @@ void cmGlobalReprobuildGenerator::WriteProviderMetadata()
           }
           if (declareOutputs) {
             target.LinkAction.Outputs = { realOutput };
+            if (!linkPdb.empty()) {
+              target.LinkAction.Outputs.push_back(linkPdb);
+            }
           }
           // Set below for an MSVC-ABI link with an import library: the
           // command that creates an empty import library at
@@ -5002,13 +5186,13 @@ void cmGlobalReprobuildGenerator::WriteProviderMetadata()
               ReprobuildAppendCleanFile(cleanFiles, binaryDir,
                                         importOutputConfig);
               sawImportLibraryOutput = true;
-              // The link command is hand-built above and -- unlike CMake's
-              // CMAKE_<LANG>_CREATE_SHARED_LIBRARY rule -- carries no import
-              // library flag. A GNU-family linker would therefore produce the
-              // DLL but never the import library (.dll.a) declared as an
-              // output just above, so a consumer opening that output fails.
-              // Emit the flag explicitly. Its explicit /IMPLIB also
-              // preserves custom archive directories.
+              // The driver-based link command hand-built above carries no
+              // import library flag, unlike CMake's
+              // CMAKE_<LANG>_CREATE_SHARED_LIBRARY rule. A GNU-family linker
+              // would therefore produce the DLL but never the import library
+              // (.dll.a) declared as an output just above, so a consumer
+              // opening that output fails. Emit the flag explicitly. Its
+              // explicit /IMPLIB also preserves custom archive directories.
               //
               // The import library is an obligatory output under every
               // linker. MSVC link.exe writes none for an image that exports
@@ -5039,13 +5223,12 @@ void cmGlobalReprobuildGenerator::WriteProviderMetadata()
                 target.LinkAction.Args.push_back(
                   cmStrCat("-Wl,--out-implib,", importOutputConfig));
               } else if (msvcStyleLinker) {
-                // The action invokes the compiler driver. Pass the option to
-                // its linker using the driver's frontend convention. A
-                // LINKER-mode MSVC-frontend line already ends in its one
-                // `/link` section (a second `/link` would reach the linker
-                // as an unknown option); another MSVC-frontend driver gets
-                // `/link` here; a GNU-frontend driver takes `-Xlinker`.
-                if (!linkerOptionsAfterLink) {
+                // Where the action invokes the compiler driver, pass the
+                // option to its linker by the driver's frontend convention: an
+                // MSVC-frontend driver gets `/link`, a GNU-frontend driver
+                // `-Xlinker`. A LINKER-mode line already runs the linker
+                // and takes the option as it is.
+                if (!msvcLinkerLine) {
                   std::string const frontend =
                     lg->GetMakefile()->GetSafeDefinition(cmStrCat(
                       "CMAKE_", linkLang, "_COMPILER_FRONTEND_VARIANT"));
@@ -5107,9 +5290,7 @@ void cmGlobalReprobuildGenerator::WriteProviderMetadata()
           // -Wl,--out-implib flag, so InlineArgv stays a faithful copy of
           // the final argv list.
           {
-            cmMakefile const* linkMf = lg->GetMakefile();
-            std::string const linkerPath =
-              linkMf->GetSafeDefinition(ReprobuildCompilerVar(linkLang));
+            std::string const& linkerPath = linkProgram;
             if (!linkerPath.empty()) {
               target.LinkAction.Inline = true;
               target.LinkAction.InlineArgv.clear();
@@ -5274,15 +5455,31 @@ void cmGlobalReprobuildGenerator::WriteProviderMetadata()
           finalDep = postBuild.Id;
         }
         std::string const linkArgsText = cmJoin(target.LinkAction.Args, " ");
-        if (type != cmStateEnums::STATIC_LIBRARY &&
+        // The line runs link.exe, lld-link, lib.exe or llvm-lib: a LINKER-mode
+        // link, or the archive of an MSVC-frontend toolchain. These read a
+        // response file with the Windows command-line rules.
+        bool const msvcToolLine = type == cmStateEnums::STATIC_LIBRARY
+          ? ReprobuildDriverHasMsvcFrontend(lg->GetMakefile(), linkLang)
+          : ReprobuildLinkRunsMsvcLinker(lg->GetMakefile(), linkLang);
+        // The programs known to read `@<file>`: those, and the GCC-compatible
+        // drivers that link these languages. The link driver of another
+        // language (CUDA, Swift, ...) keeps its full inline line.
+        bool const lineReadsResponseFile = msvcToolLine ||
+          (type != cmStateEnums::STATIC_LIBRARY &&
+           (linkLang == "C" || linkLang == "CXX" || linkLang == "OBJC" ||
+            linkLang == "OBJCXX" || linkLang == "Fortran"));
+        if ((type != cmStateEnums::STATIC_LIBRARY || msvcToolLine) &&
             linkArgsText.size() > 2048) {
           std::vector<std::string> rspArgs = target.LinkAction.Args;
-          target.LinkAction.ResponseFile =
-            cmStrCat("CMakeFiles/reprobuild/rsp/", target.LinkAction.Var, "-",
-                     nextRsp++, ".rsp");
+          // Named after the action id, which is stable, rather than the Nim
+          // variable, whose ordinal shifts when a target is added earlier in
+          // the project: the path is on the command line and a declared
+          // input, so a renamed file would change this edge's key.
+          target.LinkAction.ResponseFile = cmStrCat(
+            "CMakeFiles/reprobuild/rsp/", target.LinkAction.Id, ".rsp");
           std::string const rspFull =
             cmStrCat(binaryDir, "/", target.LinkAction.ResponseFile);
-          if (!ReprobuildWriteResponseFile(rspFull, rspArgs)) {
+          if (!ReprobuildWriteResponseFile(rspFull, rspArgs, msvcToolLine)) {
             this->GetCMakeInstance()->IssueMessage(
               MessageType::FATAL_ERROR,
               cmStrCat("Could not write Reprobuild response file: ", rspFull));
@@ -5291,6 +5488,20 @@ void cmGlobalReprobuildGenerator::WriteProviderMetadata()
           target.LinkAction.Args = { cmStrCat(
             "@", target.LinkAction.ResponseFile) };
           target.LinkAction.Inputs.push_back(target.LinkAction.ResponseFile);
+          // The inline argv was copied from the arguments before they moved
+          // into the response file. It ends with them (after the program,
+          // and after the import-library step's `--`), so the same tail is
+          // replaced: the process is started with `@<rsp>`, not with the
+          // line the response file exists to keep off the command line.
+          if (lineReadsResponseFile && target.LinkAction.Inline &&
+              target.LinkAction.InlineArgv.size() > rspArgs.size() &&
+              std::equal(rspArgs.rbegin(), rspArgs.rend(),
+                         target.LinkAction.InlineArgv.rbegin())) {
+            target.LinkAction.InlineArgv.resize(
+              target.LinkAction.InlineArgv.size() - rspArgs.size());
+            target.LinkAction.InlineArgv.push_back(
+              target.LinkAction.Args.front());
+          }
         }
 
         for (std::string const& cleanFile : ReprobuildEvaluateCleanFiles(
