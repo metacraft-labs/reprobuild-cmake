@@ -287,6 +287,65 @@ if(_ReprobuildMsvcClang AND CMAKE_HOST_SYSTEM_NAME STREQUAL "Linux")
         -DTEST_CLANG_CL=${_ReprobuildMsvcClang}
         -DTEST_BINARY_ROOT=${_ReprobuildGeneratorTestBin}/msvc-frontend-driver
         -P ${_ReprobuildGeneratorTestDir}/msvc-frontend-driver.cmake)
+    add_test(NAME e2e_cmake_reprobuild_long_lines_response_file_clang_cl
+      COMMAND ${CMAKE_CMAKE_COMMAND}
+        -DTEST_CMAKE=${CMAKE_CMAKE_COMMAND}
+        -DTEST_TOOLCHAIN=clang-cl
+        -DTEST_CLANG_CL=${_ReprobuildMsvcClang}
+        -DTEST_BINARY_ROOT=${_ReprobuildGeneratorTestBin}/long-lines-response-file-clang-cl
+        -P ${_ReprobuildGeneratorTestDir}/long-lines-response-file.cmake)
+  endif()
+endif()
+# A compile or link line too long for the command line is passed in the
+# response file its program reads: one test per compiler family, each
+# registered where that compiler is installed.
+if(CMAKE_HOST_UNIX)
+  find_program(_ReprobuildLongGcc NAMES gcc)
+  find_program(_ReprobuildLongGxx NAMES g++)
+  find_program(_ReprobuildLongGfortran NAMES gfortran)
+  if(_ReprobuildLongGcc AND _ReprobuildLongGxx AND _ReprobuildLongGfortran)
+    add_test(NAME e2e_cmake_reprobuild_long_lines_response_file_gnu
+      COMMAND ${CMAKE_CMAKE_COMMAND}
+        -DTEST_CMAKE=${CMAKE_CMAKE_COMMAND}
+        -DTEST_TOOLCHAIN=gnu
+        -DTEST_GCC=${_ReprobuildLongGcc}
+        -DTEST_GXX=${_ReprobuildLongGxx}
+        -DTEST_GFORTRAN=${_ReprobuildLongGfortran}
+        -DTEST_BINARY_ROOT=${_ReprobuildGeneratorTestBin}/long-lines-response-file-gnu
+        -P ${_ReprobuildGeneratorTestDir}/long-lines-response-file.cmake)
+  endif()
+  find_program(_ReprobuildLongClang NAMES clang)
+  find_program(_ReprobuildLongClangxx NAMES clang++)
+  if(_ReprobuildLongClang AND _ReprobuildLongClangxx)
+    add_test(NAME e2e_cmake_reprobuild_long_lines_response_file_clang
+      COMMAND ${CMAKE_CMAKE_COMMAND}
+        -DTEST_CMAKE=${CMAKE_CMAKE_COMMAND}
+        -DTEST_TOOLCHAIN=clang
+        -DTEST_CLANG=${_ReprobuildLongClang}
+        -DTEST_CLANGXX=${_ReprobuildLongClangxx}
+        -DTEST_BINARY_ROOT=${_ReprobuildGeneratorTestBin}/long-lines-response-file-clang
+        -P ${_ReprobuildGeneratorTestDir}/long-lines-response-file.cmake)
+  endif()
+  find_program(_ReprobuildLongIspc NAMES ispc)
+  if(_ReprobuildLongIspc AND _ReprobuildLongGcc)
+    add_test(NAME e2e_cmake_reprobuild_long_lines_response_file_ispc
+      COMMAND ${CMAKE_CMAKE_COMMAND}
+        -DTEST_CMAKE=${CMAKE_CMAKE_COMMAND}
+        -DTEST_TOOLCHAIN=ispc
+        -DTEST_ISPC=${_ReprobuildLongIspc}
+        -DTEST_C_COMPILER=${_ReprobuildLongGcc}
+        -DTEST_BINARY_ROOT=${_ReprobuildGeneratorTestBin}/long-lines-response-file-ispc
+        -P ${_ReprobuildGeneratorTestDir}/long-lines-response-file.cmake)
+  endif()
+  find_program(_ReprobuildLongSwiftc NAMES swiftc)
+  if(_ReprobuildLongSwiftc)
+    add_test(NAME e2e_cmake_reprobuild_long_lines_response_file_swift
+      COMMAND ${CMAKE_CMAKE_COMMAND}
+        -DTEST_CMAKE=${CMAKE_CMAKE_COMMAND}
+        -DTEST_TOOLCHAIN=swift
+        -DTEST_SWIFTC=${_ReprobuildLongSwiftc}
+        -DTEST_BINARY_ROOT=${_ReprobuildGeneratorTestBin}/long-lines-response-file-swift
+        -P ${_ReprobuildGeneratorTestDir}/long-lines-response-file.cmake)
   endif()
 endif()
 if(_ReprobuildMsvcClang AND CMAKE_HOST_WIN32)

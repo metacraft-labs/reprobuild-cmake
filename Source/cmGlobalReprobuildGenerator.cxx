@@ -468,9 +468,10 @@ std::string ReprobuildRspQuote(std::string const& value)
   return out;
 }
 
-// Quotes one response-file argument for a tool that reads its response file
-// with the Windows command-line rules (link.exe, lld-link, lib.exe,
-// llvm-lib): a backslash is literal unless it precedes a double quote.
+// Quotes one response-file argument for a program that reads its response
+// file with the Windows command-line rules (link.exe, lld-link, lib.exe,
+// llvm-lib, clang-cl): a backslash is literal unless it precedes a double
+// quote.
 std::string ReprobuildRspQuoteWindows(std::string const& value)
 {
   if (value.empty()) {
@@ -497,19 +498,85 @@ std::string ReprobuildRspQuoteWindows(std::string const& value)
   return out;
 }
 
+// Quotes one response-file argument for ispc, whose reader (ArgFactory in
+// ispc's src/args.cpp) toggles a quoted run at each `"` or `'` and takes a
+// backslash literally everywhere, so no character can be escaped. An
+// argument is written in single quotes, and an apostrophe in it closes them
+// and is written as `"'"`.
+std::string ReprobuildRspQuoteIspc(std::string const& value)
+{
+  if (value.empty()) {
+    return "''";
+  }
+  if (value.find_first_of(" \t\r\n\v\f\"'") == std::string::npos) {
+    return value;
+  }
+  std::string out = "'";
+  for (char ch : value) {
+    if (ch == '\'') {
+      out += "'\"'\"'";
+    } else {
+      out.push_back(ch);
+    }
+  }
+  out.push_back('\'');
+  return out;
+}
+
+// How the program that reads a response file splits it into arguments.
+enum class ReprobuildRspQuoting
+{
+  // GCC's reader (libiberty's expandargv), which Clang's GNU-frontend
+  // driver, swiftc and nvcc's `--options-file` share: `"` and `'` quote and a
+  // backslash escapes the next character.
+  Gnu,
+  // The Windows command-line rules: link.exe, lld-link, lib.exe and
+  // llvm-lib.
+  Windows,
+  // The Windows command-line rules, read by a compiler driver with the MSVC
+  // frontend (clang-cl). Such a driver also marks the end of each line of a
+  // response file, so an option and its value (`-o <obj>`) must share one:
+  // the file is written as a single line, as the command line would be. See
+  // `MarkEOLs` in clang's tools/driver/driver.cpp.
+  WindowsDriver,
+  // ispc: see ReprobuildRspQuoteIspc.
+  Ispc,
+};
+
 bool ReprobuildWriteResponseFile(std::string const& path,
                                  std::vector<std::string> const& args,
-                                 bool windowsQuoting = false)
+                                 ReprobuildRspQuoting quoting)
 {
   cmSystemTools::MakeDirectory(cmSystemTools::GetFilenamePath(path));
   cmsys::ofstream out(path.c_str());
   if (!out) {
     return false;
   }
+  bool const singleLine = quoting == ReprobuildRspQuoting::WindowsDriver;
+  bool first = true;
   for (std::string const& arg : args) {
-    out << (windowsQuoting ? ReprobuildRspQuoteWindows(arg)
-                           : ReprobuildRspQuote(arg))
-        << "\n";
+    if (singleLine && !first) {
+      out << ' ';
+    }
+    first = false;
+    switch (quoting) {
+      case ReprobuildRspQuoting::Gnu:
+        out << ReprobuildRspQuote(arg);
+        break;
+      case ReprobuildRspQuoting::Windows:
+      case ReprobuildRspQuoting::WindowsDriver:
+        out << ReprobuildRspQuoteWindows(arg);
+        break;
+      case ReprobuildRspQuoting::Ispc:
+        out << ReprobuildRspQuoteIspc(arg);
+        break;
+    }
+    if (!singleLine) {
+      out << "\n";
+    }
+  }
+  if (singleLine) {
+    out << "\n";
   }
   return true;
 }
@@ -1075,6 +1142,181 @@ bool ReprobuildLinkRunsMsvcLinker(cmMakefile const* mf,
 {
   return ReprobuildDriverHasMsvcFrontend(mf, lang) &&
     mf->GetSafeDefinition(cmStrCat("CMAKE_", lang, "_LINK_MODE")) == "LINKER";
+}
+
+// How a program is told to read its arguments from a response file, as
+// CMake's own rules for its language say (the flag variables below, which
+// CMake's Ninja generator reads the same way): the arguments that name the
+// file, and the rules its reader quotes by. A program that reads none has
+// `Reads` false; its action then keeps its full line and declares no
+// response file, because a declared input the process never opens is not
+// evidence of anything.
+struct ReprobuildResponseFileReader
+{
+  bool Reads = false;
+  // The flag, split into arguments. When the flag ends in whitespace
+  // (`--options-file `, nvcc) the path is an argument of its own; otherwise
+  // it is appended to the flag's last argument (`@`, `-Wl,@`).
+  std::vector<std::string> FlagArgs;
+  bool PathIsOwnArgument = false;
+  ReprobuildRspQuoting Quoting = ReprobuildRspQuoting::Gnu;
+
+  // The arguments that replace the line moved into `rsp`.
+  std::vector<std::string> Argv(std::string const& rsp) const
+  {
+    std::vector<std::string> argv = this->FlagArgs;
+    if (this->PathIsOwnArgument || argv.empty()) {
+      argv.push_back(rsp);
+    } else {
+      argv.back() += rsp;
+    }
+    return argv;
+  }
+};
+
+ReprobuildResponseFileReader ReprobuildResponseFileReaderFromFlag(
+  std::string const& flag, ReprobuildRspQuoting quoting)
+{
+  ReprobuildResponseFileReader reader;
+  if (flag.empty()) {
+    return reader;
+  }
+  cmSystemTools::ParseUnixCommandLine(flag.c_str(), reader.FlagArgs);
+  if (reader.FlagArgs.empty()) {
+    return reader;
+  }
+  reader.Reads = true;
+  reader.PathIsOwnArgument =
+    std::isspace(static_cast<unsigned char>(flag.back())) != 0;
+  reader.Quoting = quoting;
+  return reader;
+}
+
+// The rules a compiler driver for `lang` reads a response file by.
+ReprobuildRspQuoting ReprobuildCompilerRspQuoting(cmMakefile const* mf,
+                                                  std::string const& lang)
+{
+  if (lang == "ISPC") {
+    return ReprobuildRspQuoting::Ispc;
+  }
+  return ReprobuildDriverHasMsvcFrontend(mf, lang)
+    ? ReprobuildRspQuoting::WindowsDriver
+    : ReprobuildRspQuoting::Gnu;
+}
+
+// The compiler of `lang` reads CMAKE_<LANG>_RESPONSE_FILE_FLAG (nvcc:
+// `--options-file `, NVIDIA.cmake), `@` when that is empty, except a CUDA
+// compiler, which reads none unless its module names the flag (Clang's does
+// not), and RC, which reads none. As cmNinjaTargetGenerator's compile rule.
+ReprobuildResponseFileReader ReprobuildCompileResponseFileReader(
+  cmMakefile const* mf, std::string const& lang)
+{
+  if (lang == "RC") {
+    return {};
+  }
+  std::string flag =
+    mf->GetSafeDefinition(cmStrCat("CMAKE_", lang, "_RESPONSE_FILE_FLAG"));
+  if (flag.empty() && lang != "CUDA") {
+    flag = "@";
+  }
+  return ReprobuildResponseFileReaderFromFlag(
+    flag, ReprobuildCompilerRspQuoting(mf, lang));
+}
+
+// True when the link flag `flag` makes the compiler driver hand the response
+// file to the linker instead of reading it: `-Wl,@` (Windows-GNU.cmake, for
+// GCC 3), `-Xlinker ` (TIClang.cmake), `-xldarg @` (NAG-Fortran.cmake), or
+// any flag that starts with the language's CMAKE_<LANG>_LINKER_WRAPPER_FLAG.
+// CMake's Ninja generator can use such a flag because it puts only the
+// objects and libraries in the file, which the linker accepts too. This
+// generator moves the driver's whole line there, and the linker does not
+// accept the driver's options, so a link with such a flag is treated as
+// reading no response file.
+bool ReprobuildRspFlagForwardsToLinker(cmMakefile const* mf,
+                                       std::string const& lang,
+                                       std::string const& flag)
+{
+  std::vector<std::string> prefixes = { "-Wl,", "-Xlinker", "-xldarg" };
+  cmList const wrapper{ mf->GetSafeDefinition(
+    cmStrCat("CMAKE_", lang, "_LINKER_WRAPPER_FLAG")) };
+  if (!wrapper.empty()) {
+    std::string const wrapperFlag = cmTrimWhitespace(wrapper.front());
+    if (!wrapperFlag.empty()) {
+      prefixes.push_back(wrapperFlag);
+    }
+  }
+  std::vector<std::string> flagArgs;
+  cmSystemTools::ParseUnixCommandLine(flag.c_str(), flagArgs);
+  for (std::string const& arg : flagArgs) {
+    for (std::string const& prefix : prefixes) {
+      if (cmHasPrefix(arg, prefix)) {
+        return true;
+      }
+    }
+  }
+  return false;
+}
+
+// The program a link edge runs reads CMAKE_<LANG>_RESPONSE_FILE_ARCHIVE_FLAG
+// (a static library) or CMAKE_<LANG>_RESPONSE_FILE_LINK_FLAG, `@` when
+// neither is defined; one defined empty means it reads none, and so does one
+// that hands the file to the linker (ReprobuildRspFlagForwardsToLinker,
+// unless the program is the MSVC linker or librarian itself). A CUDA link
+// reads none unless the flag is defined (NVIDIA.cmake defines it only for
+// the compile and the device link). As cmNinjaNormalTargetGenerator. When
+// the language's driver has the MSVC frontend the program is an MSVC tool
+// (link.exe, lld-link, lib.exe, llvm-lib: `msvcTool`) or that driver; each
+// reads by the Windows rules.
+ReprobuildResponseFileReader ReprobuildLinkResponseFileReader(
+  cmMakefile const* mf, std::string const& lang, cmStateEnums::TargetType type,
+  bool msvcTool)
+{
+  if (lang == "RC") {
+    return {};
+  }
+  cmValue flag;
+  if (type == cmStateEnums::STATIC_LIBRARY) {
+    flag = mf->GetDefinition(
+      cmStrCat("CMAKE_", lang, "_RESPONSE_FILE_ARCHIVE_FLAG"));
+  }
+  if (!flag) {
+    flag =
+      mf->GetDefinition(cmStrCat("CMAKE_", lang, "_RESPONSE_FILE_LINK_FLAG"));
+  }
+  if (!flag && lang == "CUDA") {
+    return {};
+  }
+  if (flag && !msvcTool &&
+      ReprobuildRspFlagForwardsToLinker(mf, lang, *flag)) {
+    return {};
+  }
+  ReprobuildRspQuoting quoting = ReprobuildRspQuoting::Gnu;
+  if (msvcTool) {
+    quoting = ReprobuildRspQuoting::Windows;
+  } else if (ReprobuildDriverHasMsvcFrontend(mf, lang)) {
+    quoting = ReprobuildRspQuoting::WindowsDriver;
+  }
+  return ReprobuildResponseFileReaderFromFlag(flag ? *flag : std::string("@"),
+                                              quoting);
+}
+
+// The response file of action `id`, relative to the build root. Named after
+// the action id, which is stable, rather than the Nim variable, whose
+// ordinal shifts when a target is added earlier in the project: the path is
+// on the command line and a declared input, so a renamed file would change
+// the edge's key. An id too long for a file name is shortened and keeps a
+// digest of the whole id, so two long ids still name two files.
+std::string ReprobuildResponseFilePath(std::string const& id)
+{
+  constexpr std::size_t maxStemBytes = 200;
+  std::string stem = id;
+  if (stem.size() > maxStemBytes) {
+    cmCryptoHash hash(cmCryptoHash::AlgoSHA256);
+    std::string const suffix = hash.HashString(id).substr(0, 16);
+    stem =
+      cmStrCat(stem.substr(0, maxStemBytes - suffix.size() - 1), "-", suffix);
+  }
+  return cmStrCat("CMakeFiles/reprobuild/rsp/", stem, ".rsp");
 }
 
 // The program database an MSVC-style link line (link.exe, lld-link) writes,
@@ -1826,6 +2068,39 @@ struct ReprobuildAction
   std::vector<std::string> InlineArgv;
   std::string InlineCwd;
 };
+
+// Moves the tail `rspArgs` of `action`'s line into a response file read by
+// `reader`: writes the file, declares it as an input, and starts the process
+// with the reader's flag and the file in place of those arguments, both in
+// `Args` (the tool-profile path) and in the inline argv, which ends with
+// them. Returns false when the file cannot be written.
+bool ReprobuildMoveLineToResponseFile(
+  ReprobuildAction& action, std::vector<std::string> const& rspArgs,
+  ReprobuildResponseFileReader const& reader, std::string const& binaryDir,
+  std::string& error)
+{
+  action.ResponseFile = ReprobuildResponseFilePath(action.Id);
+  std::string const rspFull = cmStrCat(binaryDir, "/", action.ResponseFile);
+  if (!ReprobuildWriteResponseFile(rspFull, rspArgs, reader.Quoting)) {
+    error = cmStrCat("Could not write Reprobuild response file: ", rspFull);
+    return false;
+  }
+  std::vector<std::string> const rspArgv = reader.Argv(action.ResponseFile);
+  action.Args = rspArgv;
+  action.Inputs.push_back(action.ResponseFile);
+  if (action.Inline && action.InlineArgv.size() > rspArgs.size() &&
+      std::equal(rspArgs.rbegin(), rspArgs.rend(),
+                 action.InlineArgv.rbegin())) {
+    action.InlineArgv.resize(action.InlineArgv.size() - rspArgs.size());
+    cm::append(action.InlineArgv, rspArgv);
+  } else if (action.Inline) {
+    error = cmStrCat("Reprobuild cannot pass action '", action.Id,
+                     "' its response file: its inline line does not end "
+                     "with the arguments the response file holds.");
+    return false;
+  }
+  return true;
+}
 
 struct ReprobuildHcrObject
 {
@@ -3054,7 +3329,6 @@ void cmGlobalReprobuildGenerator::WriteProviderMetadata()
   }
   std::size_t nextActionVar = 0;
   std::size_t nextTargetVar = 0;
-  std::size_t nextRsp = 0;
 
   pools.push_back(ReprobuildPool{ "console", 1 });
   if (cmValue poolProp =
@@ -4305,21 +4579,21 @@ void cmGlobalReprobuildGenerator::WriteProviderMetadata()
           action.CompileCommand =
             cmStrCat(mf->GetSafeDefinition(ReprobuildCompilerVar(lang)), " ",
                      cmJoin(args, " "));
+          // A line too long for the command line goes to a response file
+          // when the compiler reads one, and the process is started with it
+          // (`@<rsp>`, nvcc's `--options-file <rsp>`). A compiler that reads
+          // none keeps its full line and declares no response file.
           std::string const argsText = cmJoin(args, " ");
-          if (argsText.size() > 2048) {
-            action.ResponseFile = cmStrCat("CMakeFiles/reprobuild/rsp/",
-                                           action.Var, "-", nextRsp++, ".rsp");
-            std::string const rspFull =
-              cmStrCat(binaryDir, "/", action.ResponseFile);
-            if (!ReprobuildWriteResponseFile(rspFull, args)) {
-              this->GetCMakeInstance()->IssueMessage(
-                MessageType::FATAL_ERROR,
-                cmStrCat("Could not write Reprobuild response file: ",
-                         rspFull));
+          ReprobuildResponseFileReader const compileRsp =
+            ReprobuildCompileResponseFileReader(mf, lang);
+          if (argsText.size() > 2048 && compileRsp.Reads) {
+            std::string rspError;
+            if (!ReprobuildMoveLineToResponseFile(action, args, compileRsp,
+                                                  binaryDir, rspError)) {
+              this->GetCMakeInstance()->IssueMessage(MessageType::FATAL_ERROR,
+                                                     rspError);
               return;
             }
-            action.Args = { cmStrCat("@", action.ResponseFile) };
-            action.Inputs.push_back(action.ResponseFile);
           }
           if (target.HcrEnabled && (lang == "C" || lang == "CXX")) {
             target.HcrObjects.push_back(
@@ -5455,52 +5729,32 @@ void cmGlobalReprobuildGenerator::WriteProviderMetadata()
           finalDep = postBuild.Id;
         }
         std::string const linkArgsText = cmJoin(target.LinkAction.Args, " ");
-        // The line runs link.exe, lld-link, lib.exe or llvm-lib: a LINKER-mode
-        // link, or the archive of an MSVC-frontend toolchain. These read a
-        // response file with the Windows command-line rules.
-        bool const msvcToolLine = type == cmStateEnums::STATIC_LIBRARY
-          ? ReprobuildDriverHasMsvcFrontend(lg->GetMakefile(), linkLang)
+        // A line too long for the command line goes to a response file when
+        // the program the edge runs reads one, quoted by that program's
+        // rules, and the process is started with it. That program is the
+        // MSVC linker or librarian, or the compiler driver of the link
+        // language; the archive of any other toolchain runs `ar`, whose line
+        // the generator keeps whole. A program that reads none (a CUDA link)
+        // keeps its full line and declares no response file.
+        bool const msvcFrontend =
+          ReprobuildDriverHasMsvcFrontend(lg->GetMakefile(), linkLang);
+        bool const archiveRunsAr =
+          type == cmStateEnums::STATIC_LIBRARY && !msvcFrontend;
+        // The MSVC librarian, or the MSVC linker of a LINKER-mode link.
+        bool const msvcTool = type == cmStateEnums::STATIC_LIBRARY
+          ? msvcFrontend
           : ReprobuildLinkRunsMsvcLinker(lg->GetMakefile(), linkLang);
-        // The programs known to read `@<file>`: those, and the GCC-compatible
-        // drivers that link these languages. The link driver of another
-        // language (CUDA, Swift, ...) keeps its full inline line.
-        bool const lineReadsResponseFile = msvcToolLine ||
-          (type != cmStateEnums::STATIC_LIBRARY &&
-           (linkLang == "C" || linkLang == "CXX" || linkLang == "OBJC" ||
-            linkLang == "OBJCXX" || linkLang == "Fortran"));
-        if ((type != cmStateEnums::STATIC_LIBRARY || msvcToolLine) &&
-            linkArgsText.size() > 2048) {
-          std::vector<std::string> rspArgs = target.LinkAction.Args;
-          // Named after the action id, which is stable, rather than the Nim
-          // variable, whose ordinal shifts when a target is added earlier in
-          // the project: the path is on the command line and a declared
-          // input, so a renamed file would change this edge's key.
-          target.LinkAction.ResponseFile = cmStrCat(
-            "CMakeFiles/reprobuild/rsp/", target.LinkAction.Id, ".rsp");
-          std::string const rspFull =
-            cmStrCat(binaryDir, "/", target.LinkAction.ResponseFile);
-          if (!ReprobuildWriteResponseFile(rspFull, rspArgs, msvcToolLine)) {
-            this->GetCMakeInstance()->IssueMessage(
-              MessageType::FATAL_ERROR,
-              cmStrCat("Could not write Reprobuild response file: ", rspFull));
+        ReprobuildResponseFileReader const linkRsp =
+          ReprobuildLinkResponseFileReader(lg->GetMakefile(), linkLang, type,
+                                           msvcTool);
+        if (!archiveRunsAr && linkRsp.Reads && linkArgsText.size() > 2048) {
+          std::vector<std::string> const rspArgs = target.LinkAction.Args;
+          std::string rspError;
+          if (!ReprobuildMoveLineToResponseFile(
+                target.LinkAction, rspArgs, linkRsp, binaryDir, rspError)) {
+            this->GetCMakeInstance()->IssueMessage(MessageType::FATAL_ERROR,
+                                                   rspError);
             return;
-          }
-          target.LinkAction.Args = { cmStrCat(
-            "@", target.LinkAction.ResponseFile) };
-          target.LinkAction.Inputs.push_back(target.LinkAction.ResponseFile);
-          // The inline argv was copied from the arguments before they moved
-          // into the response file. It ends with them (after the program,
-          // and after the import-library step's `--`), so the same tail is
-          // replaced: the process is started with `@<rsp>`, not with the
-          // line the response file exists to keep off the command line.
-          if (lineReadsResponseFile && target.LinkAction.Inline &&
-              target.LinkAction.InlineArgv.size() > rspArgs.size() &&
-              std::equal(rspArgs.rbegin(), rspArgs.rend(),
-                         target.LinkAction.InlineArgv.rbegin())) {
-            target.LinkAction.InlineArgv.resize(
-              target.LinkAction.InlineArgv.size() - rspArgs.size());
-            target.LinkAction.InlineArgv.push_back(
-              target.LinkAction.Args.front());
           }
         }
 
