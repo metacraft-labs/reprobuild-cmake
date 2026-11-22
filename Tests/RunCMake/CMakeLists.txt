@@ -250,6 +250,16 @@ add_test(NAME e2e_cmake_reprobuild_generator_configure_smoke
     # `check_provider_metadata` -- unrunnable here.
     -DTEST_REPROBUILD_REPRO=${_ReprobuildBin}
     -P ${_ReprobuildGeneratorTestDir}/e2e.cmake)
+# A build gives every action the same id whether it reads reprobuild.nim or
+# the trycompile.rbsz envelope.
+add_test(NAME e2e_cmake_reprobuild_graph_descriptions_agree
+  COMMAND ${CMAKE_CMAKE_COMMAND}
+    -DTEST_CMAKE=${CMAKE_CMAKE_COMMAND}
+    -DTEST_REPROBUILD_REPRO=${_ReprobuildBin}
+    -DTEST_REPROBUILD_SOURCE_ROOT=${_ReprobuildSourceRoot}
+    -DTEST_C_COMPILER=${CMAKE_C_COMPILER}
+    -DTEST_BINARY_ROOT=${_ReprobuildGeneratorTestBin}/graph-descriptions-agree
+    -P ${_ReprobuildGeneratorTestDir}/graph-descriptions-agree.cmake)
 add_test(NAME e2e_cmake_reprobuild_msvc_import_library_metadata
   COMMAND ${CMAKE_CMAKE_COMMAND}
     -DCMAKE_COMMAND=${CMAKE_CMAKE_COMMAND}

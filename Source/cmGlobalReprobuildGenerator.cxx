@@ -6410,22 +6410,23 @@ void cmGlobalReprobuildGenerator::WriteProviderMetadata()
         writeAction(action);
         actionVars.push_back(action.Var);
       }
-      if (target.HasLinkAction && target.PreBuildActions.empty() &&
-          target.CustomActions.empty() && target.PreLinkActions.empty() &&
-          target.SymlinkActions.empty() && target.PostBuildActions.empty()) {
-        provider << "    let " << target.Var << " = target("
-                 << ReprobuildEscape(target.Name) << ", "
-                 << target.LinkAction.Var << ")\n";
-      } else {
-        provider << "    let " << target.Var << " = target("
-                 << ReprobuildEscape(target.Name) << ", @[";
-        char const* actionSep = "";
-        for (std::string const& actionVar : actionVars) {
-          provider << actionSep << actionVar;
-          actionSep = ", ";
-        }
-        provider << "])\n";
+      // The target names every action it owns, in the order
+      // `pushTarget` lists them in the `trycompile.rbsz` envelope, so both
+      // descriptions declare the same members (Provider-Compile-Tiering.md
+      // §"2c"). This matters beyond selection: a `target(...)` naming
+      // exactly one action renames that action to the target's name, and
+      // the action id is part of its cache key. Naming a plain library's or
+      // executable's link alone here renamed `link-<target>` to `<target>`
+      // on this route only, so a build that read this file and one that
+      // read the envelope keyed the same link under two ids.
+      provider << "    let " << target.Var << " = target("
+               << ReprobuildEscape(target.Name) << ", @[";
+      char const* actionSep = "";
+      for (std::string const& actionVar : actionVars) {
+        provider << actionSep << actionVar;
+        actionSep = ", ";
       }
+      provider << "])\n";
     }
   }
   if (multiConfig) {
@@ -6675,7 +6676,10 @@ void cmGlobalReprobuildGenerator::WriteProviderMetadata()
     // declaration order ``writeAction`` uses when emitting reprobuild.nim.
     // Skipping the loop's action-list construction would let the direct
     // provider miss pre-build / pre-link / symlink / post-build steps that
-    // CMake legitimately attaches to library targets.
+    // CMake legitimately attaches to library targets. Each descriptor's
+    // members are exactly the members the same target's `target(...)`
+    // names in reprobuild.nim: a one-member target renames its action, so
+    // any difference would give an action a different id on each route.
     std::vector<ReprobuildTryCompileTargetDescriptor> directTargets;
     auto pushTarget = [&](ReprobuildTarget const& target) {
       ReprobuildTryCompileTargetDescriptor descriptor;
