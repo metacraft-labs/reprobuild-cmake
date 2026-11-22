@@ -346,6 +346,15 @@ if(CMAKE_HOST_UNIX)
         -DTEST_C_COMPILER=${_ReprobuildLongGcc}
         -DTEST_BINARY_ROOT=${_ReprobuildGeneratorTestBin}/long-lines-response-file-ispc
         -P ${_ReprobuildGeneratorTestDir}/long-lines-response-file.cmake)
+    # An ISPC target configures with CMake's own ISPC module settings and
+    # reads ispc's depfile.
+    add_test(NAME e2e_cmake_reprobuild_ispc_module_defaults
+      COMMAND ${CMAKE_CMAKE_COMMAND}
+        -DTEST_CMAKE=${CMAKE_CMAKE_COMMAND}
+        -DTEST_ISPC=${_ReprobuildLongIspc}
+        -DTEST_C_COMPILER=${_ReprobuildLongGcc}
+        -DTEST_BINARY_ROOT=${_ReprobuildGeneratorTestBin}/ispc-module-defaults
+        -P ${_ReprobuildGeneratorTestDir}/ispc-module-defaults.cmake)
   endif()
   find_program(_ReprobuildLongSwiftc NAMES swiftc)
   if(_ReprobuildLongSwiftc)

@@ -413,12 +413,7 @@ target_include_directories(app PRIVATE \${long_dirs} \"\${probe_dir}\")
     "-DCMAKE_C_COMPILER=${TEST_C_COMPILER}" -DCMAKE_C_COMPILER_FORCED=TRUE
     -DCMAKE_C_COMPILER_ID=GNU -DCMAKE_C_COMPILER_VERSION=15.0
     "-DCMAKE_ISPC_COMPILER=${TEST_ISPC}" -DCMAKE_ISPC_COMPILER_FORCED=TRUE
-    -DCMAKE_ISPC_COMPILER_ID=Intel -DCMAKE_ISPC_COMPILER_VERSION=1.30
-    # Intel-ISPC.cmake sets these for the Makefile generators only, and the
-    # Reprobuild generator refuses an ISPC compile without it
-    # (reprobuild-pm issues/2026-11-21-reprobuild-cmake-refuses-ispc-unless-
-    # the-project-sets-ispc-depends-use-compiler.md).
-    -DCMAKE_ISPC_DEPENDS_USE_COMPILER=TRUE -DCMAKE_ISPC_DEPFILE_FORMAT=gcc)
+    -DCMAKE_ISPC_COMPILER_ID=Intel -DCMAKE_ISPC_COMPILER_VERSION=1.30)
   actions_matching("^compile-app-.*unit\\.ispc\\.o$" 1 compile)
   expect_response_file("${compile}" "${TEST_ISPC}" "@")
   # ispc's reader toggles a quoted run at each `"` or `'` and has no escape

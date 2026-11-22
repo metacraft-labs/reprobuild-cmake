@@ -1114,14 +1114,20 @@ bool ReprobuildWriteCommandScript(std::string const& path,
   return ReprobuildFinalizeWrapper(path);
 }
 
+// Whether the compiler of `lang` writes the GCC-format depfile the compile
+// action reads as its dependency evidence.
 bool ReprobuildCompilerUsesMakeDepfile(cmMakefile const* mf,
                                        std::string const& lang)
 {
-  if (lang == "Fortran") {
+  // The generator asks for the depfile itself: Fortran through its scan
+  // action, ISPC with `-M -MT <obj> -MF <dep>` on the compile line. ispc
+  // (the only ISPC compiler) writes a GCC-format depfile on every
+  // generator, so CMAKE_ISPC_DEPENDS_USE_COMPILER is not consulted:
+  // Compiler/Intel-ISPC.cmake sets it, and CMAKE_ISPC_DEPFILE_FORMAT, for the
+  // Makefile generators only, where it chooses between ispc's depfile and
+  // CMake's own scanner. This generator has no scanner to choose.
+  if (lang == "Fortran" || lang == "ISPC") {
     return true;
-  }
-  if (lang == "ISPC") {
-    return mf->GetDefinition("CMAKE_ISPC_DEPENDS_USE_COMPILER").IsOn();
   }
   std::string const id =
     mf->GetSafeDefinition(cmStrCat("CMAKE_", lang, "_COMPILER_ID"));
@@ -4064,7 +4070,9 @@ void cmGlobalReprobuildGenerator::WriteProviderMetadata()
               MessageType::FATAL_ERROR,
               cmStrCat(
                 "The Reprobuild generator M3 slice supports depfiles "
-                "only for GCC-compatible C/CXX compilers; compiler id '",
+                "only for compilers that write a GCC-format depfile "
+                "(GCC-compatible C/CXX/CUDA compilers, ispc); ", lang,
+                " compiler id '",
                 mf->GetSafeDefinition(
                   cmStrCat("CMAKE_", lang, "_COMPILER_ID")),
                 "' is not supported."));
