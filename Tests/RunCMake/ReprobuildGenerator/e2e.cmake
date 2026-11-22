@@ -434,6 +434,16 @@ function(stop_runquota pid)
   endif()
 endfunction()
 
+# The native build-tool options every `run_build*` helper passes after `--`.
+# A successful `repro build` writes its build report, and prints the
+# `buildReport: <path>` line `report_path_from_output` reads, only when asked
+# with `--write-report` (reprobuild-pm spec/CLI/build.md, "Persist"). The
+# generator appends the options after `--` to the `repro build` it runs
+# (reprobuild-pm spec/CMake-Reprobuild-Generator.md, "Generator Selection And
+# Build Command"), so every build these helpers run leaves the report the
+# modes read their scheduling, cache and RunQuota facts from.
+set(REPROBUILD_E2E_BUILD_TOOL_OPTIONS -- --write-report)
+
 function(run_build binary_dir target socket out_var)
   foreach(var IN ITEMS TEST_REPROBUILD_REPRO TEST_REPROBUILD_SOURCE_ROOT)
     if(NOT DEFINED ${var} OR "${${var}}" STREQUAL "")
@@ -451,6 +461,7 @@ function(run_build binary_dir target socket out_var)
   if(NOT "${target}" STREQUAL "")
     list(APPEND command --target "${target}")
   endif()
+  list(APPEND command ${REPROBUILD_E2E_BUILD_TOOL_OPTIONS})
   execute_process(
     COMMAND ${command}
     OUTPUT_VARIABLE stdout
@@ -556,6 +567,7 @@ function(run_build_config binary_dir config target socket out_var)
   if(NOT "${target}" STREQUAL "")
     list(APPEND command --target "${target}")
   endif()
+  list(APPEND command ${REPROBUILD_E2E_BUILD_TOOL_OPTIONS})
   execute_process(
     COMMAND ${command}
     OUTPUT_VARIABLE stdout
@@ -589,6 +601,7 @@ function(run_build_expect_failure binary_dir target socket out_var)
   if(NOT "${target}" STREQUAL "")
     list(APPEND command --target "${target}")
   endif()
+  list(APPEND command ${REPROBUILD_E2E_BUILD_TOOL_OPTIONS})
   execute_process(
     COMMAND ${command}
     OUTPUT_VARIABLE stdout
@@ -2680,6 +2693,80 @@ elseif(TEST_MODE STREQUAL "source_flags_subdir_link")
       "stderr:\n${source_flags_stderr}\n"
       "build output:\n${source_flags_output}")
   endif()
+elseif(TEST_MODE STREQUAL "build_tool_options_reach_repro")
+  # `cmake --build <dir> -- <options>` hands the options after `--` to the
+  # native build tool (https://cmake.org/cmake/help/latest/manual/cmake.1.html#build-a-project).
+  # For this generator that tool is `repro build`, and the options are how a
+  # caller asks for what `repro build` does only on request: a successful
+  # build writes its report only under `--write-report`. The generator used
+  # to drop them, so no `cmake --build` could ask for the report, and every
+  # mode that reads one failed with "Build output did not include
+  # buildReport path" (reprobuild-pm issues/2026-11-21-reprobuild-cmake-e2e-
+  # modes-expect-a-build-report-line-the-engine-no-longer-prints.md).
+  # Spec: reprobuild-pm spec/CMake-Reprobuild-Generator.md, "Generator
+  # Selection And Build Command".
+  set(explicit_report "${TEST_BINARY_ROOT}/explicit-build-report.json")
+  start_runquota("${TEST_BINARY_ROOT}" runquota_socket runquota_pid)
+  set(build_env
+    "${CMAKE_COMMAND}" -E env
+      "RUNQUOTA_SOCKET=${runquota_socket}"
+      "REPROBUILD_WORK_ROOT=${binary_dir}/CMakeFiles/reprobuild/work-root"
+      "REPROBUILD_REPRO=${TEST_REPROBUILD_REPRO}"
+      "REPROBUILD_SOURCE_ROOT=${TEST_REPROBUILD_SOURCE_ROOT}")
+  # Control: without options the build succeeds and writes no report, so
+  # the `buildReport:` line below can only come from the forwarded option.
+  execute_process(
+    COMMAND ${build_env} "${CMAKE_COMMAND}" --build "${binary_dir}" --target hello
+    OUTPUT_VARIABLE plain_stdout
+    ERROR_VARIABLE plain_stderr
+    RESULT_VARIABLE plain_result
+    ENCODING UTF8)
+  set(plain_output "${plain_stdout}\n${plain_stderr}")
+  if(NOT plain_result EQUAL 0)
+    stop_runquota("${runquota_pid}")
+    message(FATAL_ERROR "Build without build-tool options failed.\n${plain_output}")
+  endif()
+  assert_not_contains("${plain_output}" "buildReport:" "build without build-tool options")
+  # The option reaches `repro build`: the report is written where it says.
+  execute_process(
+    COMMAND ${build_env} "${CMAKE_COMMAND}" --build "${binary_dir}" --target hello
+      -- "--write-report=${explicit_report}"
+    OUTPUT_VARIABLE opt_stdout
+    ERROR_VARIABLE opt_stderr
+    RESULT_VARIABLE opt_result
+    ENCODING UTF8)
+  set(opt_output "${opt_stdout}\n${opt_stderr}")
+  if(NOT opt_result EQUAL 0)
+    stop_runquota("${runquota_pid}")
+    message(FATAL_ERROR "Build with --write-report failed.\n${opt_output}")
+  endif()
+  report_path_from_output("${opt_output}" opt_report_path)
+  if(NOT opt_report_path STREQUAL explicit_report)
+    stop_runquota("${runquota_pid}")
+    message(FATAL_ERROR
+      "buildReport names '${opt_report_path}', not the requested "
+      "'${explicit_report}'.\n${opt_output}")
+  endif()
+  assert_file_exists("${explicit_report}" "requested build report")
+  file(READ "${explicit_report}" explicit_report_text)
+  assert_contains("${explicit_report_text}" "\"schemaId\": \"reprobuild.build.report.v1\"" "requested build report")
+  assert_contains("${explicit_report_text}" "\"id\": \"link-hello\"" "requested build report")
+  # The options are not filtered: one `repro build` rejects fails the build.
+  execute_process(
+    COMMAND ${build_env} "${CMAKE_COMMAND}" --build "${binary_dir}" --target hello
+      -- --reprobuild-e2e-no-such-option
+    OUTPUT_VARIABLE bad_stdout
+    ERROR_VARIABLE bad_stderr
+    RESULT_VARIABLE bad_result
+    ENCODING UTF8)
+  stop_runquota("${runquota_pid}")
+  set(bad_output "${bad_stdout}\n${bad_stderr}")
+  if(bad_result EQUAL 0)
+    message(FATAL_ERROR
+      "A build-tool option `repro build` does not know was dropped: the build "
+      "succeeded.\n${bad_output}")
+  endif()
+  assert_contains("${bad_output}" "--reprobuild-e2e-no-such-option" "rejected build-tool option")
 elseif(TEST_MODE STREQUAL "actions_use_runquota")
   start_runquota("${TEST_BINARY_ROOT}" runquota_socket runquota_pid)
   run_build("${binary_dir}" "hello" "${runquota_socket}" build_output)
@@ -2688,7 +2775,8 @@ elseif(TEST_MODE STREQUAL "actions_use_runquota")
   file(READ "${report_path}" report)
   foreach(expected IN ITEMS
       "\"id\": \"compile-hello"
-      "\"id\": \"hello\""
+      # The target's link action is named `link-<target>`.
+      "\"id\": \"link-hello\""
       "\"status\": \"asSucceeded\""
       "\"launched\": true"
       "\"runQuotaBackend\": \"posix-fork-exec-poll\""
@@ -2762,7 +2850,10 @@ elseif(TEST_MODE STREQUAL "depfile_header_rebuild")
   stop_runquota("${runquota_pid}")
   assert_contains("${second_output}" "a.c.o status=asSucceeded launched=true" "header rebuild output")
   assert_not_contains("${second_output}" "b.c.o status=asSucceeded launched=true" "header rebuild output")
-  assert_contains("${second_output}" "b.c.o status=asCacheHit launched=false" "header rebuild output")
+  # b.c.o's object is still on disk, so the skip is `asUpToDate`;
+  # `asCacheHit` is reserved for outputs materialized from the CAS
+  # (reprobuild-pm spec/Build-Engine-And-Scheduler.md, the two skip statuses).
+  assert_contains("${second_output}" "b.c.o status=asUpToDate launched=false" "header rebuild output")
 elseif(TEST_MODE STREQUAL "response_file_identity")
   set(rsp_source_dir "${TEST_BINARY_ROOT}/rsp-src")
   set(rsp_binary_dir "${TEST_BINARY_ROOT}/rsp-build")
@@ -3037,7 +3128,9 @@ elseif(TEST_MODE STREQUAL "custom_depfile_hidden_input")
   stop_runquota("${runquota_pid}")
   assert_contains("${second_output}" "custom-command-depgen" "custom depfile rebuild output")
   assert_contains("${second_output}" "generated.c.o status=asSucceeded launched=true" "custom depfile rebuild output")
-  assert_contains("${second_output}" "main.c.o status=asCacheHit launched=false" "custom depfile rebuild output")
+  # main.c.o's object is still on disk: `asUpToDate`, not `asCacheHit`
+  # (reprobuild-pm spec/Build-Engine-And-Scheduler.md, the two skip statuses).
+  assert_contains("${second_output}" "main.c.o status=asUpToDate launched=false" "custom depfile rebuild output")
   report_path_from_output("${second_output}" second_report_path)
   file(READ "${second_report_path}" second_report)
   assert_contains("${second_report}" "\"id\": \"custom-command-depgen" "custom depfile report")

@@ -6962,7 +6962,6 @@ cmGlobalReprobuildGenerator::GenerateBuildCommand(
 {
   (void)jobs;
   (void)verbose;
-  (void)makeOptions;
 
   bool cleanTarget = buildOptions.Clean;
   for (std::string const& targetName : targetNames) {
@@ -7082,6 +7081,18 @@ cmGlobalReprobuildGenerator::GenerateBuildCommand(
     } else {
       makeCommand.Add("--log=actions");
     }
+    // The native build-tool options: what `cmake --build <dir> -- <opts>`
+    // hands the build tool, which every generator passes through and the
+    // Ninja generator appends to its `ninja` line
+    // (https://cmake.org/cmake/help/latest/manual/cmake.1.html#build-a-project).
+    // They go last, in the order given, and unfiltered: `repro build`
+    // judges them, and an option it rejects fails the build with its own
+    // diagnostic. This is how a caller asks for what `repro build` does
+    // only on request, such as `--write-report` (reprobuild-pm
+    // spec/CMake-Reprobuild-Generator.md, "Generator Selection And Build
+    // Command"). The clean command above is CMake's own launcher, not
+    // `repro`, and takes none of them.
+    makeCommand.Add(makeOptions.begin(), makeOptions.end());
     commands.emplace_back(std::move(makeCommand));
   }
   return commands;
