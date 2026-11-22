@@ -292,18 +292,27 @@ target_link_options(${dir} PRIVATE -static-libgcc)
   actions_matching("^compile-app-.*main\\.c\\.o$" 1 main_compile)
   run_action("${main_compile}" PATH ${run_path})
   # Fortran compiles through its tool profile, which runs gfortran with the
-  # arguments: `@<rsp>`. The action is not run: it compiles the scan step's
-  # `<obj>.ddi.i`, which gfortran takes for preprocessed C whatever the
-  # response file says (reprobuild-pm issues/2026-11-21-reprobuild-cmake-
-  # fortran-compile-hands-gfortran-a-file-it-reads-as-c.md). gfortran reads
-  # its response file with GCC's reader, run above through gcc and g++.
+  # arguments: `@<rsp>`. The compile reads the source its scan step
+  # preprocessed, so the scan's wrapper runs first.
   actions_matching("^compile-funit-.*unit\\.f90\\.o$" 1 fortran)
   expect_response_file("${fortran}" "" "@")
   file(STRINGS "${binary}/CMakeFiles/reprobuild/rsp/${fortran}.rsp" fortran_rsp)
   list(GET fortran_rsp -1 fortran_input)
-  if(NOT fortran_input MATCHES "unit\\.f90\\.o\\.ddi\\.i$")
+  if(NOT fortran_input MATCHES "unit\\.f90-pp\\.f90$")
     message(FATAL_ERROR "The Fortran response file does not hold the compile's line: ${fortran_rsp}")
   endif()
+  file(GLOB fortran_scan "${binary}/CMakeFiles/reprobuild/bin/*scan_funit_*")
+  list(LENGTH fortran_scan fortran_scan_count)
+  if(NOT fortran_scan_count EQUAL 1)
+    message(FATAL_ERROR "Expected one Fortran scan wrapper: ${fortran_scan}")
+  endif()
+  string(JOIN ":" path ${run_path})
+  execute_process(COMMAND ${tool_env} "PATH=${path}" "${fortran_scan}" WORKING_DIRECTORY "${binary}"
+    RESULT_VARIABLE result OUTPUT_VARIABLE out ERROR_VARIABLE err)
+  if(NOT result EQUAL 0)
+    message(FATAL_ERROR "The Fortran scan failed (${result}):\n${out}\n${err}")
+  endif()
+  run_action("${fortran}" PROGRAM "${TEST_GFORTRAN}" PATH ${run_path})
   # The C++ unit makes C++ the link language.
   expect_response_file(link-app "${TEST_GXX}" "@")
   run_action(link-app PATH ${run_path} CREATES app)

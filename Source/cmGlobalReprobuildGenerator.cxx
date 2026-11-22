@@ -634,6 +634,39 @@ std::string ReprobuildRelativeTo(std::string const& root,
   return normalizedPath;
 }
 
+// The path a Fortran source is preprocessed to, which its compile then
+// reads. It is named as the Ninja generator names it
+// (cmNinjaTargetGenerator::GetPreprocessedFilePath): the object path with
+// its object extension replaced by `-pp.<source extension>`, so that the
+// compiler, which picks the language from the extension, reads it as
+// Fortran in the source's own form (fixed or free). An extension beginning
+// with `F` is lowered and `.fpp` becomes `.f`, because some compilers
+// preprocess a file so named, and this one is already preprocessed.
+// (`<obj>.ddi.i`, the name this generator used before, is preprocessed C to
+// gfortran.)
+std::string ReprobuildFortranPreprocessedPath(std::string const& objRel,
+                                              std::string const& objName,
+                                              std::string const& objExt,
+                                              std::string const& sourceExt)
+{
+  std::string ppExt = sourceExt;
+  if (cmHasPrefix(ppExt, 'F')) {
+    ppExt = cmSystemTools::LowerCase(ppExt);
+  }
+  if (ppExt == "fpp") {
+    ppExt = "f";
+  }
+  // objRel ends with objName (it is the object directory, made relative to
+  // the build directory, followed by the object name); strip the object
+  // extension where the name carries it.
+  std::string stem = objRel;
+  if (!objExt.empty() && cmHasSuffix(objName, objExt) &&
+      cmHasSuffix(stem, objExt)) {
+    stem.resize(stem.size() - objExt.size());
+  }
+  return cmStrCat(stem, "-pp.", ppExt);
+}
+
 void ReprobuildAppendParsed(std::vector<std::string>& out,
                             std::string const& flags)
 {
@@ -4194,6 +4227,9 @@ void cmGlobalReprobuildGenerator::WriteProviderMetadata()
 
           std::vector<std::string> includes;
           lg->GetIncludeDirectories(includes, gt, lang, config);
+          // Where the include flags start: a Fortran compile puts the
+          // source's own directory first among them (below).
+          std::size_t const includeArgsBegin = args.size();
           for (std::string const& include : includes) {
             args.push_back(cmStrCat("-I", include));
           }
@@ -4253,8 +4289,16 @@ void cmGlobalReprobuildGenerator::WriteProviderMetadata()
             ReprobuildAppendHcrCompilePolicy(args);
           }
 
+          // The file a Fortran source is preprocessed to, and the input of
+          // its compile (see ReprobuildFortranPreprocessedPath).
+          std::string const fortranPreprocessedRel = lang == "Fortran"
+            ? ReprobuildFortranPreprocessedPath(
+                objRel, gt->GetObjectName(source),
+                this->GetLanguageOutputExtension(*source),
+                source->GetExtension())
+            : std::string();
           if (lang == "Fortran") {
-            std::string const ppRel = cmStrCat(objRel, ".ddi.i");
+            std::string const& ppRel = fortranPreprocessedRel;
             std::string const ddiRel = cmStrCat(objRel, ".ddi");
             std::string const scanDepRel = cmStrCat(ppRel, ".d");
 
@@ -4311,6 +4355,23 @@ void cmGlobalReprobuildGenerator::WriteProviderMetadata()
                                           objRel, configSuffix)) });
             target.CustomActions.push_back(std::move(scan));
 
+            // The compile reads the scan's preprocessed source, as the Ninja
+            // generator's does (cmNinjaTargetGenerator::WriteObjectBuildStatement
+            // when the source is explicitly preprocessed): with the
+            // language's post-process flag (`-fpreprocessed` for GNU), and
+            // with the original source's directory first among the include
+            // directories, so that a Fortran INCLUDE line, which the
+            // preprocessor leaves to the compiler, still finds a file beside
+            // the source rather than beside the preprocessed copy.
+            args.insert(
+              args.begin() + static_cast<std::ptrdiff_t>(includeArgsBegin),
+              cmStrCat("-I",
+                       cmSystemTools::GetParentDirectory(
+                         source->GetFullPath())));
+            ReprobuildAppendParsed(
+              args,
+              mf->GetSafeDefinition(
+                cmStrCat("CMAKE_", lang, "_POSTPROCESS_FLAG")));
             args.push_back("-o");
             args.push_back(objRel);
             args.push_back("-c");
@@ -4510,7 +4571,7 @@ void cmGlobalReprobuildGenerator::WriteProviderMetadata()
             }
           }
           if (lang == "Fortran") {
-            action.Inputs = { cmStrCat(objRel, ".ddi.i") };
+            action.Inputs = { fortranPreprocessedRel };
           } else {
             action.Inputs = { sourcePath };
           }

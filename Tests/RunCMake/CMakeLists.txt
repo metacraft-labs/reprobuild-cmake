@@ -324,6 +324,15 @@ if(CMAKE_HOST_UNIX)
         -DTEST_BINARY_ROOT=${_ReprobuildGeneratorTestBin}/long-lines-response-file-gnu
         -P ${_ReprobuildGeneratorTestDir}/long-lines-response-file.cmake)
   endif()
+  # A Fortran compile reads its scan's preprocessed source as Fortran.
+  if(_ReprobuildLongGfortran)
+    add_test(NAME e2e_cmake_reprobuild_fortran_preprocessed_compile
+      COMMAND ${CMAKE_CMAKE_COMMAND}
+        -DTEST_CMAKE=${CMAKE_CMAKE_COMMAND}
+        -DTEST_GFORTRAN=${_ReprobuildLongGfortran}
+        -DTEST_BINARY_ROOT=${_ReprobuildGeneratorTestBin}/fortran-preprocessed-compile
+        -P ${_ReprobuildGeneratorTestDir}/fortran-preprocessed-compile.cmake)
+  endif()
   find_program(_ReprobuildLongClang NAMES clang)
   find_program(_ReprobuildLongClangxx NAMES clang++)
   if(_ReprobuildLongClang AND _ReprobuildLongClangxx)

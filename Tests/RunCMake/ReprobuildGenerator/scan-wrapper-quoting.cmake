@@ -127,7 +127,9 @@ target_compile_definitions(f PRIVATE [[PROBE_WORD=${probe_word}]])
   configure("-DCMAKE_Fortran_COMPILER=${TEST_GFORTRAN}"
     -DCMAKE_Fortran_COMPILER_FORCED=TRUE -DCMAKE_Fortran_COMPILER_ID=GNU
     -DCMAKE_Fortran_COMPILER_VERSION=15.0)
-  set(pp "CMakeFiles/f.dir/f.F90.o.ddi.i")
+  # The preprocessed source, named for its compile to read as free-form
+  # Fortran (see fortran-preprocessed-compile.cmake).
+  set(pp "CMakeFiles/f.dir/f.F90-pp.f90")
   run_scan("*_scan_f_*" CREATES "${pp}" "CMakeFiles/f.dir/f.F90.o.ddi")
   file(READ "${binary}/${pp}" preprocessed)
   # The header was found: the include directory reached gfortran whole.

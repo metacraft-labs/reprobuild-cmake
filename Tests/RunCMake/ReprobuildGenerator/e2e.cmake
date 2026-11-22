@@ -3438,11 +3438,21 @@ elseif(TEST_MODE STREQUAL "fortran_dyndep_modules")
   foreach(expected IN ITEMS
       "scan-fapp"
       "dyndep-fapp-Fortran"
-      "cmake_ninja_depends"
-      "cmake_ninja_dyndep"
       "dynamicDepsFile")
     assert_contains("${ftn_provider}" "${expected}" "Fortran dyndep provider")
   endforeach()
+  # The scanner and the collator are CMake's own command modes, run from the
+  # scan's and the dyndep step's wrapper scripts.
+  find_module_scan_wrapper("${ftn_binary_dir}" "mathmod.f90" ftn_scan_wrapper)
+  file(READ "${ftn_scan_wrapper}" ftn_scan_wrapper_content)
+  assert_contains("${ftn_scan_wrapper_content}" "cmake_ninja_depends" "Fortran scan wrapper")
+  file(GLOB ftn_dyndep_wrappers "${ftn_binary_dir}/CMakeFiles/reprobuild/bin/*dyndep_fapp_Fortran*")
+  list(LENGTH ftn_dyndep_wrappers ftn_dyndep_wrapper_count)
+  if(NOT ftn_dyndep_wrapper_count EQUAL 1)
+    message(FATAL_ERROR "Expected one Fortran dyndep wrapper, found ${ftn_dyndep_wrapper_count}: ${ftn_dyndep_wrappers}")
+  endif()
+  file(READ "${ftn_dyndep_wrappers}" ftn_dyndep_wrapper_content)
+  assert_contains("${ftn_dyndep_wrapper_content}" "cmake_ninja_dyndep" "Fortran dyndep wrapper")
 
   start_runquota("${TEST_BINARY_ROOT}" runquota_socket runquota_pid)
   run_build("${ftn_binary_dir}" "fapp" "${runquota_socket}" ftn_output)
