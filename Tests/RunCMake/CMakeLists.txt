@@ -358,6 +358,33 @@ if(CMAKE_HOST_UNIX)
         -P ${_ReprobuildGeneratorTestDir}/long-lines-response-file.cmake)
   endif()
 endif()
+# A Fortran or C++ module scan runs each of the compile's arguments as one
+# argument, whatever characters it holds: one test per scanner, each
+# registered where its tools are installed.
+if(CMAKE_HOST_UNIX)
+  find_program(_ReprobuildScanGfortran NAMES gfortran)
+  if(_ReprobuildScanGfortran)
+    add_test(NAME e2e_cmake_reprobuild_scan_wrapper_quoting_fortran
+      COMMAND ${CMAKE_CMAKE_COMMAND}
+        -DTEST_CMAKE=${CMAKE_CMAKE_COMMAND}
+        -DTEST_TOOLCHAIN=fortran
+        -DTEST_GFORTRAN=${_ReprobuildScanGfortran}
+        -DTEST_BINARY_ROOT=${_ReprobuildGeneratorTestBin}/scan-wrapper-quoting-fortran
+        -P ${_ReprobuildGeneratorTestDir}/scan-wrapper-quoting.cmake)
+  endif()
+  find_program(_ReprobuildScanClangxx NAMES clang++)
+  find_program(_ReprobuildScanDeps NAMES clang-scan-deps)
+  if(_ReprobuildScanClangxx AND _ReprobuildScanDeps)
+    add_test(NAME e2e_cmake_reprobuild_scan_wrapper_quoting_cxx_modules
+      COMMAND ${CMAKE_CMAKE_COMMAND}
+        -DTEST_CMAKE=${CMAKE_CMAKE_COMMAND}
+        -DTEST_TOOLCHAIN=cxx-modules
+        -DTEST_CLANGXX=${_ReprobuildScanClangxx}
+        -DTEST_CLANG_SCAN_DEPS=${_ReprobuildScanDeps}
+        -DTEST_BINARY_ROOT=${_ReprobuildGeneratorTestBin}/scan-wrapper-quoting-cxx-modules
+        -P ${_ReprobuildGeneratorTestDir}/scan-wrapper-quoting.cmake)
+  endif()
+endif()
 if(_ReprobuildMsvcClang AND CMAKE_HOST_WIN32)
   add_test(NAME e2e_cmake_reprobuild_msvc_import_library_build
     COMMAND ${CMAKE_CMAKE_COMMAND}

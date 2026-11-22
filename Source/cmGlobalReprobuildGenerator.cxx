@@ -888,6 +888,22 @@ std::string ReprobuildShellSingleQuote(std::string const& value)
   return out;
 }
 
+// Each of `args` single-quoted for POSIX sh, joined by spaces: the arguments
+// of a command line the generator writes into a wrapper script, each of which
+// the shell must pass to the program as one argument, unchanged, whatever
+// characters it holds (whitespace, quotes, `$`, backticks, backslashes).
+std::string ReprobuildShellJoin(std::vector<std::string> const& args)
+{
+  std::string out;
+  for (std::string const& arg : args) {
+    if (!out.empty()) {
+      out += ' ';
+    }
+    out += ReprobuildShellSingleQuote(arg);
+  }
+  return out;
+}
+
 // Quote a tool path or argument for a `cmd.exe` batch file. Batch has no
 // general escaping for a `"` *inside* a quoted string, but tool paths and
 // the structured argv we emit here are filesystem paths / plain flags that
@@ -4244,7 +4260,7 @@ void cmGlobalReprobuildGenerator::WriteProviderMetadata()
             scanLines.push_back(
               cmStrCat(ReprobuildShellSingleQuote(
                          mf->GetSafeDefinition(ReprobuildCompilerVar(lang))),
-                       " -cpp -E ", cmJoin(args, " "), " ",
+                       " -cpp -E ", ReprobuildShellJoin(args), " ",
                        ReprobuildShellSingleQuote(sourceArg), " -o ",
                        ReprobuildShellSingleQuote(ppRel)));
             std::string const tdiRel =
@@ -4344,7 +4360,7 @@ void cmGlobalReprobuildGenerator::WriteProviderMetadata()
                 ReprobuildShellSingleQuote(scanner), " -format=p1689 -- ",
                 ReprobuildShellSingleQuote(
                   mf->GetSafeDefinition(ReprobuildCompilerVar(lang))),
-                " ", cmJoin(args, " "), " -x c++ ",
+                " ", ReprobuildShellJoin(args), " -x c++ ",
                 ReprobuildShellSingleQuote(sourceArg), " -c ", clangOption,
                 "-o ",
                 ReprobuildShellSingleQuote(cmStrCat(clangOption, objRel)), " ",
