@@ -2676,6 +2676,17 @@ void cmGlobalReprobuildGenerator::EnableLanguage(
     mf->InitCMAKE_CONFIGURATION_TYPES("Debug;Release;RelWithDebInfo");
   }
 
+  // The compiler checks below run before CMake's own language modules, so
+  // that a missing CUDA, ISPC or Swift toolchain is reported in the
+  // generator's words rather than by CMakeDetermine<LANG>Compiler.cmake. A
+  // try_compile project (CMakeTestCUDACompiler.cmake's ABI check, say) is
+  // not given CMAKE_<LANG>_COMPILER at this point: cmGlobalGenerator reads
+  // it from the parent's CMake<LANG>Compiler.cmake later, in the call at
+  // the end of this function. Its toolchain is the one the parent project
+  // has already passed these checks with, so they are made only there;
+  // otherwise a compiler named by CMAKE_<LANG>_COMPILER and absent from
+  // PATH fails every try_compile.
+  bool const checkToolchains = !this->GetCMakeInstance()->GetIsInTryCompile();
   for (std::string const& lang : languages) {
     // Windows: `RC` is auto-enabled by Windows-MSVC.cmake / Windows-GNU.cmake
     // whenever C or CXX is enabled. The Reprobuild generator doesn't produce
@@ -2697,7 +2708,7 @@ void cmGlobalReprobuildGenerator::EnableLanguage(
       cmSystemTools::SetFatalErrorOccurred();
       return;
     }
-    if (lang == "CUDA") {
+    if (checkToolchains && lang == "CUDA") {
       if (mf->GetSafeDefinition("CMAKE_REPROBUILD_CUDA_PROFILE") ==
           "ClangFatbinary") {
         std::string const compiler =
@@ -2725,7 +2736,7 @@ void cmGlobalReprobuildGenerator::EnableLanguage(
         return;
       }
     }
-    if (lang == "ISPC") {
+    if (checkToolchains && lang == "ISPC") {
       std::string compiler = mf->GetSafeDefinition("CMAKE_ISPC_COMPILER");
       if (compiler.empty()) {
         compiler = cmSystemTools::FindProgram("ispc");
@@ -2738,7 +2749,7 @@ void cmGlobalReprobuildGenerator::EnableLanguage(
         return;
       }
     }
-    if (lang == "Swift") {
+    if (checkToolchains && lang == "Swift") {
       std::string compiler = mf->GetSafeDefinition("CMAKE_Swift_COMPILER");
       if (compiler.empty()) {
         compiler = cmSystemTools::FindProgram("swiftc");
@@ -3894,6 +3905,24 @@ void cmGlobalReprobuildGenerator::WriteProviderMetadata()
           pchActionIds[source->GetFullPath()] = ReprobuildSafeId(
             cmStrCat("compile-", gt->GetName(), "-", objRel, configSuffix));
         }
+        // nvcc with the MSVC host compiler (Windows: CMake records
+        // CMAKE_CUDA_SIMULATE_ID MSVC, Compiler/NVIDIA.cmake) is refused.
+        // Its compile, link and device-link lines are Windows-NVIDIA-
+        // CUDA.cmake's, spelled for link.exe and cl.exe, and the edges
+        // below spell the nvcc lines of the other platforms.
+        if (targetHasCudaSources &&
+            lg->GetMakefile()->GetSafeDefinition("CMAKE_CUDA_COMPILER_ID") ==
+              "NVIDIA" &&
+            lg->GetMakefile()->GetSafeDefinition("CMAKE_CUDA_SIMULATE_ID") ==
+              "MSVC") {
+          this->GetCMakeInstance()->IssueMessage(
+            MessageType::FATAL_ERROR,
+            cmStrCat("Reprobuild profile unavailable: CUDA target '",
+                     gt->GetName(),
+                     "' is compiled by nvcc with the MSVC host compiler, "
+                     "which the Reprobuild generator does not support."));
+          return;
+        }
 
         std::map<std::string, std::vector<std::string>> dyndepDdis;
         std::map<std::string, std::vector<std::pair<std::string, std::string>>>
@@ -4898,10 +4927,13 @@ void cmGlobalReprobuildGenerator::WriteProviderMetadata()
         }
 
         std::vector<std::string> cudaDeviceLinkActionIds;
-        if (targetHasCudaSources &&
-            (gt->GetPropertyAsBool("CUDA_SEPARABLE_COMPILATION") ||
-             gt->GetPropertyAsBool("CUDA_RESOLVE_DEVICE_SYMBOLS")) &&
-            type != cmStateEnums::OBJECT_LIBRARY) {
+        // Whether the target has a device link step is CMake's decision
+        // (cmLinkLineDeviceComputer.cxx, which the Makefile and Ninja
+        // generators ask too): CUDA_RESOLVE_DEVICE_SYMBOLS when it is set,
+        // otherwise separable compilation in an executable or a shared
+        // library, or a linked library that needs one. A static library is
+        // device linked only on request.
+        if (targetHasCudaSources && requireDeviceLinking(*gt, *lg, config)) {
           cmMakefile const* mf = lg->GetMakefile();
           if (mf->GetSafeDefinition("CMAKE_REPROBUILD_CUDA_PROFILE") ==
                 "ClangFatbinary" &&
@@ -5072,14 +5104,22 @@ void cmGlobalReprobuildGenerator::WriteProviderMetadata()
             lg->GetDeviceLinkFlags(deviceLinkComputer, config, linkLibs,
                                    linkFlags, frameworkPath, linkPath, gt);
             ReprobuildAppendParsed(stubCompile.Args, linkFlags);
+            // CMAKE_CUDA_DEVICE_LINK_COMPILE's definitions, as the compiler
+            // receives them once a shell has read the rule's text: this
+            // argv runs with no shell, so the rule's `=\"\"` is an empty
+            // value and its `=\\"<file>\\"` a quoted file name. link.stub
+            // includes the two files by those names, and a quoted #include
+            // is searched from link.stub's own directory first, so `-I.`
+            // finds them from the build root the edge runs in.
             stubCompile.Args.push_back(
               "-D__CUDA_INCLUDE_COMPILER_INTERNAL_HEADERS__");
-            stubCompile.Args.push_back("-D__NV_EXTRA_INITIALIZATION=\"\"");
-            stubCompile.Args.push_back("-D__NV_EXTRA_FINALIZATION=\"\"");
+            stubCompile.Args.push_back("-D__NV_EXTRA_INITIALIZATION=");
+            stubCompile.Args.push_back("-D__NV_EXTRA_FINALIZATION=");
             stubCompile.Args.push_back(
-              cmStrCat("-DREGISTERLINKBINARYFILE=\\\"", registerRel, "\\\""));
+              cmStrCat("-DREGISTERLINKBINARYFILE=\"", registerRel, "\""));
             stubCompile.Args.push_back(
-              cmStrCat("-DFATBINFILE=\\\"", fatbinRel, "\\\""));
+              cmStrCat("-DFATBINFILE=\"", fatbinRel, "\""));
+            stubCompile.Args.push_back("-I.");
             ReprobuildAppendParsed(
               stubCompile.Args,
               mf->GetSafeDefinition("_CMAKE_COMPILE_AS_CUDA_FLAG"));
@@ -5104,27 +5144,112 @@ void cmGlobalReprobuildGenerator::WriteProviderMetadata()
             ReprobuildAppendUnique(linkObjects, deviceObjRel);
             sawCudaDeviceLink = true;
             sawCudaClangFatbinary = true;
-            continue;
           } else {
+            // nvcc's device link, as CMakeCUDAInformation.cmake's
+            // CMAKE_CUDA_DEVICE_LINK_EXECUTABLE and _LIBRARY rules spell it
+            // (the two are the same line) and the Ninja generator fills it
+            // (cmNinjaNormalTargetGenerator::WriteNvidiaDeviceLinkStatement):
+            //
+            //   <CMAKE_CUDA_COMPILER> ${_CMAKE_CUDA_EXTRA_FLAGS}
+            //     <LANGUAGE_COMPILE_FLAGS> <LINK_FLAGS>
+            //     ${CMAKE_CUDA_COMPILE_OPTIONS_PIC}
+            //     ${_CMAKE_CUDA_EXTRA_DEVICE_LINK_FLAGS} -shared -dlink
+            //     <OBJECTS> -o <TARGET> <LINK_LIBRARIES>
+            //     ${__IMPLICIT_DLINK_FLAGS}
+            //
+            // The compile flags carry the architectures to link for, and the
+            // libraries are the linked static libraries whose relocatable
+            // device code this step resolves; without them a kernel calling
+            // a library's __device__ function is an undefined reference.
+            std::string deviceLangFlags;
+            lg->AddLanguageFlagsForLinking(deviceLangFlags, gt, "CUDA",
+                                           config);
+            cmLinkLineDeviceComputer deviceLinkLineComputer(
+              rootLg, rootLg->GetStateSnapshot().GetDirectory());
+            std::string deviceLinkLibs;
+            std::string deviceLinkFlags;
+            std::string deviceFrameworkPath;
+            std::string deviceLinkPath;
+            lg->GetDeviceLinkFlags(deviceLinkLineComputer, config,
+                                   deviceLinkLibs, deviceLinkFlags,
+                                   deviceFrameworkPath, deviceLinkPath, gt);
+            ReprobuildAppendParsed(
+              deviceLink.Args,
+              mf->GetSafeDefinition("_CMAKE_CUDA_EXTRA_FLAGS"));
+            ReprobuildAppendParsed(deviceLink.Args, deviceLangFlags);
+            ReprobuildAppendParsed(deviceLink.Args, deviceLinkFlags);
+            ReprobuildAppendParsed(
+              deviceLink.Args,
+              mf->GetSafeDefinition("CMAKE_CUDA_COMPILE_OPTIONS_PIC"));
+            ReprobuildAppendParsed(
+              deviceLink.Args,
+              mf->GetSafeDefinition("_CMAKE_CUDA_EXTRA_DEVICE_LINK_FLAGS"));
+            deviceLink.Args.push_back("-shared");
             deviceLink.Args.push_back("-dlink");
+            cm::append(deviceLink.Args, linkObjects);
+            deviceLink.Args.push_back("-o");
+            deviceLink.Args.push_back(deviceObjRel);
+            ReprobuildAppendParsed(deviceLink.Args, deviceLinkLibs);
+            // __IMPLICIT_DLINK_FLAGS: the CUDA implicit link directories that
+            // are not the host's and hold the device libraries (CMake tests
+            // for libcurand_static.a).
+            {
+              cmList const hostDirs{ mf->GetSafeDefinition(
+                "CMAKE_CUDA_HOST_IMPLICIT_LINK_DIRECTORIES") };
+              for (std::string const& dir : cmList{ mf->GetSafeDefinition(
+                     "CMAKE_CUDA_IMPLICIT_LINK_DIRECTORIES") }) {
+                if (!cm::contains(hostDirs, dir) &&
+                    cmSystemTools::FileExists(
+                      cmStrCat(dir, "/libcurand_static.a"))) {
+                  deviceLink.Args.push_back(cmStrCat("-L", dir));
+                }
+              }
+            }
+            deviceLink.Inputs = linkObjects;
+            for (ReprobuildAction const& compile : target.CompileActions) {
+              ReprobuildAppendUnique(deviceLink.Deps, compile.Id);
+            }
+            // The linked libraries of this project are built by their own
+            // link edges: inputs of this one, and its predecessors.
+            cmComputeLinkInformation* deviceCli =
+              gt->GetLinkInformation(config);
+            if (deviceCli) {
+              for (cmComputeLinkInformation::Item const& item :
+                   deviceCli->GetItems()) {
+                cmGeneratorTarget const* dep = item.Target;
+                if (!dep || dep->IsImported() ||
+                    (dep->GetType() != cmStateEnums::STATIC_LIBRARY &&
+                     dep->GetType() != cmStateEnums::SHARED_LIBRARY &&
+                     dep->GetType() != cmStateEnums::MODULE_LIBRARY)) {
+                  continue;
+                }
+                cmStateEnums::ArtifactType const artifact =
+                  dep->HasImportLibrary(config)
+                  ? cmStateEnums::ImportLibraryArtifact
+                  : cmStateEnums::RuntimeBinaryArtifact;
+                ReprobuildAppendUnique(
+                  deviceLink.Inputs,
+                  ReprobuildConfigPath(
+                    ReprobuildRelativeTo(
+                      binaryDir, dep->GetFullPath(config, artifact, true)),
+                    config, multiConfig));
+                ReprobuildAppendUnique(
+                  deviceLink.Deps,
+                  ReprobuildSafeId(
+                    cmStrCat("link-", dep->GetName(), configSuffix)));
+              }
+            }
+            if (declareOutputs) {
+              deviceLink.Outputs = { deviceObjRel };
+            } else {
+              deviceLink.Cacheable = false;
+            }
+            ReprobuildAppendCleanFile(cleanFiles, binaryDir, deviceObjRel);
+            cudaDeviceLinkActionIds.push_back(deviceLink.Id);
+            target.CustomActions.push_back(std::move(deviceLink));
+            ReprobuildAppendUnique(linkObjects, deviceObjRel);
+            sawCudaDeviceLink = true;
           }
-          deviceLink.Args.push_back("-o");
-          deviceLink.Args.push_back(deviceObjRel);
-          cm::append(deviceLink.Args, linkObjects);
-          deviceLink.Inputs = linkObjects;
-          for (ReprobuildAction const& compile : target.CompileActions) {
-            ReprobuildAppendUnique(deviceLink.Deps, compile.Id);
-          }
-          if (declareOutputs) {
-            deviceLink.Outputs = { deviceObjRel };
-          } else {
-            deviceLink.Cacheable = false;
-          }
-          ReprobuildAppendCleanFile(cleanFiles, binaryDir, deviceObjRel);
-          cudaDeviceLinkActionIds.push_back(deviceLink.Id);
-          target.CustomActions.push_back(std::move(deviceLink));
-          ReprobuildAppendUnique(linkObjects, deviceObjRel);
-          sawCudaDeviceLink = true;
         }
 
         if (type == cmStateEnums::OBJECT_LIBRARY) {
@@ -5391,6 +5516,58 @@ void cmGlobalReprobuildGenerator::WriteProviderMetadata()
           // link, the compiler driver otherwise.
           std::string linkProgram = lg->GetMakefile()->GetSafeDefinition(
             ReprobuildCompilerVar(linkLang));
+          // A CUDA image is linked as CMake's rules for its compiler spell
+          // it. nvcc's (CMakeCUDAInformation.cmake) run the host link
+          // launcher, the host C++ compiler nvcc reports
+          // (Internal/CMakeNVCCParseImplicitInfo.cmake):
+          //
+          //   <CMAKE_CUDA_HOST_LINK_LAUNCHER> <LINK_FLAGS> <OBJECTS>
+          //     -o <TARGET> <LINK_LIBRARIES> <host implicit links>
+          //
+          // That rule has no <FLAGS>: the CUDA flags are nvcc's
+          // (`--generate-code=...`), which the host compiler refuses, and
+          // so is Linux-NVIDIA-CUDA.cmake's verbose link flag `-Wl,-v`,
+          // which nvcc would refuse. Clang's (Compiler/Clang-CUDA.cmake)
+          // run the CUDA compiler with its flags, as a C++ link does:
+          //
+          //   <CMAKE_CUDA_COMPILER> <FLAGS> <LINK_FLAGS> <OBJECTS>
+          //     -o <TARGET> <LINK_LIBRARIES> <host implicit links>
+          //
+          // Both end with the host implicit links (`__IMPLICIT_LINKS`): the
+          // toolkit's library directories, where the CUDA runtime CMake
+          // adds to <LINK_LIBRARIES> is found. An MSVC-frontend link keeps
+          // the MSVC linker line.
+          bool const cudaLink = linkLang == "CUDA" && !msvcLinkerLine;
+          bool const cudaHostLink = cudaLink &&
+            lg->GetMakefile()->GetSafeDefinition("CMAKE_CUDA_COMPILER_ID") ==
+              "NVIDIA";
+          std::vector<std::string> cudaHostImplicitLinks;
+          if (cudaHostLink) {
+            std::string const launcher = lg->GetMakefile()->GetSafeDefinition(
+              "CMAKE_CUDA_HOST_LINK_LAUNCHER");
+            if (launcher.empty()) {
+              this->GetCMakeInstance()->IssueMessage(
+                MessageType::FATAL_ERROR,
+                cmStrCat("Reprobuild cannot link CUDA target '", gt->GetName(),
+                         "': CMake determined no CUDA host link launcher "
+                         "(CMAKE_CUDA_HOST_LINK_LAUNCHER is not set)."));
+              return;
+            }
+            linkProgram = launcher;
+          }
+          if (cudaLink) {
+            cmMakefile const* linkMf = lg->GetMakefile();
+            for (std::string const& dir : cmList{ linkMf->GetSafeDefinition(
+                   "CMAKE_CUDA_HOST_IMPLICIT_LINK_DIRECTORIES") }) {
+              cudaHostImplicitLinks.push_back(cmStrCat("-L", dir));
+            }
+            for (std::string const& lib : cmList{ linkMf->GetSafeDefinition(
+                   "CMAKE_CUDA_HOST_IMPLICIT_LINK_LIBRARIES") }) {
+              cudaHostImplicitLinks.push_back(
+                lib.find('/') != std::string::npos ? lib
+                                                   : cmStrCat("-l", lib));
+            }
+          }
           // Set when the link writes a program database: its path, which
           // the edge declares.
           std::string linkPdb;
@@ -5404,7 +5581,7 @@ void cmGlobalReprobuildGenerator::WriteProviderMetadata()
                          " (CMAKE_LINKER is not set)."));
               return;
             }
-          } else {
+          } else if (!cudaHostLink) {
             ReprobuildAppendCompilerTargetArgs(linkArgs, lg->GetMakefile(),
                                                linkLang);
             ReprobuildAppendParsed(linkArgs, flags);
@@ -5507,6 +5684,7 @@ void cmGlobalReprobuildGenerator::WriteProviderMetadata()
             linkArgs.push_back(realOutput);
             cm::append(linkArgs, linkObjects);
             ReprobuildAppendParsed(linkArgs, linkLibs);
+            cm::append(linkArgs, cudaHostImplicitLinks);
           }
           if (target.HcrEnabled && ReprobuildContainsLtoFlag(linkArgs)) {
             this->GetCMakeInstance()->IssueMessage(

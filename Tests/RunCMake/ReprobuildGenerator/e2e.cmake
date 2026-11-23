@@ -1653,6 +1653,35 @@ function(write_cuda_available_project source_dir project_name)
   file(WRITE "${source_dir}/main.cu" "int main() { return 0; }\n")
 endfunction()
 
+# An nvcc project whose executable needs its device link step: its kernel
+# calls a __device__ function defined in a separately compiled static
+# library, so nvlink fails unless the step is given the library. The library
+# asks for no device link of its own, which CMake then does not give it. The
+# executable launches nothing (no GPU is needed) and prints the kernel's
+# presence.
+function(write_cuda_device_call_project source_dir project_name)
+  file(REMOVE_RECURSE "${source_dir}")
+  file(MAKE_DIRECTORY "${source_dir}")
+  file(WRITE "${source_dir}/CMakeLists.txt"
+    "cmake_minimum_required(VERSION 3.20)\n"
+    "project(${project_name} CUDA)\n"
+    "add_library(cudalib STATIC kernels.cu)\n"
+    "set_target_properties(cudalib PROPERTIES CUDA_SEPARABLE_COMPILATION ON POSITION_INDEPENDENT_CODE ON)\n"
+    "add_executable(cudaapp main.cu)\n"
+    "target_link_libraries(cudaapp PRIVATE cudalib)\n"
+    "set_target_properties(cudaapp PROPERTIES CUDA_SEPARABLE_COMPILATION ON)\n")
+  file(WRITE "${source_dir}/kernels.cu" "__device__ int device_value() { return 42; }\n")
+  file(WRITE "${source_dir}/main.cu"
+    "#include <cstdio>\n"
+    "extern __device__ int device_value();\n"
+    "__global__ void kernel(int* out) { *out = device_value(); }\n"
+    "int main() {\n"
+    "  void (*launch)(int*) = kernel;\n"
+    "  std::printf(\"cuda-device-link %d\\n\", launch != nullptr);\n"
+    "  return 0;\n"
+    "}\n")
+endfunction()
+
 function(write_clang_cuda_available_project source_dir project_name)
   write_cuda_available_project("${source_dir}" "${project_name}")
   file(APPEND "${source_dir}/CMakeLists.txt"
@@ -1683,27 +1712,104 @@ function(write_ispc_available_project source_dir project_name)
   file(WRITE "${source_dir}/kernel.ispc" "export void fill(uniform int n, uniform int v[], uniform int x) { foreach (i = 0 ... n) v[i] = x; }\n")
 endfunction()
 
+# Configures the nvcc project of write_cuda_device_call_project for real
+# (CMake identifies nvcc and runs its try_compile checks, including the ABI
+# probe, through this generator and repro), builds it with repro and runs it.
+#
+# PATH holds neither a make program nor nvcc's directory while it does so.
+# With make on PATH the generator builds a try_compile project with it
+# rather than with repro, so the probes would not run through this generator;
+# and the compiler is named only by CMAKE_CUDA_COMPILER, as a project naming
+# a toolkit outside PATH does. The filter drops whole PATH entries, which
+# suits a Nix shell, where each package has its own bin directory; on a host
+# whose /usr/bin holds make it would drop the system tools with it, and the
+# configure fails rather than passing untested.
 function(run_cuda_available_fixture label cuda_compiler extra_args)
   set(cuda_source_dir "${TEST_BINARY_ROOT}/${label}-src")
   set(cuda_binary_dir "${TEST_BINARY_ROOT}/${label}-build")
-  write_cuda_available_project("${cuda_source_dir}" ReprobuildCudaAvailable)
+  write_cuda_device_call_project("${cuda_source_dir}" ReprobuildCudaAvailable)
+  set(saved_path "$ENV{PATH}")
+  get_filename_component(cuda_compiler_dir "${cuda_compiler}" DIRECTORY)
+  string(REPLACE ":" ";" path_entries "$ENV{PATH}")
+  set(kept_entries)
+  foreach(entry IN LISTS path_entries)
+    if(NOT EXISTS "${entry}/make" AND NOT EXISTS "${entry}/gmake" AND
+       NOT EXISTS "${entry}/nvcc" AND NOT entry STREQUAL cuda_compiler_dir)
+      list(APPEND kept_entries "${entry}")
+    endif()
+  endforeach()
+  string(JOIN ":" kept_path ${kept_entries})
+  set(ENV{PATH} "${kept_path}")
+  find_program(cuda_fixture_make NAMES make gmake NO_CACHE NO_CMAKE_PATH NO_CMAKE_ENVIRONMENT_PATH NO_CMAKE_SYSTEM_PATH)
+  if(cuda_fixture_make)
+    message(FATAL_ERROR "make is still found on the fixture's PATH: ${cuda_fixture_make}")
+  endif()
   run_configure("${cuda_source_dir}" "${cuda_binary_dir}" TRUE ""
     "-DCMAKE_CUDA_COMPILER=${cuda_compiler}"
-    "-DCMAKE_CUDA_ARCHITECTURES=52"
+    "-DCMAKE_CUDA_ARCHITECTURES=75"
     ${extra_args})
+  # The ABI probe was built by repro, through this generator.
+  file(READ "${cuda_binary_dir}/CMakeFiles/CMakeConfigureLog.yaml" cuda_configure_log)
+  string(REGEX MATCH "Detecting CUDA compiler ABI info[^\n]*\n(.*)" probe_and_after "${cuda_configure_log}")
+  string(REGEX MATCH "Run Build Command\\(s\\): [^\n]*" probe_build_command "${CMAKE_MATCH_1}")
+  assert_contains("${probe_build_command}" "${TEST_REPROBUILD_REPRO} build" "CUDA ABI probe build command")
+  # CMakeDetermineCompilerABI.cmake records the pointer size only when its
+  # probe compiled and linked; a failed probe is otherwise silent.
+  file(GLOB cuda_compiler_record "${cuda_binary_dir}/CMakeFiles/*/CMakeCUDACompiler.cmake")
+  file(READ "${cuda_compiler_record}" cuda_compiler_text)
+  assert_contains("${cuda_compiler_text}" "set(CMAKE_CUDA_SIZEOF_DATA_PTR \"8\")" "CUDA ABI probe")
   file(READ "${cuda_binary_dir}/CMakeFiles/reprobuild/provider.meta" cuda_metadata)
   assert_contains("${cuda_metadata}" "m8_cuda_device_link=generated" "CUDA metadata")
   file(READ "${cuda_binary_dir}/reprobuild.nim" cuda_provider)
-  assert_contains("${cuda_provider}" "device-link-cudalib" "CUDA provider")
+  assert_contains("${cuda_provider}" "device-link-cudaapp" "CUDA provider")
+  assert_not_contains("${cuda_provider}" "device-link-cudalib" "CUDA provider")
   assert_contains("${cuda_provider}" "cmake_device_link" "CUDA provider")
+  file(STRINGS "${cuda_binary_dir}/reprobuild.nim" device_link_line
+    REGEX "buildAction\\(\"device-link-cudaapp\"")
+  # The device link resolves against the library, after the library's link.
+  assert_contains("${device_link_line}" "\"-dlink\"" "CUDA device link")
+  assert_contains("${device_link_line}" "\"libcudalib.a\"" "CUDA device link")
+  assert_contains("${device_link_line}" "deps = @[\"compile-cudaapp-CMakeFiles_cudaapp.dir_main.cu.o\", \"link-cudalib\"]" "CUDA device link")
+  # The image is linked by the host link launcher, not by nvcc.
+  file(STRINGS "${cuda_compiler_record}" launcher_line REGEX "^set\\(CMAKE_CUDA_HOST_LINK_LAUNCHER ")
+  string(REGEX REPLACE "^set\\(CMAKE_CUDA_HOST_LINK_LAUNCHER \"([^\"]*)\"\\)$" "\\1" launcher "${launcher_line}")
+  if("${launcher}" STREQUAL "")
+    message(FATAL_ERROR "CMake recorded no CUDA host link launcher: ${launcher_line}")
+  endif()
+  file(STRINGS "${cuda_binary_dir}/reprobuild.nim" link_line
+    REGEX "buildAction\\(\"link-cudaapp\"")
+  assert_contains("${link_line}" "inlineExecCall(@[\"${launcher}\"" "CUDA link")
   file(READ "${cuda_binary_dir}/CMakeFiles/reprobuild/clean.manifest" cuda_clean)
   assert_contains("${cuda_clean}" "cmake_device_link" "CUDA clean manifest")
   start_runquota("${TEST_BINARY_ROOT}" runquota_socket runquota_pid)
   run_build("${cuda_binary_dir}" "cudaapp" "${runquota_socket}" cuda_output)
   stop_runquota("${runquota_pid}")
+  # The scheduler ran the device link edge.
   report_path_from_output("${cuda_output}" cuda_report_path)
   file(READ "${cuda_report_path}" cuda_report)
-  assert_contains("${cuda_report}" "device-link-cudalib" "CUDA scheduler report")
+  assert_contains("${cuda_report}" "device-link-cudaapp" "CUDA scheduler report")
+  # It resolved the kernel's call against the library: the device-link
+  # object defines the library's __device__ function. Without the library
+  # nvlink only warns and still writes an object, which does not.
+  set(device_link_object "${cuda_binary_dir}/CMakeFiles/cudaapp.dir/cmake_device_link.o")
+  assert_file_exists("${device_link_object}" "CUDA device link object")
+  file(STRINGS "${device_link_object}" device_value_symbol REGEX "_Z12device_valuev")
+  if(NOT device_value_symbol)
+    message(FATAL_ERROR "The device link did not resolve device_value() from libcudalib.a: ${device_link_object}")
+  endif()
+  execute_process(
+    COMMAND "${cuda_binary_dir}/cudaapp"
+    OUTPUT_VARIABLE run_stdout
+    ERROR_VARIABLE run_stderr
+    RESULT_VARIABLE run_result
+    ENCODING UTF8)
+  if(NOT run_result EQUAL 0 OR NOT run_stdout STREQUAL "cuda-device-link 1\n")
+    message(FATAL_ERROR
+      "The CUDA executable did not run correctly.\n"
+      "stdout:\n${run_stdout}\n"
+      "stderr:\n${run_stderr}")
+  endif()
+  set(ENV{PATH} "${saved_path}")
 endfunction()
 
 function(run_clang_cuda_available_fixture label clang_cuda_compiler)
@@ -2437,6 +2543,20 @@ elseif(TEST_MODE STREQUAL "real_project_matrix")
   endforeach()
   m11_support_line("real-project-summary:profile=${TEST_REAL_PROJECT_PROFILE} ran=${real_projects}")
   write_m11_real_project_availability("${real_projects}")
+  return()
+endif()
+
+# A CUDA project configures and builds under this generator (reprobuild-pm
+# issues/2026-11-21-reprobuild-cmake-cannot-enable-cuda.md). Registered only
+# where nvcc is installed.
+if(TEST_MODE STREQUAL "cuda_build")
+  file(REMOVE_RECURSE "${TEST_BINARY_ROOT}")
+  file(MAKE_DIRECTORY "${TEST_BINARY_ROOT}")
+  resolve_cuda_compiler(cuda_compiler)
+  if("${cuda_compiler}" STREQUAL "")
+    message(FATAL_ERROR "TEST_MODE=cuda_build needs nvcc (TEST_CUDA_COMPILER or PATH)")
+  endif()
+  run_cuda_available_fixture("cuda-build" "${cuda_compiler}" "")
   return()
 endif()
 

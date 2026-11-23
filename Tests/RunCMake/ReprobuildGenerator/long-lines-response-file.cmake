@@ -6,7 +6,7 @@
 # keeps its full line and declares none: a link whose response-file flag is
 # defined empty, or hands the file to the linker (`-Wl,@`), which does not
 # accept the driver's options the generator would move into it. (A CUDA link
-# is another; no CUDA project configures under this generator, see below.)
+# is another: its rule defines no response-file flag.)
 # The response file is named after the action id, which does not move when a
 # target is added to the project.
 #
@@ -27,13 +27,8 @@
 #   clang-cl  clang-cl (MSVC frontend): C compiles, Windows quoting.
 #   ispc      ispc compiles, linked by a C compiler.
 #   swift     a swiftc link.
-#
-# Not covered: CUDA. CMake's CMakeDetermineCUDACompiler.cmake refuses every
-# generator but the Makefile, Ninja, FASTBuild and Visual Studio ones, so no
-# CUDA project configures under this generator (reprobuild-pm
-# issues/2026-11-21-reprobuild-cmake-cannot-enable-cuda.md). nvcc reads its
-# `--options-file` by GCC's rules (measured with nvcc 12.9), so the generator
-# would quote for it as for gcc.
+#   cuda      nvcc compiles (`--options-file <rsp>`), and a CUDA link,
+#             which reads no response file.
 #
 # Each compile and link named above is run for real, from the argv the
 # generated provider holds, in the build directory, as the engine would run
@@ -42,7 +37,9 @@
 #   because CMake's compiler checks run try_compile through the Reprobuild
 #   generator, which needs a repro engine this argv test does not run (as in
 #   msvc-frontend-driver.cmake). Identification is upstream CMake, not under
-#   test.
+#   test. For CUDA, forcing skips only the try_compile checks: CMake still
+#   identifies nvcc by running it, which is how it learns the host link
+#   launcher and the toolkit's library directories.
 # - Actions run directly rather than through repro, which would add an engine
 #   build and nothing this test asserts: the argv and the files are the
 #   generator's output, and running them is what the engine does with them.
@@ -456,6 +453,50 @@ target_link_directories(app PRIVATE \${long_dirs} \"\${probe_dir}\")
   run_action(compile-app-Swift PROGRAM "${TEST_SWIFTC}" PATH ${run_path})
   expect_response_file(link-app "${TEST_SWIFTC}" "@")
   run_action(link-app PATH ${run_path} CREATES app)
+
+elseif(TEST_TOOLCHAIN STREQUAL "cuda")
+  require(TEST_NVCC)
+  get_filename_component(nvcc_dir "${TEST_NVCC}" DIRECTORY)
+  set(run_path "${nvcc_dir}")
+  # nvcc hands its arguments to its sub-tools through a shell, so an
+  # apostrophe, a double quote or a backslash does not survive even its
+  # plain command line (nvcc 12.9: `-I<dir with '>` and `-DX="a'b"` fail,
+  # `-I<dir with ">` is "Stray '"' character"). The probe directory's name
+  # holds a space, which does survive it: the compile fails unless the
+  # response file quotes it. (nvcc's options-file reader does not read `\"`
+  # as GCC's does: reprobuild-pm issues/2026-11-23-reprobuild-cmake-
+  # quotes-nvcc-response-files-by-gccs-rules.md.)
+  set(probe_dir "${source}/in sp")
+  file(MAKE_DIRECTORY "${probe_dir}")
+  file(WRITE "${probe_dir}/probe.h" "#define PROBE_VALUE 7\n")
+  file(WRITE "${source}/unit.cu" "#include \"probe.h\"\nint probe_value(void) { return PROBE_VALUE; }\n")
+  file(WRITE "${source}/main.cu" "int probe_value(void);\nint main(void) { return probe_value() == 7 ? 0 : 1; }\n")
+  write_project(CUDA "
+set(long_dirs ${long_dirs_cmake})
+set(probe_dir [[${probe_dir}]])
+add_executable(app main.cu unit.cu)
+target_include_directories(app PRIVATE \${long_dirs} \"\${probe_dir}\")
+target_link_directories(app PRIVATE \${long_dirs})
+")
+  configure_and_read(
+    "-DCMAKE_CUDA_COMPILER=${TEST_NVCC}" -DCMAKE_CUDA_COMPILER_FORCED=TRUE
+    -DCMAKE_CUDA_ARCHITECTURES=75)
+  # nvcc reads `--options-file <rsp>` (NVIDIA.cmake). The space in the probe
+  # directory is the only character this case asks the file to carry; see the
+  # issue cited above for how nvcc reads quotes.
+  actions_matching("^compile-app-.*unit\\.cu\\.o$" 1 compile)
+  expect_response_file("${compile}" "${TEST_NVCC}" "" "--options-file")
+  run_action("${compile}" PATH ${run_path})
+  actions_matching("^compile-app-.*main\\.cu\\.o$" 1 main_compile)
+  run_action("${main_compile}" PATH ${run_path})
+  # The CUDA link runs the host link launcher, and CMake's CUDA rules define
+  # no response-file flag for it: it keeps its full line.
+  expect_no_response_file(link-app)
+  run_action(link-app PATH ${run_path} CREATES app)
+  execute_process(COMMAND "${binary}/app" RESULT_VARIABLE app_result)
+  if(NOT app_result EQUAL 0)
+    message(FATAL_ERROR "The CUDA image did not return the probe header's value: ${app_result}")
+  endif()
 
 else()
   message(FATAL_ERROR "Unknown TEST_TOOLCHAIN '${TEST_TOOLCHAIN}'")

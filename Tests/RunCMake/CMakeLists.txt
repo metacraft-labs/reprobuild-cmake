@@ -365,6 +365,21 @@ if(CMAKE_HOST_UNIX)
         -DTEST_BINARY_ROOT=${_ReprobuildGeneratorTestBin}/ispc-module-defaults
         -P ${_ReprobuildGeneratorTestDir}/ispc-module-defaults.cmake)
   endif()
+  # nvcc: CMAKE_CUDA_COMPILER when this build enabled CUDA, else PATH.
+  if(CMAKE_CUDA_COMPILER AND CMAKE_CUDA_COMPILER_ID STREQUAL "NVIDIA")
+    set(_ReprobuildNvcc "${CMAKE_CUDA_COMPILER}")
+  else()
+    find_program(_ReprobuildNvcc NAMES nvcc)
+  endif()
+  if(_ReprobuildNvcc)
+    add_test(NAME e2e_cmake_reprobuild_long_lines_response_file_cuda
+      COMMAND ${CMAKE_CMAKE_COMMAND}
+        -DTEST_CMAKE=${CMAKE_CMAKE_COMMAND}
+        -DTEST_TOOLCHAIN=cuda
+        -DTEST_NVCC=${_ReprobuildNvcc}
+        -DTEST_BINARY_ROOT=${_ReprobuildGeneratorTestBin}/long-lines-response-file-cuda
+        -P ${_ReprobuildGeneratorTestDir}/long-lines-response-file.cmake)
+  endif()
   find_program(_ReprobuildLongSwiftc NAMES swiftc)
   if(_ReprobuildLongSwiftc)
     add_test(NAME e2e_cmake_reprobuild_long_lines_response_file_swift
@@ -425,6 +440,31 @@ elseif(_ReprobuildMsvcClang)
         -DTEST_MSVC_C_COMPILER=${_ReprobuildMsvcClang}
         -DTEST_REPROBUILD_REPRO=${_ReprobuildBin}
         -DTEST_REPROBUILD_SOURCE_ROOT=${_ReprobuildSourceRoot}
+        -DTEST_RUNQUOTAD=${_RunQuotaDaemonBin}
+        -P ${_ReprobuildGeneratorTestDir}/e2e.cmake)
+  endif()
+endif()
+# A CUDA project configures (identification, ABI probe and compiler check
+# run through this generator), builds with repro and runs: an executable
+# whose kernel calls a __device__ function of a static library, so the
+# device link step must resolve against it.
+if(CMAKE_HOST_UNIX)
+  if(CMAKE_CUDA_COMPILER AND CMAKE_CUDA_COMPILER_ID STREQUAL "NVIDIA")
+    set(_ReprobuildCudaBuildNvcc "${CMAKE_CUDA_COMPILER}")
+  else()
+    find_program(_ReprobuildCudaBuildNvcc NAMES nvcc)
+  endif()
+  if(_ReprobuildCudaBuildNvcc)
+    add_test(NAME e2e_cmake_reprobuild_cuda_build
+      COMMAND ${CMAKE_CMAKE_COMMAND}
+        -DCMAKE_COMMAND=${CMAKE_CMAKE_COMMAND}
+        -DTEST_MODE=cuda_build
+        -DTEST_BINARY_ROOT=${_ReprobuildGeneratorTestBin}/cuda-build
+        -DTEST_C_COMPILER=${CMAKE_C_COMPILER}
+        -DTEST_CUDA_COMPILER=${_ReprobuildCudaBuildNvcc}
+        -DTEST_REPROBUILD_SOURCE_ROOT=${_ReprobuildSourceRoot}
+        -DTEST_REPROBUILD_REPO=${_ReprobuildSourceRoot}
+        -DTEST_REPROBUILD_REPRO=${_ReprobuildBin}
         -DTEST_RUNQUOTAD=${_RunQuotaDaemonBin}
         -P ${_ReprobuildGeneratorTestDir}/e2e.cmake)
   endif()
