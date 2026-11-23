@@ -6,6 +6,7 @@
 #include <algorithm>
 #include <cctype>
 #include <cstdlib>
+#include <functional>
 #include <iostream>
 #include <map>
 #include <set>
@@ -38,6 +39,7 @@
 #include "cmLocalGenerator.h"
 #include "cmLocalReprobuildGenerator.h"
 #include "cmMakefile.h"
+#include "cmOutputConverter.h"
 #include "cmPolicies.h"
 #include "cmSourceFile.h"
 #include "cmState.h"
@@ -1918,9 +1920,21 @@ std::string ReprobuildCustomDepfilePath(std::string const& binaryDir,
   return ReprobuildOutputPath(binaryDir, base, depfile);
 }
 
+// Rewrites the argv of one command of a custom command in place; the second
+// argument is the index of the command's own argv[0] (after any emulator).
+using ReprobuildArgvRewrite =
+  std::function<void(std::vector<std::string>&, std::size_t)>;
+
+// The shell command lines of `ccg`'s commands for a wrapper script: each is
+// `cmCustomCommandGenerator::GetArgv`, passed through `rewrite` when given,
+// quoted the way the generator quotes it. Building the lines from the argv,
+// not from GetCommand and AppendArguments, lets `rewrite` see each argument
+// and its position, so the wrapper and an inlined action (which runs the
+// rewritten argv directly) run the same command.
 std::vector<std::string> ReprobuildCustomCommandLines(
   cmCustomCommandGenerator const& ccg, bool echoComment,
-  std::string const& defaultWorkingDirectory)
+  std::string const& defaultWorkingDirectory,
+  ReprobuildArgvRewrite const& rewrite = {})
 {
   std::vector<std::string> commandLines;
   if (echoComment) {
@@ -1940,43 +1954,120 @@ std::vector<std::string> ReprobuildCustomCommandLines(
       commandLine += ReprobuildShellSingleQuote(workingDirectory);
       commandLine += " && ";
     }
-    commandLine += ReprobuildShellSingleQuote(ccg.GetCommand(i));
-    ccg.AppendArguments(i, commandLine);
+    std::size_t commandIndex = 0;
+    std::vector<std::string> argv = ccg.GetArgv(i, &commandIndex);
+    if (rewrite) {
+      rewrite(argv, commandIndex);
+    }
+    commandLine += ReprobuildShellSingleQuote(argv.front());
+    for (std::size_t j = 1; j < argv.size(); ++j) {
+      commandLine += " ";
+      commandLine += ccg.EscapeArgument(argv[j]);
+    }
     commandLines.push_back(commandLine);
   }
   return commandLines;
 }
 
-// Try to extract a raw argv (vector<string>) for command `c` of `ccg`
-// without going through shell quoting. Returns empty when the command
-// cannot be safely inlined (multi-emulator setups where the engine would
-// need to layer extra arguments are routed through the legacy
-// shell-wrapper path instead).
-//
-// The returned argv is what would be passed to a direct CreateProcess /
-// posix_spawn for that one command: argv[0] is the resolved executable
-// (which already accounts for `cmake -E …` renames and CROSSCOMPILING
-// adjustments inside `ccg.GetCommand`), and argv[1..] are the original
-// raw arguments from the custom command's command line (no shell quoting,
-// no `cd` prefix, no `&&` chaining).
-std::vector<std::string> ReprobuildCustomCommandArgv(
-  cmCustomCommandGenerator const& ccg, unsigned int c)
+// Whether `arg`, written into a wrapper script the way
+// `cmCustomCommandGenerator::AppendArguments` writes a non-VERBATIM
+// argument (only spaces backslash-escaped), reaches the command as exactly
+// `arg`. An empty argument disappears, and any other POSIX sh special
+// character is interpreted: `>` redirects, `$X` expands, `*` globs, `;`
+// chains, a leading `~` or `#` is a home path or a comment, and `NAME=v`
+// as the first word is an assignment. Ninja and Makefile generators run
+// such a command through `/bin/sh -c`, so an argument that fails this test
+// does not mean what it says, and the command cannot be launched directly.
+// https://pubs.opengroup.org/onlinepubs/9799919799/utilities/V3_chap02.html
+bool ReprobuildOldStyleArgumentIsLiteral(std::string const& arg, bool first)
 {
-  std::vector<std::string> argv;
-  std::string const exe = ccg.GetCommand(c);
-  if (exe.empty()) {
-    return argv;
+  if (arg.empty() || arg.front() == '~' || arg.front() == '#') {
+    return false;
   }
-  cmCustomCommandLines const& lines = ccg.GetCC().GetCommandLines();
-  if (c >= lines.size() || lines[c].empty()) {
-    argv.push_back(exe);
-    return argv;
+  if (first && arg.find('=') != std::string::npos) {
+    return false;
   }
-  argv.push_back(exe);
-  for (std::size_t j = 1; j < lines[c].size(); ++j) {
-    argv.push_back(lines[c][j]);
+  return arg.find_first_of("|&;<>()$`\\\"'*?[]{}!^%\t\n\r") ==
+    std::string::npos;
+}
+
+// The argv command `c` of `ccg` runs, for launching it directly
+// (`inlineExecCall`) instead of through a wrapper script. Returns empty when
+// the command cannot be launched directly with the meaning it has in a
+// shell, so the caller keeps the wrapper.
+//
+// The argv is `cmCustomCommandGenerator::GetArgv`: the cross-compiling
+// emulator, argv[0] resolved to the executable target's location for the
+// command config, and every argument with its generator expressions
+// evaluated for the (command, output) config pair. It is what the wrapper
+// script quotes, so the two paths run the same command. Before this the
+// arguments were copied from the custom command's raw command line, so
+// `$<CONFIG>`, `$<TARGET_FILE:...>`, `$<COMMAND_CONFIG:...>` and
+// `$<OUTPUT_CONFIG:...>` reached the tool as literal text, and an emulator's
+// own arguments were dropped.
+//
+// VERBATIM arguments are quoted for the shell, so the shell hands them over
+// unchanged, with two exceptions `cmOutputConverter::EscapeForShell` makes
+// on purpose for every generator: a shell operator (`>`, `|`, `&&`, ...) is
+// written bare, so `COMMAND gen > out` redirects, and a `$(VAR)` reference
+// is written bare when the command allows make variables (every
+// add_custom_command does). Either keeps the wrapper. Non-VERBATIM
+// arguments are written with only spaces escaped, and are inlined only when
+// each is literal (see ReprobuildOldStyleArgumentIsLiteral).
+std::vector<std::string> ReprobuildCustomCommandArgv(
+  cmCustomCommandGenerator const& ccg, unsigned int c,
+  std::size_t& commandIndex)
+{
+  if (c >= ccg.GetNumberOfCommands() || ccg.GetCommand(c).empty()) {
+    return {};
+  }
+  cmCustomCommand const& cc = ccg.GetCC();
+  std::vector<std::string> argv = ccg.GetArgv(c, &commandIndex);
+  for (std::size_t j = 0; j < argv.size(); ++j) {
+    std::string const& arg = argv[j];
+    if (cmOutputConverter::IsShellOperator(arg)) {
+      return {};
+    }
+    if (cc.GetEscapeOldStyle()) {
+      if (!ReprobuildOldStyleArgumentIsLiteral(arg, j == 0)) {
+        return {};
+      }
+    } else if (cc.GetEscapeAllowMakeVars() &&
+               arg.find("$(") != std::string::npos) {
+      return {};
+    }
   }
   return argv;
+}
+
+// Replaces every occurrence of the path `from` in `text` with `to`, where
+// the occurrence is a whole path: the characters on either side of it are
+// not ones a path component can continue with. A plain substring replace
+// would also rewrite `<dir>/gen` inside `<dir>/generated.c` or
+// `<dir>/gen/out.txt`.
+void ReprobuildReplacePath(std::string& text, std::string const& from,
+                           std::string const& to)
+{
+  if (from.empty()) {
+    return;
+  }
+  auto continuesPath = [](char ch) {
+    return std::isalnum(static_cast<unsigned char>(ch)) || ch == '.' ||
+      ch == '_' || ch == '-' || ch == '+' || ch == '~' || ch == '/';
+  };
+  std::string::size_type pos = 0;
+  while ((pos = text.find(from, pos)) != std::string::npos) {
+    std::string::size_type const after = pos + from.size();
+    bool const boundaryBefore = pos == 0 || !continuesPath(text[pos - 1]);
+    bool const boundaryAfter =
+      after == text.size() || !continuesPath(text[after]);
+    if (boundaryBefore && boundaryAfter) {
+      text.replace(pos, from.size(), to);
+      pos += to.size();
+    } else {
+      pos = after;
+    }
+  }
 }
 
 bool ReprobuildWriteDyndepActionMap(
@@ -3430,37 +3521,111 @@ void cmGlobalReprobuildGenerator::WriteProviderMetadata()
     bool const declareOutputs = !configPair.IsCrossConfig;
     std::set<std::string>& cleanFiles = cleanFilesByConfig[config];
     for (auto const& lg : this->LocalGenerators) {
-      auto retargetCommandConfigExecutables =
-        [&](cmCustomCommandGenerator const& ccg,
-            std::vector<std::string>& commandLines) {
-          if (!multiConfig) {
-            return;
+      // CMake resolves an executable target to its location without a
+      // config directory, while this generator links each config's
+      // artifact into `<config>/`. `commandConfigArgvRewrite(ccg)` rewrites
+      // each non-imported executable an argv names to the artifact of the
+      // config it is evaluated for, for both the wrapper's command lines and
+      // an inlined argv, so the two run the same executable:
+      //
+      // - argv[0] for the command config when CMake recorded a
+      //   command-config use of that target, as it does for a bare target
+      //   name or `$<TARGET_FILE:...>` there (it evaluates the command
+      //   itself for the command config); else for the output config
+      //   (`$<OUTPUT_CONFIG:$<TARGET_FILE:...>>`).
+      // - any other argument for the output config when CMake recorded an
+      //   output-config use, as it does for `$<TARGET_FILE:...>` in an
+      //   argument; else for the command config
+      //   (`$<COMMAND_CONFIG:$<TARGET_FILE:...>>`).
+      //
+      // The uses are recorded per custom command, not per argument, and
+      // both configs' unprefixed paths are the same string, so a command
+      // that names one target for both configs in the same position (two
+      // arguments, or argv[0] and an argument against these defaults) gets
+      // the default for that position.
+      auto commandConfigArgvRewrite =
+        [&](cmCustomCommandGenerator const& ccg) -> ReprobuildArgvRewrite {
+        if (!multiConfig) {
+          return {};
+        }
+        struct ExecutableUses
+        {
+          bool Command = false;
+          bool Output = false;
+        };
+        std::map<cmGeneratorTarget*, ExecutableUses> uses;
+        for (auto const& utility : ccg.GetUtilities()) {
+          cmGeneratorTarget* utilityTarget =
+            lg->FindGeneratorTargetToUse(utility.Value.first);
+          if (!utilityTarget ||
+              utilityTarget->GetType() != cmStateEnums::EXECUTABLE ||
+              utilityTarget->IsImported()) {
+            continue;
           }
-          for (auto const& utility : ccg.GetUtilities()) {
-            cmGeneratorTarget* utilityTarget =
-              lg->FindGeneratorTargetToUse(utility.Value.first);
-            if (!utilityTarget ||
-                utilityTarget->GetType() != cmStateEnums::EXECUTABLE ||
-                utilityTarget->IsImported()) {
-              continue;
-            }
-            std::string const depConfig =
-              utility.Value.second ? commandConfig : config;
-            std::string const oldPath = utilityTarget->GetFullPath(depConfig);
-            std::string const newPath = cmStrCat(
-              binaryDir, "/",
-              ReprobuildConfigFullPath(binaryDir, oldPath, depConfig, true));
-            if (oldPath == newPath) {
-              continue;
-            }
-            for (std::string& commandLine : commandLines) {
-              cmSystemTools::ReplaceString(
-                commandLine, ReprobuildShellSingleQuote(oldPath),
-                ReprobuildShellSingleQuote(newPath));
-              cmSystemTools::ReplaceString(commandLine, oldPath, newPath);
+          ExecutableUses& use = uses[utilityTarget];
+          (utility.Value.second ? use.Command : use.Output) = true;
+        }
+        if (uses.empty()) {
+          return {};
+        }
+        return [uses, &binaryDir, commandConfig, config](
+                 std::vector<std::string>& argv, std::size_t commandIndex) {
+          for (std::size_t j = 0; j < argv.size(); ++j) {
+            for (auto const& entry : uses) {
+              std::string const& depConfig = j == commandIndex
+                ? (entry.second.Command ? commandConfig : config)
+                : (entry.second.Output ? config : commandConfig);
+              std::string const oldPath = entry.first->GetFullPath(depConfig);
+              std::string const newPath = cmStrCat(
+                binaryDir, "/",
+                ReprobuildConfigFullPath(binaryDir, oldPath, depConfig, true));
+              if (oldPath != newPath) {
+                ReprobuildReplacePath(argv[j], oldPath, newPath);
+              }
             }
           }
         };
+      };
+      // Resolves one DEPENDS entry of a custom command to the input path it
+      // names, relative to the build tree, the way the Ninja generators
+      // resolve it: a target name is looked up for the command config
+      // (cmLocalNinjaGenerator::AppendCustomCommandDeps receives the
+      // config the command runs in). In a multi-config tree a
+      // non-imported executable's artifact is the one this generator links
+      // into `<command config>/`, and `linkDep` is set to the action that
+      // links it, so the input has a producer. Returns false when the
+      // entry names no dependency.
+      auto resolveCustomCommandDepend =
+        [&](cmCustomCommandGenerator const& ccg, cmCustomCommand const& cc,
+            std::string const& dep, std::string& input,
+            std::string& linkDep) -> bool {
+        linkDep.clear();
+        std::string realDep;
+        if (!lg->GetRealDependency(dep, ccg.GetCommandConfig(), realDep,
+                                   cc.GetCMP0212Status())) {
+          return false;
+        }
+        cmGeneratorTarget* depTarget =
+          lg->FindGeneratorTargetToUse(cmSystemTools::GetFilenameName(dep));
+        if (multiConfig && depTarget &&
+            depTarget->GetType() == cmStateEnums::EXECUTABLE &&
+            !depTarget->IsImported() &&
+            realDep ==
+              depTarget->GetFullPath(ccg.GetCommandConfig(),
+                                     cmStateEnums::RuntimeBinaryArtifact,
+                                     /*realname=*/true)) {
+          std::string const& depConfig = ccg.GetCommandConfig();
+          input = ReprobuildConfigFullPath(binaryDir, realDep, depConfig,
+                                           multiConfig);
+          linkDep = ReprobuildSafeId(cmStrCat(
+            "link-", depTarget->GetName(),
+            ReprobuildConfigSuffix(depConfig, depConfig, multiConfig)));
+          return true;
+        }
+        input = ReprobuildCustomCommandPath(
+          binaryDir, lg->GetCurrentBinaryDirectory(), realDep);
+        return true;
+      };
       for (auto const& gtPtr : lg->GetGeneratorTargets()) {
         cmGeneratorTarget* gt = gtPtr.get();
         auto const type = gt->GetType();
@@ -3484,6 +3649,7 @@ void cmGlobalReprobuildGenerator::WriteProviderMetadata()
           bool usesTerminal = false;
           std::string jobPool;
           std::vector<std::string> utilityInputs;
+          std::vector<std::string> utilityLinkDeps;
           std::vector<std::string> utilityOutputs;
           std::string utilityDepfile;
           auto appendCustomCommand = [&](cmCustomCommand const& cc) {
@@ -3517,11 +3683,13 @@ void cmGlobalReprobuildGenerator::WriteProviderMetadata()
               ReprobuildAppendCleanFile(cleanFiles, binaryDir, byRel);
             }
             for (std::string const& dep : ccg.GetDepends()) {
-              std::string realDep;
-              if (lg->GetRealDependency(dep, ccg.GetOutputConfig(), realDep,
-                                        cc.GetCMP0212Status())) {
-                utilityInputs.push_back(ReprobuildCustomCommandPath(
-                  binaryDir, lg->GetCurrentBinaryDirectory(), realDep));
+              std::string input;
+              std::string linkDep;
+              if (resolveCustomCommandDepend(ccg, cc, dep, input, linkDep)) {
+                utilityInputs.push_back(std::move(input));
+                if (!linkDep.empty()) {
+                  ReprobuildAppendUnique(utilityLinkDeps, linkDep);
+                }
               }
             }
             if (cc.GetUsesTerminal()) {
@@ -3531,8 +3699,8 @@ void cmGlobalReprobuildGenerator::WriteProviderMetadata()
             }
             cm::append(commandLines,
                        ReprobuildCustomCommandLines(
-                         ccg, true, lg->GetCurrentBinaryDirectory()));
-            retargetCommandConfigExecutables(ccg, commandLines);
+                         ccg, true, lg->GetCurrentBinaryDirectory(),
+                         commandConfigArgvRewrite(ccg)));
           };
           for (cmCustomCommand const& cc : utilityCommands) {
             appendCustomCommand(cc);
@@ -3573,6 +3741,9 @@ void cmGlobalReprobuildGenerator::WriteProviderMetadata()
             cmStrCat("reprobuild-cmake-", target.UtilityAction.Var));
           target.UtilityAction.Pool = usesTerminal ? "console" : jobPool;
           target.UtilityAction.Inputs = utilityInputs;
+          for (std::string const& linkDep : utilityLinkDeps) {
+            ReprobuildAppendUnique(target.UtilityAction.Deps, linkDep);
+          }
           if (declareOutputs) {
             target.UtilityAction.Outputs = utilityOutputs;
             target.UtilityAction.Depfile = utilityDepfile;
@@ -3690,8 +3861,8 @@ void cmGlobalReprobuildGenerator::WriteProviderMetadata()
           cmCustomCommandGenerator ccg(*cc, commandConfig, lg.get(), false,
                                        config);
           std::vector<std::string> commandLines = ReprobuildCustomCommandLines(
-            ccg, true, lg->GetCurrentBinaryDirectory());
-          retargetCommandConfigExecutables(ccg, commandLines);
+            ccg, true, lg->GetCurrentBinaryDirectory(),
+            commandConfigArgvRewrite(ccg));
           if (commandLines.empty()) {
             continue;
           }
@@ -3744,11 +3915,13 @@ void cmGlobalReprobuildGenerator::WriteProviderMetadata()
             custom.Cacheable = false;
           }
           for (std::string const& dep : ccg.GetDepends()) {
-            std::string realDep;
-            if (lg->GetRealDependency(dep, ccg.GetOutputConfig(), realDep,
-                                      cc->GetCMP0212Status())) {
-              custom.Inputs.push_back(ReprobuildCustomCommandPath(
-                binaryDir, lg->GetCurrentBinaryDirectory(), realDep));
+            std::string input;
+            std::string linkDep;
+            if (resolveCustomCommandDepend(ccg, *cc, dep, input, linkDep)) {
+              custom.Inputs.push_back(std::move(input));
+              if (!linkDep.empty()) {
+                ReprobuildAppendUnique(custom.Deps, linkDep);
+              }
             }
           }
           for (auto const& utility : ccg.GetUtilities()) {
@@ -3787,12 +3960,30 @@ void cmGlobalReprobuildGenerator::WriteProviderMetadata()
           bool inlined = false;
           if (ccg.GetNumberOfCommands() == 1 &&
               !ccg.GetComment().has_value()) {
+            // The command starts in WORKING_DIRECTORY, or in the current
+            // binary directory when it names none, as for every CMake
+            // generator; the wrapper `cd`s there. The engine resolves an
+            // action's declared inputs and outputs, which are relative to
+            // the build root, against the action's cwd, so only a command
+            // that starts in the build root is launched directly.
+            std::string const startDir = cmSystemTools::CollapseFullPath(
+              ccg.GetWorkingDirectory().empty()
+                ? lg->GetCurrentBinaryDirectory()
+                : ccg.GetWorkingDirectory(),
+              lg->GetCurrentBinaryDirectory());
+            std::size_t commandIndex = 0;
             std::vector<std::string> inlineArgv =
-              ReprobuildCustomCommandArgv(ccg, 0);
+              startDir == cmSystemTools::CollapseFullPath(binaryDir)
+              ? ReprobuildCustomCommandArgv(ccg, 0, commandIndex)
+              : std::vector<std::string>();
             if (!inlineArgv.empty()) {
+              if (ReprobuildArgvRewrite const rewrite =
+                    commandConfigArgvRewrite(ccg)) {
+                rewrite(inlineArgv, commandIndex);
+              }
               custom.Inline = true;
               custom.InlineArgv = std::move(inlineArgv);
-              custom.InlineCwd = ccg.GetWorkingDirectory();
+              custom.InlineCwd = startDir;
               inlined = true;
             }
           }
@@ -4852,23 +5043,12 @@ void cmGlobalReprobuildGenerator::WriteProviderMetadata()
             for (cmCustomCommand const& cc : commands) {
               cmCustomCommandGenerator ccg(cc, commandConfig, lg.get(), false,
                                            config);
-              std::vector<std::string> commandLines;
-              for (unsigned int i = 0; i < ccg.GetNumberOfCommands(); ++i) {
-                std::string commandLine;
-                std::string const workingDirectory = ccg.GetWorkingDirectory();
-                if (!workingDirectory.empty()) {
-                  commandLine += "cd ";
-                  commandLine += ReprobuildShellSingleQuote(workingDirectory);
-                  commandLine += " && ";
-                }
-                commandLine += ReprobuildShellSingleQuote(ccg.GetCommand(i));
-                ccg.AppendArguments(i, commandLine);
-                commandLines.push_back(commandLine);
-              }
+              std::vector<std::string> commandLines =
+                ReprobuildCustomCommandLines(ccg, false, std::string(),
+                                             commandConfigArgvRewrite(ccg));
               if (commandLines.empty()) {
                 continue;
               }
-              retargetCommandConfigExecutables(ccg, commandLines);
 
               ReprobuildAction event;
               event.Id = ReprobuildSafeId(cmStrCat(

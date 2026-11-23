@@ -231,6 +231,11 @@ static bool cmOutputConverterIsShellOperator(cm::string_view str)
   return (shellOperators.count(str) != 0);
 }
 
+bool cmOutputConverter::IsShellOperator(cm::string_view str)
+{
+  return cmOutputConverterIsShellOperator(str);
+}
+
 std::string cmOutputConverter::EscapeForShell(cm::string_view str,
                                               bool makeVars, bool forEcho,
                                               bool useWatcomQuote,

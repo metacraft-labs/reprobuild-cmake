@@ -1185,7 +1185,37 @@ function(write_cross_config_generated_source_project source_dir project_name)
     "  COMMAND gen \"$<COMMAND_CONFIG:$<CONFIG>>\" \"$<OUTPUT_CONFIG:$<CONFIG>>\" \"\${CMAKE_CURRENT_BINARY_DIR}/$<OUTPUT_CONFIG:$<CONFIG>>/generated.c\"\n"
     "  DEPENDS gen\n"
     "  VERBATIM)\n"
-    "add_executable(app main.c \"$<$<CONFIG:Debug>:\${src_Debug}>\" \"$<$<CONFIG:Release>:\${src_Release}>\")\n")
+    "add_executable(app main.c \"$<$<CONFIG:Debug>:\${src_Debug}>\" \"$<$<CONFIG:Release>:\${src_Release}>\")\n"
+    # `probe` is named twice by each command: as argv[0], which runs the
+    # command config's executable, and as `$<TARGET_FILE:probe>` in an
+    # argument, which is the output config's. Both are the same unprefixed
+    # path to CMake. The library is never built; the provider and the
+    # wrapper script are checked. COMMENT keeps the last command off the
+    # inline-exec path, so it runs through the wrapper. probe_output.txt
+    # names probe as argv[0] for the output config only.
+    "add_executable(probe EXCLUDE_FROM_ALL main.c)\n"
+    "foreach(cfg Debug Release)\n"
+    "  set_source_files_properties(\"\${CMAKE_CURRENT_BINARY_DIR}/\${cfg}/probe_inline.txt\"\n"
+    "    \"\${CMAKE_CURRENT_BINARY_DIR}/\${cfg}/probe_output.txt\"\n"
+    "    \"\${CMAKE_CURRENT_BINARY_DIR}/\${cfg}/probe_wrapped.txt\" PROPERTIES GENERATED 1)\n"
+    "endforeach()\n"
+    "add_custom_command(OUTPUT \"\${CMAKE_CURRENT_BINARY_DIR}/$<CONFIG>/probe_inline.txt\"\n"
+    "  COMMAND probe \"$<TARGET_FILE:probe>\" \"\${CMAKE_CURRENT_BINARY_DIR}/$<OUTPUT_CONFIG:$<CONFIG>>/probe_inline.txt\"\n"
+    "  VERBATIM)\n"
+    "add_custom_command(OUTPUT \"\${CMAKE_CURRENT_BINARY_DIR}/$<CONFIG>/probe_output.txt\"\n"
+    "  COMMAND \"$<OUTPUT_CONFIG:$<TARGET_FILE:probe>>\" \"\${CMAKE_CURRENT_BINARY_DIR}/$<OUTPUT_CONFIG:$<CONFIG>>/probe_output.txt\"\n"
+    "  VERBATIM)\n"
+    "add_custom_command(OUTPUT \"\${CMAKE_CURRENT_BINARY_DIR}/$<CONFIG>/probe_wrapped.txt\"\n"
+    "  COMMAND probe \"$<TARGET_FILE:probe>\" \"\${CMAKE_CURRENT_BINARY_DIR}/$<OUTPUT_CONFIG:$<CONFIG>>/probe_wrapped.txt\"\n"
+    "  COMMENT \"probe through the wrapper\"\n"
+    "  VERBATIM)\n"
+    "add_library(probe_lib STATIC EXCLUDE_FROM_ALL main.c\n"
+    "  \"$<$<CONFIG:Debug>:\${CMAKE_CURRENT_BINARY_DIR}/Debug/probe_inline.txt>\"\n"
+    "  \"$<$<CONFIG:Release>:\${CMAKE_CURRENT_BINARY_DIR}/Release/probe_inline.txt>\"\n"
+    "  \"$<$<CONFIG:Debug>:\${CMAKE_CURRENT_BINARY_DIR}/Debug/probe_output.txt>\"\n"
+    "  \"$<$<CONFIG:Release>:\${CMAKE_CURRENT_BINARY_DIR}/Release/probe_output.txt>\"\n"
+    "  \"$<$<CONFIG:Debug>:\${CMAKE_CURRENT_BINARY_DIR}/Debug/probe_wrapped.txt>\"\n"
+    "  \"$<$<CONFIG:Release>:\${CMAKE_CURRENT_BINARY_DIR}/Release/probe_wrapped.txt>\")\n")
   file(WRITE "${source_dir}/gen.c"
     "#include <stdio.h>\n"
     "#include <string.h>\n"
@@ -1206,6 +1236,88 @@ function(write_cross_config_generated_source_project source_dir project_name)
   file(WRITE "${source_dir}/main.c"
     "int generated_value(void);\n"
     "int main(void) { return generated_value() == 42 ? 0 : 1; }\n")
+endfunction()
+
+# A single-config project whose custom commands each take the inline-exec
+# fast path or must not. Each command writes its output by a relative path,
+# so it is written only if the command starts where CMake starts it: the
+# current binary directory, as no command names a WORKING_DIRECTORY.
+#
+#   genex.c     VERBATIM; its arguments are generator expressions
+#               (`$<CONFIG>`, `$<TARGET_FILE_NAME:gen>`) that only the
+#               evaluated command line resolves.
+#   oldstyle.c  the same without VERBATIM; every evaluated argument is
+#               plain text, so the shell would pass it unchanged and the
+#               command is still launched directly.
+#   redirect.c  VERBATIM, but CMake writes the `>` unquoted for every
+#               generator, so it is a shell redirection and this command
+#               needs the shell: it cannot be launched directly.
+#   subdir.c    in a subdirectory, so it starts in `<build>/sub`. The engine
+#               resolves an action's declared outputs against its cwd, so
+#               the generator keeps the wrapper, which `cd`s there.
+#
+# `gen` exits non-zero on any argv it was not configured to receive, and
+# `app` returns 0 only if every generated source carries the expected value.
+function(write_inline_custom_command_argv_project source_dir project_name)
+  file(REMOVE_RECURSE "${source_dir}")
+  file(MAKE_DIRECTORY "${source_dir}/sub")
+  file(WRITE "${source_dir}/CMakeLists.txt"
+    "cmake_minimum_required(VERSION 3.20)\n"
+    "project(${project_name} C)\n"
+    "add_executable(gen gen.c)\n"
+    "add_custom_command(OUTPUT \"\${CMAKE_CURRENT_BINARY_DIR}/genex.c\"\n"
+    "  COMMAND gen genex \"$<CONFIG>\" \"$<TARGET_FILE_NAME:gen>\" genex.c\n"
+    "  DEPENDS gen\n"
+    "  VERBATIM)\n"
+    "add_custom_command(OUTPUT \"\${CMAKE_CURRENT_BINARY_DIR}/oldstyle.c\"\n"
+    "  COMMAND gen oldstyle \"$<CONFIG>\" \"$<TARGET_FILE_NAME:gen>\" oldstyle.c\n"
+    "  DEPENDS gen)\n"
+    "add_custom_command(OUTPUT \"\${CMAKE_CURRENT_BINARY_DIR}/redirect.c\"\n"
+    "  COMMAND gen print > \"\${CMAKE_CURRENT_BINARY_DIR}/redirect.c\"\n"
+    "  DEPENDS gen\n"
+    "  VERBATIM)\n"
+    "add_subdirectory(sub)\n"
+    "add_executable(app main.c \"\${CMAKE_CURRENT_BINARY_DIR}/genex.c\"\n"
+    "  \"\${CMAKE_CURRENT_BINARY_DIR}/oldstyle.c\"\n"
+    "  \"\${CMAKE_CURRENT_BINARY_DIR}/redirect.c\")\n"
+    "target_link_libraries(app PRIVATE subdir)\n")
+  file(WRITE "${source_dir}/sub/CMakeLists.txt"
+    "add_custom_command(OUTPUT \"\${CMAKE_CURRENT_BINARY_DIR}/subdir.c\"\n"
+    "  COMMAND gen subdir \"$<CONFIG>\" \"$<TARGET_FILE_NAME:gen>\" subdir.c\n"
+    "  DEPENDS gen\n"
+    "  VERBATIM)\n"
+    "add_library(subdir STATIC \"\${CMAKE_CURRENT_BINARY_DIR}/subdir.c\")\n")
+  file(WRITE "${source_dir}/gen.c"
+    "#include <stdio.h>\n"
+    "#include <string.h>\n"
+    "int main(int argc, char** argv) {\n"
+    "  if (argc == 2 && strcmp(argv[1], \"print\") == 0) {\n"
+    "    printf(\"int redirect_value(void) { return 42; }\\n\");\n"
+    "    return 0;\n"
+    "  }\n"
+    "  if (argc != 5) {\n"
+    "    fprintf(stderr, \"gen: unexpected argv (argc=%d)\\n\", argc);\n"
+    "    return 2;\n"
+    "  }\n"
+    "  if (strcmp(argv[2], \"Debug\") != 0 || strcmp(argv[3], \"gen\") != 0) {\n"
+    "    fprintf(stderr, \"gen: unevaluated argv: %s %s\\n\", argv[2], argv[3]);\n"
+    "    return 3;\n"
+    "  }\n"
+    "  FILE* f = fopen(argv[4], \"w\");\n"
+    "  if (!f) return 4;\n"
+    "  fprintf(f, \"int %s_value(void) { return 42; }\\n\", argv[1]);\n"
+    "  fclose(f);\n"
+    "  return 0;\n"
+    "}\n")
+  file(WRITE "${source_dir}/main.c"
+    "int genex_value(void);\n"
+    "int oldstyle_value(void);\n"
+    "int redirect_value(void);\n"
+    "int subdir_value(void);\n"
+    "int main(void) {\n"
+    "  return genex_value() == 42 && oldstyle_value() == 42 &&\n"
+    "    redirect_value() == 42 && subdir_value() == 42 ? 0 : 1;\n"
+    "}\n")
 endfunction()
 
 function(write_custom_depfile_project source_dir project_name)
@@ -3311,6 +3423,37 @@ elseif(TEST_MODE STREQUAL "generated_source_custom_command")
   file(READ "${gen_report_path}" gen_report)
   assert_contains("${gen_report}" "\"id\": \"custom-command-genapp" "generated source report")
   assert_contains("${gen_report}" "\"id\": \"compile-genapp" "generated source report")
+elseif(TEST_MODE STREQUAL "inline_custom_command_argv")
+  set(inline_source_dir "${TEST_BINARY_ROOT}/inline-src")
+  set(inline_binary_dir "${TEST_BINARY_ROOT}/inline-build")
+  write_inline_custom_command_argv_project("${inline_source_dir}" ReprobuildInlineArgv)
+  run_configure("${inline_source_dir}" "${inline_binary_dir}" TRUE ""
+    "-DCMAKE_BUILD_TYPE=Debug")
+  file(READ "${inline_binary_dir}/reprobuild.nim" inline_provider)
+  string(REGEX MATCH "buildAction\\(\"custom-command-app-genex\\.c\"[^\n]*" genex_action "${inline_provider}")
+  assert_contains("${genex_action}"
+    "inlineExecCall(@[\"${inline_binary_dir}/gen\", \"genex\", \"Debug\", \"gen\", \"genex.c\"], cwd = \"${inline_binary_dir}\")"
+    "VERBATIM custom command with generator expressions")
+  string(REGEX MATCH "buildAction\\(\"custom-command-app-oldstyle\\.c\"[^\n]*" oldstyle_action "${inline_provider}")
+  assert_contains("${oldstyle_action}"
+    "inlineExecCall(@[\"${inline_binary_dir}/gen\", \"oldstyle\", \"Debug\", \"gen\", \"oldstyle.c\"], cwd = \"${inline_binary_dir}\")"
+    "non-VERBATIM custom command with only literal arguments")
+  string(REGEX MATCH "buildAction\\(\"custom-command-app-redirect\\.c\"[^\n]*" redirect_action "${inline_provider}")
+  assert_contains("${redirect_action}" "publicCliCall(" "custom command with a shell operator")
+  assert_not_contains("${redirect_action}" "inlineExecCall(" "custom command with a shell operator")
+  string(REGEX MATCH "buildAction\\(\"custom-command-subdir-sub_subdir\\.c\"[^\n]*" subdir_action "${inline_provider}")
+  assert_contains("${subdir_action}" "publicCliCall(" "custom command that starts in a subdirectory")
+  assert_not_contains("${inline_provider}" "$<" "inline custom command provider")
+  start_runquota("${TEST_BINARY_ROOT}" runquota_socket runquota_pid)
+  run_build("${inline_binary_dir}" "app" "${runquota_socket}" inline_output)
+  stop_runquota("${runquota_pid}")
+  foreach(generated IN ITEMS genex.c oldstyle.c redirect.c sub/subdir.c)
+    assert_file_exists("${inline_binary_dir}/${generated}" "custom command output")
+  endforeach()
+  execute_process(COMMAND "${inline_binary_dir}/app" RESULT_VARIABLE inline_result)
+  if(NOT inline_result EQUAL 0)
+    message(FATAL_ERROR "Inline custom command executable failed with ${inline_result}")
+  endif()
 elseif(TEST_MODE STREQUAL "custom_depfile_hidden_input")
   set(depcc_source_dir "${TEST_BINARY_ROOT}/custom-dep-src")
   set(depcc_binary_dir "${TEST_BINARY_ROOT}/custom-dep-build")
@@ -3509,6 +3652,42 @@ elseif(TEST_MODE STREQUAL "cross_config_generated_source")
       assert_contains("${cross_provider}" "${expected}" "cross-config provider")
     endif()
   endforeach()
+
+  # Every custom command here takes the inline-exec fast path, so its argv
+  # must be the evaluated one: argv[0] the command config's `gen`, which
+  # this generator links into `<config>/`, and no generator expression
+  # left. The input must name that executable, not the bare target name.
+  string(REGEX MATCH "buildAction\\(\"custom-command-app-Debug_generated\\.c-Debug-from-Release\"[^\n]*" cross_debug_from_release "${cross_provider}")
+  assert_contains("${cross_debug_from_release}"
+    "inlineExecCall(@[\"${cross_binary_dir}/Release/gen\", \"Release\", \"Debug\", \"${cross_binary_dir}/Debug/generated.c\"]"
+    "cross-config inlined custom command argv")
+  assert_contains("${cross_debug_from_release}" "inputs = @[\"Release/gen\"]" "cross-config inlined custom command inputs")
+  assert_contains("${cross_debug_from_release}" "\"link-gen-Release\"" "cross-config inlined custom command deps")
+  string(REGEX MATCH "buildAction\\(\"custom-command-app-Debug_generated\\.c-Debug\"[^\n]*" cross_debug "${cross_provider}")
+  assert_contains("${cross_debug}"
+    "inlineExecCall(@[\"${cross_binary_dir}/Debug/gen\", \"Debug\", \"Debug\", \"${cross_binary_dir}/Debug/generated.c\"]"
+    "native-config inlined custom command argv")
+  assert_contains("${cross_debug}" "inputs = @[\"Debug/gen\"]" "native-config inlined custom command inputs")
+  assert_not_contains("${cross_provider}" "$<" "cross-config provider")
+  # A command naming `probe` as argv[0] and as `$<TARGET_FILE:probe>` runs
+  # the command config's probe on the output config's, as Ninja Multi-Config
+  # runs it, both inlined and through the wrapper script.
+  string(REGEX MATCH "buildAction\\(\"custom-command-probe_lib-Debug_probe_inline\\.txt-Debug-from-Release\"[^\n]*" probe_inline "${cross_provider}")
+  assert_contains("${probe_inline}"
+    "inlineExecCall(@[\"${cross_binary_dir}/Release/probe\", \"${cross_binary_dir}/Debug/probe\", \"${cross_binary_dir}/Debug/probe_inline.txt\"]"
+    "cross-config inlined argv naming one executable for both configs")
+  string(REGEX MATCH "buildAction\\(\"custom-command-probe_lib-Debug_probe_output\\.txt-Debug-from-Release\"[^\n]*" probe_output "${cross_provider}")
+  assert_contains("${probe_output}"
+    "inlineExecCall(@[\"${cross_binary_dir}/Debug/probe\", \"${cross_binary_dir}/Debug/probe_output.txt\"]"
+    "cross-config inlined argv[0] for the output config")
+  string(REGEX MATCH "buildAction\\(\"custom-command-probe_lib-Debug_probe_wrapped\\.txt-Debug-from-Release\", publicCliCall\\(\"([^\"]+)\"" probe_wrapped "${cross_provider}")
+  if(NOT CMAKE_MATCH_1)
+    message(FATAL_ERROR "cross-config wrapped probe action not found in the provider:\n${cross_provider}")
+  endif()
+  file(READ "${cross_binary_dir}/CMakeFiles/reprobuild/bin/${CMAKE_MATCH_1}" probe_wrapper)
+  assert_contains("${probe_wrapper}"
+    "'${cross_binary_dir}/Release/probe' ${cross_binary_dir}/Debug/probe ${cross_binary_dir}/Debug/probe_wrapped.txt"
+    "cross-config wrapper naming one executable for both configs")
 
   start_runquota("${TEST_BINARY_ROOT}" runquota_socket runquota_pid)
   run_build_config("${cross_binary_dir}" "Release" "app:Debug" "${runquota_socket}" cross_output)

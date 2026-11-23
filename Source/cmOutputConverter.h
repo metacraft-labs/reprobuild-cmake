@@ -112,6 +112,10 @@ public:
                              bool unescapeNinjaConfiguration = false,
                              bool forResponse = false) const;
   static std::string EscapeForShell(cm::string_view str, int flags);
+  // Whether EscapeForShell passes `str` through unescaped because it is a
+  // shell operator (`>`, `|`, `&&`, ...): a command line holding one means
+  // what the shell makes of it, not what its argv says.
+  static bool IsShellOperator(cm::string_view str);
 
   enum class WrapQuotes
   {

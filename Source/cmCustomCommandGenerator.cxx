@@ -383,44 +383,39 @@ static std::string escapeForShellOldStyle(std::string const& str)
 #endif
 }
 
+std::vector<std::string> cmCustomCommandGenerator::GetArgv(
+  unsigned int c, std::size_t* commandIndex) const
+{
+  std::vector<std::string> argv = this->GetCrossCompilingEmulator(c);
+  if (commandIndex) {
+    *commandIndex = argv.size();
+  }
+  cmCustomCommandLine const& commandLine = this->CommandLines[c];
+  for (unsigned int j = 0; j < commandLine.size(); ++j) {
+    char const* location = j == 0 ? this->GetArgv0Location(c) : nullptr;
+    argv.emplace_back(location ? std::string(location) : commandLine[j]);
+  }
+  return argv;
+}
+
+std::string cmCustomCommandGenerator::EscapeArgument(
+  std::string const& arg) const
+{
+  if (this->OldStyle) {
+    return escapeForShellOldStyle(arg);
+  }
+  return this->LG->EscapeForShell(arg, this->MakeVars, false, false,
+                                  this->MakeVars && this->LG->IsNinjaMulti());
+}
+
 void cmCustomCommandGenerator::AppendArguments(unsigned int c,
                                                std::string& cmd) const
 {
-  unsigned int offset = 1;
-  std::vector<std::string> emulator = this->GetCrossCompilingEmulator(c);
-  if (!emulator.empty()) {
-    for (unsigned j = 1; j < emulator.size(); ++j) {
-      cmd += " ";
-      if (this->OldStyle) {
-        cmd += escapeForShellOldStyle(emulator[j]);
-      } else {
-        cmd +=
-          this->LG->EscapeForShell(emulator[j], this->MakeVars, false, false,
-                                   this->MakeVars && this->LG->IsNinjaMulti());
-      }
-    }
-
-    offset = 0;
-  }
-
-  cmCustomCommandLine const& commandLine = this->CommandLines[c];
-  for (unsigned int j = offset; j < commandLine.size(); ++j) {
-    std::string arg;
-    if (char const* location = j == 0 ? this->GetArgv0Location(c) : nullptr) {
-      // GetCommand returned the emulator instead of the argv0 location,
-      // so transform the latter now.
-      arg = location;
-    } else {
-      arg = commandLine[j];
-    }
+  // argv[0] is what GetCommand returns; the rest are appended here.
+  std::vector<std::string> const argv = this->GetArgv(c);
+  for (std::size_t j = 1; j < argv.size(); ++j) {
     cmd += " ";
-    if (this->OldStyle) {
-      cmd += escapeForShellOldStyle(arg);
-    } else {
-      cmd +=
-        this->LG->EscapeForShell(arg, this->MakeVars, false, false,
-                                 this->MakeVars && this->LG->IsNinjaMulti());
-    }
+    cmd += this->EscapeArgument(argv[j]);
   }
 }
 

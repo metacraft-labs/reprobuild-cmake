@@ -684,6 +684,20 @@ add_test(NAME e2e_cmake_reprobuild_generated_source_custom_command
     -DTEST_REPROBUILD_REPRO=${_ReprobuildBin}
     -DTEST_RUNQUOTAD=${_RunQuotaDaemonBin}
     -P ${_ReprobuildGeneratorTestDir}/e2e.cmake)
+# A single-command custom command launched without a shell runs the
+# evaluated argv, in the directory the shell would have started in, and
+# one whose arguments need the shell keeps the wrapper.
+add_test(NAME e2e_cmake_reprobuild_inline_custom_command_argv
+  COMMAND ${CMAKE_CMAKE_COMMAND}
+    -DCMAKE_COMMAND=${CMAKE_CMAKE_COMMAND}
+    -DTEST_MODE=inline_custom_command_argv
+    -DTEST_BINARY_ROOT=${_ReprobuildGeneratorTestBin}/inline-custom-command-argv
+    -DTEST_C_COMPILER=${CMAKE_C_COMPILER}
+    -DTEST_REPROBUILD_SOURCE_ROOT=${_ReprobuildSourceRoot}
+    -DTEST_REPROBUILD_REPO=${_ReprobuildSourceRoot}
+    -DTEST_REPROBUILD_REPRO=${_ReprobuildBin}
+    -DTEST_RUNQUOTAD=${_RunQuotaDaemonBin}
+    -P ${_ReprobuildGeneratorTestDir}/e2e.cmake)
 add_test(NAME e2e_cmake_reprobuild_custom_depfile_hidden_input
   COMMAND ${CMAKE_CMAKE_COMMAND}
     -DCMAKE_COMMAND=${CMAKE_CMAKE_COMMAND}
