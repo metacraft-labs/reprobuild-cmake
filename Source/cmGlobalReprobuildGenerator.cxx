@@ -6193,8 +6193,16 @@ void cmGlobalReprobuildGenerator::WriteProviderMetadata()
   std::string const cpackCmd = cmSystemTools::GetCPackCommand();
   std::vector<std::string> helpTargets = { "all", "default", "clean" };
   auto addHelpTargetName = [&helpTargets](std::string const& name) {
-    helpTargets.push_back(name);
+    ReprobuildAppendUnique(helpTargets, name);
   };
+  // `help` lists the project's own targets as well as the builtins, as
+  // Ninja's `help` does (spec: reprobuild-pm
+  // spec/CMake-Reprobuild-Generator.md, "Builtin Utility Targets": "`help`
+  // should list CMake primary targets"). At this point `buildTargets` holds
+  // only the project's targets; the builtins are appended below.
+  for (ReprobuildTarget const& target : buildTargets) {
+    addHelpTargetName(target.Name);
+  }
   bool const skipInstallRules = rootMf->IsOn("CMAKE_SKIP_INSTALL_RULES");
   if (!skipInstallRules &&
       cmSystemTools::FileExists(cmStrCat(binaryDir, "/cmake_install.cmake"))) {
