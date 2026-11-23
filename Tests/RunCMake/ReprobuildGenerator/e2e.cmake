@@ -3661,13 +3661,20 @@ elseif(TEST_MODE STREQUAL "regeneration_direct_mode")
   write_regeneration_project("${direct_source_dir}" ReprobuildDirectRegen 3)
   run_configure("${direct_source_dir}" "${direct_binary_dir}" TRUE "")
   start_runquota("${TEST_BINARY_ROOT}" runquota_socket runquota_pid)
-  run_direct_repro_build("${direct_binary_dir}" "regenapp" "${runquota_socket}" direct_first)
+  # `repro build` prints its action status lines, the
+  # `cmakeRegenerationAction:` line among them, only under --log=actions;
+  # its default is quiet (reprobuild-pm spec/CLI/build.md, the --log flag).
+  # The `cmake --build` driver passes --log=actions to every build it
+  # launches, so the direct builds ask for the same lines to compare the
+  # same regeneration behaviour.
+  set(direct_log --log=actions)
+  run_direct_repro_build("${direct_binary_dir}" "regenapp" "${runquota_socket}" direct_first ${direct_log})
   assert_regeneration_action_fresh_or_cached("${direct_first}" "direct initial regeneration edge")
-  run_direct_repro_build("${direct_binary_dir}" "regenapp" "${runquota_socket}" direct_noop)
+  run_direct_repro_build("${direct_binary_dir}" "regenapp" "${runquota_socket}" direct_noop ${direct_log})
   assert_contains("${direct_noop}" "cmakeRegenerationAction: __repro_cmake_regenerate status=asCacheHit launched=false cache=cdHit" "direct no-op regeneration edge")
   execute_process(COMMAND "${CMAKE_COMMAND}" -E sleep 1.1)
   write_regeneration_project("${direct_source_dir}" ReprobuildDirectRegen 4)
-  run_direct_repro_build("${direct_binary_dir}" "regenapp" "${runquota_socket}" direct_dirty)
+  run_direct_repro_build("${direct_binary_dir}" "regenapp" "${runquota_socket}" direct_dirty ${direct_log})
   stop_runquota("${runquota_pid}")
   assert_regeneration_action_fresh_or_cached("${direct_dirty}" "direct dirty regeneration edge")
   execute_process(COMMAND "${direct_binary_dir}/regenapp" RESULT_VARIABLE direct_result)
