@@ -6117,13 +6117,35 @@ void cmGlobalReprobuildGenerator::WriteProviderMetadata()
           if (declareOutputs) {
             linkGraph.Outputs = { linkGraphRel };
           }
+          // The wrapper runs with the declared action `PATH` only (see
+          // `ReprobuildActionPathVar`): the wrapper directory, the
+          // toolchain's and binutils' directories and cmake's `bin`, and no
+          // coreutils. So it uses nothing else: shell builtins, `nm`,
+          // `readelf` and `otool` from the toolchain (each guarded by
+          // `command -v`, as is `file`, which that `PATH` need not hold),
+          // and cmake by absolute path for the directory and the rename.
+          // `mkdir`, `dirname`, `head` and `mv` are not on that `PATH`.
+          // Spec: reprobuild-pm spec/CMake-Reprobuild-Generator.md, "Hot
+          // Code Reloading" (helper actions the generator writes).
+          std::string const linkGraphDir =
+            cmSystemTools::GetFilenamePath(linkGraphRel);
+          std::string const cmakeCmd =
+            ReprobuildShellSingleQuote(cmSystemTools::GetCMakeCommand());
           std::vector<std::string> lines;
+          // `first N`: copy at most N lines of stdin, the last one even
+          // without a trailing newline; a builtin-only `head -N`.
+          lines.emplace_back(
+            "first() { n=0; while [ \"$n\" -lt \"$1\" ] && "
+            "{ IFS= read -r l || [ -n \"$l\" ]; }; do "
+            "printf '%s\\n' \"$l\"; n=$((n + 1)); l=; done; }");
           lines.push_back(
             cmStrCat("out=", ReprobuildShellSingleQuote(linkGraphRel),
                      "; bin=", ReprobuildShellSingleQuote(realOutput),
-                     "; mkdir -p \"$(dirname \"$out\")\"; "
-                     "tmp=\"$out.tmp\"; "
-                     "{ printf '%s\\n' "
+                     "; tmp=\"$out.tmp\""));
+          lines.push_back(cmStrCat(cmakeCmd, " -E make_directory ",
+                                   ReprobuildShellSingleQuote(linkGraphDir)));
+          lines.push_back(
+            cmStrCat("{ printf '%s\\n' "
                      "'schema_id=reprobuild.hcr.linkgraph-evidence.v1'; "
                      "printf 'target=%s\\n' ",
                      ReprobuildShellSingleQuote(target.Name),
@@ -6133,18 +6155,18 @@ void cmGlobalReprobuildGenerator::WriteProviderMetadata()
                      "printf '%s\\n' 'file_end'; fi; "
                      "if command -v nm >/dev/null 2>&1; then "
                      "printf '%s\\n' 'symbols_begin'; "
-                     "nm -an \"$bin\" 2>&1 | head -200; "
+                     "nm -an \"$bin\" 2>&1 | first 200; "
                      "printf '%s\\n' 'symbols_end'; fi; "
                      "if command -v otool >/dev/null 2>&1; then "
                      "printf '%s\\n' 'load_commands_begin'; "
-                     "otool -l \"$bin\" 2>&1 | head -400; "
+                     "otool -l \"$bin\" 2>&1 | first 400; "
                      "printf '%s\\n' 'load_commands_end'; "
                      "elif command -v readelf >/dev/null 2>&1; then "
                      "printf '%s\\n' 'elf_symbols_begin'; "
-                     "readelf -Ws \"$bin\" 2>&1 | head -400; "
+                     "readelf -Ws \"$bin\" 2>&1 | first 400; "
                      "printf '%s\\n' 'elf_symbols_end'; fi; "
-                     "} > \"$tmp\"; test -s \"$tmp\"; "
-                     "mv \"$tmp\" \"$out\""));
+                     "} > \"$tmp\"; test -s \"$tmp\""));
+          lines.push_back(cmStrCat(cmakeCmd, " -E rename \"$tmp\" \"$out\""));
           std::string const wrapperPath =
             cmStrCat(wrapperDir, "/", linkGraph.ToolId);
           if (!ReprobuildWriteCommandScript(wrapperPath, binaryDir, lines)) {

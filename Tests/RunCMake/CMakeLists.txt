@@ -418,6 +418,34 @@ if(CMAKE_HOST_UNIX)
         -P ${_ReprobuildGeneratorTestDir}/scan-wrapper-quoting.cmake)
   endif()
 endif()
+# The HCR linkgraph action the generator writes runs with nothing but the
+# PATH it declares (ELF hosts: the evidence is read with nm and readelf).
+if(CMAKE_HOST_UNIX AND NOT CMAKE_HOST_APPLE)
+  find_program(_ReprobuildHcrCc NAMES gcc cc)
+  find_program(_ReprobuildHcrNm NAMES nm)
+  find_program(_ReprobuildHcrReadelf NAMES readelf)
+  if(_ReprobuildHcrCc AND _ReprobuildHcrNm AND _ReprobuildHcrReadelf)
+    add_test(NAME e2e_cmake_reprobuild_hcr_linkgraph_declared_path
+      COMMAND ${CMAKE_CMAKE_COMMAND}
+        -DTEST_CMAKE=${CMAKE_CMAKE_COMMAND}
+        -DTEST_C_COMPILER=${_ReprobuildHcrCc}
+        -DTEST_BINARY_ROOT=${_ReprobuildGeneratorTestBin}/hcr-linkgraph-declared-path
+        -P ${_ReprobuildGeneratorTestDir}/hcr-linkgraph-declared-path.cmake)
+    # The same, with coreutils on the declared PATH: the wrapper must still
+    # run with only nm and readelf on its PATH.
+    find_program(_ReprobuildHcrMkdir NAMES mkdir)
+    if(_ReprobuildHcrMkdir)
+      get_filename_component(_ReprobuildHcrCoreutils "${_ReprobuildHcrMkdir}" DIRECTORY)
+      add_test(NAME e2e_cmake_reprobuild_hcr_linkgraph_coreutils_on_path
+        COMMAND ${CMAKE_CMAKE_COMMAND}
+          -DTEST_CMAKE=${CMAKE_CMAKE_COMMAND}
+          -DTEST_C_COMPILER=${_ReprobuildHcrCc}
+          -DTEST_ACTION_PATH_EXTRA=${_ReprobuildHcrCoreutils}
+          -DTEST_BINARY_ROOT=${_ReprobuildGeneratorTestBin}/hcr-linkgraph-coreutils-on-path
+          -P ${_ReprobuildGeneratorTestDir}/hcr-linkgraph-declared-path.cmake)
+    endif()
+  endif()
+endif()
 if(_ReprobuildMsvcClang AND CMAKE_HOST_WIN32)
   add_test(NAME e2e_cmake_reprobuild_msvc_import_library_build
     COMMAND ${CMAKE_CMAKE_COMMAND}
