@@ -418,6 +418,35 @@ if(CMAKE_HOST_UNIX)
         -P ${_ReprobuildGeneratorTestDir}/scan-wrapper-quoting.cmake)
   endif()
 endif()
+# Each compile_commands.json `command` is its compile's argv as one
+# shell-escaped string, whatever characters an argument holds: one test per
+# toolchain, each registered where its compilers are installed.
+if(CMAKE_HOST_UNIX)
+  find_program(_ReprobuildDbGcc NAMES gcc)
+  find_program(_ReprobuildDbGxx NAMES g++)
+  find_program(_ReprobuildDbGfortran NAMES gfortran)
+  if(_ReprobuildDbGcc AND _ReprobuildDbGxx AND _ReprobuildDbGfortran)
+    add_test(NAME e2e_cmake_reprobuild_compile_commands_quoting_gnu
+      COMMAND ${CMAKE_CMAKE_COMMAND}
+        -DTEST_CMAKE=${CMAKE_CMAKE_COMMAND}
+        -DTEST_TOOLCHAIN=gnu
+        -DTEST_GCC=${_ReprobuildDbGcc}
+        -DTEST_GXX=${_ReprobuildDbGxx}
+        -DTEST_GFORTRAN=${_ReprobuildDbGfortran}
+        -DTEST_BINARY_ROOT=${_ReprobuildGeneratorTestBin}/compile-commands-quoting-gnu
+        -P ${_ReprobuildGeneratorTestDir}/compile-commands-quoting.cmake)
+  endif()
+  find_program(_ReprobuildDbSwiftc NAMES swiftc)
+  if(_ReprobuildDbSwiftc)
+    add_test(NAME e2e_cmake_reprobuild_compile_commands_quoting_swift
+      COMMAND ${CMAKE_CMAKE_COMMAND}
+        -DTEST_CMAKE=${CMAKE_CMAKE_COMMAND}
+        -DTEST_TOOLCHAIN=swift
+        -DTEST_SWIFTC=${_ReprobuildDbSwiftc}
+        -DTEST_BINARY_ROOT=${_ReprobuildGeneratorTestBin}/compile-commands-quoting-swift
+        -P ${_ReprobuildGeneratorTestDir}/compile-commands-quoting.cmake)
+  endif()
+endif()
 # The HCR linkgraph action the generator writes runs with nothing but the
 # PATH it declares (ELF hosts: the evidence is read with nm and readelf).
 if(CMAKE_HOST_UNIX AND NOT CMAKE_HOST_APPLE)

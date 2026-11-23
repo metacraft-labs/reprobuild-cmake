@@ -939,6 +939,55 @@ std::string ReprobuildShellJoin(std::vector<std::string> const& args)
   return out;
 }
 
+// The `command` of a compile_commands.json entry: `program` and `args`, the
+// argv the compile action runs, as "a single shell-escaped string"
+// (https://clang.llvm.org/docs/JSONCompilationDatabase.html), so that a tool
+// reading the database (clangd, clang-tidy, an IDE) splits it back into
+// exactly these words, whatever characters each holds.
+//
+// The database's readers split `command` by the host's rules (clang's
+// JSONCompilationDatabase: POSIX shell words, or the Windows command-line
+// rules on a Windows host), so each word is escaped for the host:
+//
+// - POSIX: a word made only of characters no shell treats specially is
+//   written bare, as compile lines usually are; any other word (including the
+//   empty one) is single-quoted, which leaves every character but the quote
+//   itself literal (ReprobuildShellSingleQuote). This is stricter than
+//   cmOutputConverter's quoting, which leaves `?`, `[` and `{` bare for the
+//   shell to glob or brace-expand.
+// - Windows: the CommandLineToArgvW rules cmOutputConverter applies for
+//   every generator. Its EscapeForShell writes a shell operator (`>`, `&&`,
+//   ...) bare on purpose, for custom commands; a compile's argument is never
+//   an operator, so one is quoted here like any other word.
+std::string ReprobuildCompileDatabaseCommand(
+  std::string const& program, std::vector<std::string> const& args)
+{
+  std::string out;
+  auto append = [&out](std::string const& word) {
+    if (!out.empty()) {
+      out += ' ';
+    }
+#if defined(_WIN32)
+    if (cmOutputConverter::IsShellOperator(word)) {
+      out += cmStrCat('"', word, '"');
+    } else {
+      out += cmOutputConverter::EscapeForShell(word, 0);
+    }
+#else
+    bool const bare = !word.empty() &&
+      word.find_first_not_of("ABCDEFGHIJKLMNOPQRSTUVWXYZ"
+                             "abcdefghijklmnopqrstuvwxyz"
+                             "0123456789_@%+=:,./-") == std::string::npos;
+    out += bare ? word : ReprobuildShellSingleQuote(word);
+#endif
+  };
+  append(program);
+  for (std::string const& arg : args) {
+    append(arg);
+  }
+  return out;
+}
+
 // Quote a tool path or argument for a `cmd.exe` batch file. Batch has no
 // general escaping for a `"` *inside* a quoted string, but tool paths and
 // the structured argv we emit here are filesystem paths / plain flags that
@@ -4229,9 +4278,9 @@ void cmGlobalReprobuildGenerator::WriteProviderMetadata()
             }
             emitModule.CompileDirectory = binaryDir;
             emitModule.CompileFile = swiftSources.front()->GetFullPath();
-            emitModule.CompileCommand =
-              cmStrCat(mf->GetSafeDefinition(ReprobuildCompilerVar("Swift")),
-                       " ", cmJoin(emitModule.Args, " "));
+            emitModule.CompileCommand = ReprobuildCompileDatabaseCommand(
+              mf->GetSafeDefinition(ReprobuildCompilerVar("Swift")),
+              emitModule.Args);
             emitModuleActionId = emitModule.Id;
             target.CustomActions.push_back(std::move(emitModule));
           } else if (!swiftModuleRel.empty()) {
@@ -4275,9 +4324,9 @@ void cmGlobalReprobuildGenerator::WriteProviderMetadata()
             ReprobuildPoolProperty(gt, nullptr, "JOB_POOL_COMPILE", "");
           swiftCompile.CompileDirectory = binaryDir;
           swiftCompile.CompileFile = swiftSources.front()->GetFullPath();
-          swiftCompile.CompileCommand =
-            cmStrCat(mf->GetSafeDefinition(ReprobuildCompilerVar("Swift")),
-                     " ", cmJoin(swiftCompile.Args, " "));
+          swiftCompile.CompileCommand = ReprobuildCompileDatabaseCommand(
+            mf->GetSafeDefinition(ReprobuildCompilerVar("Swift")),
+            swiftCompile.Args);
           target.CompileActions.push_back(std::move(swiftCompile));
         }
         for (cmSourceFile const* source : sources) {
@@ -4881,9 +4930,8 @@ void cmGlobalReprobuildGenerator::WriteProviderMetadata()
           }
           action.CompileDirectory = binaryDir;
           action.CompileFile = sourceArg;
-          action.CompileCommand =
-            cmStrCat(mf->GetSafeDefinition(ReprobuildCompilerVar(lang)), " ",
-                     cmJoin(args, " "));
+          action.CompileCommand = ReprobuildCompileDatabaseCommand(
+            mf->GetSafeDefinition(ReprobuildCompilerVar(lang)), args);
           // A line too long for the command line goes to a response file
           // when the compiler reads one, and the process is started with it
           // (`@<rsp>`, nvcc's `--options-file <rsp>`). A compiler that reads
