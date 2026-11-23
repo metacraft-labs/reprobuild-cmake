@@ -156,6 +156,64 @@ add_executable(hello main.c)
   file(WRITE "${source_dir}/main.c" "int main(void) { return 0; }\n")
 endfunction()
 
+# Sets the environment's PATH to the current PATH with no native make
+# program on it, so a configure builds its try_compile projects with
+# `repro build` and not with make.
+#
+# Off Windows the generator hands a try_compile build to the first `gmake`,
+# `make` or `smake` it finds on PATH (`ReprobuildFindNativeMakeOnPath` in
+# Source/cmGlobalReprobuildGenerator.cxx); only where it finds none does the
+# probe go through `repro`. A Nix dev shell gives gnumake its own bin
+# directory, but a distribution's /usr/bin holds make next to the compiler
+# driver, the binutils and the shell, so dropping a PATH entry that holds a
+# make would take those with it. Such an entry is replaced instead by a
+# directory under `scratch_dir` of symbolic links to everything in it except
+# the make programs. Windows has no delegation, and PATH is left alone there.
+#
+# The caller restores PATH from `saved_path_var` when it is done.
+function(set_path_without_native_make scratch_dir saved_path_var)
+  set(${saved_path_var} "$ENV{PATH}" PARENT_SCOPE)
+  if(WIN32)
+    return()
+  endif()
+  set(make_names gmake make smake)
+  set(shadow_root "${scratch_dir}/path-without-make")
+  file(REMOVE_RECURSE "${shadow_root}")
+  string(REPLACE ":" ";" path_entries "$ENV{PATH}")
+  set(kept_entries)
+  set(index 0)
+  foreach(entry IN LISTS path_entries)
+    set(holds_make FALSE)
+    foreach(name IN LISTS make_names)
+      if(EXISTS "${entry}/${name}" AND NOT IS_DIRECTORY "${entry}/${name}")
+        set(holds_make TRUE)
+      endif()
+    endforeach()
+    if(NOT holds_make)
+      list(APPEND kept_entries "${entry}")
+    else()
+      math(EXPR index "${index} + 1")
+      set(shadow "${shadow_root}/${index}")
+      file(MAKE_DIRECTORY "${shadow}")
+      file(GLOB entry_files LIST_DIRECTORIES true RELATIVE "${entry}" "${entry}/*")
+      foreach(name IN LISTS entry_files)
+        if(NOT name IN_LIST make_names)
+          file(CREATE_LINK "${entry}/${name}" "${shadow}/${name}" SYMBOLIC)
+        endif()
+      endforeach()
+      list(APPEND kept_entries "${shadow}")
+    endif()
+  endforeach()
+  string(JOIN ":" kept_path ${kept_entries})
+  set(ENV{PATH} "${kept_path}")
+  # The generator's own search is a plain PATH lookup; so is this one.
+  find_program(path_native_make NAMES ${make_names} NO_CACHE
+    NO_CMAKE_PATH NO_CMAKE_ENVIRONMENT_PATH NO_CMAKE_SYSTEM_PATH)
+  if(path_native_make)
+    message(FATAL_ERROR "a native make is still on PATH: ${path_native_make}")
+  endif()
+endfunction()
+
 # The directories a GNU-style C driver searches for `#include <...>`, as it
 # reports them itself under `-v`, normalized the way CMake normalizes its
 # implicit include directories.
@@ -2639,11 +2697,19 @@ elseif(TEST_MODE STREQUAL "trycompile_compiler_output")
   # only the `repro build` command line, so all three came out empty where
   # Ninja fills them. The generator now asks `repro build` for every
   # action's output (`--action-output=all`).
+  #
+  # The configure runs with no make on PATH. With one there, the generator
+  # builds every try_compile with that make (see
+  # set_path_without_native_make), which prints the compiler's output
+  # itself, and the mode would test nothing about `repro build`. The
+  # reprobuild-cmake dev shell puts gnumake on PATH.
   set(output_source_dir "${TEST_BINARY_ROOT}/output-src")
   set(output_binary_dir "${TEST_BINARY_ROOT}/output-build")
   write_trycompile_compiler_output_project("${output_source_dir}" ReprobuildTryCompileOutput)
   set(ENV{REPROBUILD_STORE_ROOT} "${TEST_BINARY_ROOT}/store")
+  set_path_without_native_make("${TEST_BINARY_ROOT}" output_saved_path)
   run_configure("${output_source_dir}" "${output_binary_dir}" TRUE "")
+  set(ENV{PATH} "${output_saved_path}")
   unset(ENV{REPROBUILD_STORE_ROOT})
   include("${output_binary_dir}/implicit-results.cmake")
   set(output_label "C implicit information under the Reprobuild generator")
@@ -2658,6 +2724,18 @@ elseif(TEST_MODE STREQUAL "trycompile_compiler_output")
     "OUTPUT_VARIABLE of a succeeding try_compile")
   assert_contains("${RESULT_OUTPUT_PROBE_LOG}" "--action-output=all"
     "the try_compile build command")
+  # The implicit directories below come from the ABI probe; it too was built
+  # by repro, through this generator.
+  string(REGEX MATCH "Detecting C compiler ABI info[^\n]*\n(.*)" abi_probe_and_after "${configure_log}")
+  string(REGEX MATCH "Run Build Command\\(s\\): [^\n]*" abi_probe_build_command "${CMAKE_MATCH_1}")
+  # The log quotes a program path that holds a space, and on Windows the
+  # generator may have resolved `repro.exe`; compare without the quotes and
+  # accept either spelling.
+  string(REPLACE "\"" "" abi_probe_build_command_unquoted "${abi_probe_build_command}")
+  assert_contains_any("${abi_probe_build_command_unquoted}" "C ABI probe build command"
+    "${TEST_REPROBUILD_REPRO} build" "${TEST_REPROBUILD_REPRO}.exe build")
+  assert_contains("${abi_probe_build_command}" "--action-output=all"
+    "C ABI probe build command")
 
   if(RESULT_C_COMPILER_ID MATCHES "^(GNU|Clang|AppleClang)$" AND
      NOT RESULT_C_SIMULATE_ID STREQUAL "MSVC")
