@@ -525,13 +525,59 @@ std::string ReprobuildRspQuoteIspc(std::string const& value)
   return out;
 }
 
+// The headers ispc writes beside the `-h` header when it compiles for more
+// than one target: one per ISA, named by inserting `_<isa>` before the last
+// extension of the header's file name, as it names the per-target objects
+// (`-h kernel_ispc.h` gives `kernel_ispc_sse2.h`, `kernel_ispc_sse4.h`).
+// `isaSuffixes` are the strings `detail::ComputeISPCObjectSuffixes` returns,
+// which are the ISA names ispc uses for both. ispc
+// (`lGetTargetFileName` in its src/module.cpp) inserts before the last `.` of
+// the whole path it was given and appends when there is none. Only the file
+// name is considered here, which differs from ispc only for an extensionless
+// header in a directory whose name has a `.`, such as CMake's object
+// directory; ispc then names a directory that does not exist and the compile
+// fails, so there is no file to declare.
+std::vector<std::string> ReprobuildISPCPerTargetHeaders(
+  std::string const& headerPath, std::vector<std::string> const& isaSuffixes)
+{
+  std::string::size_type const nameStart = headerPath.find_last_of('/');
+  std::string::size_type const dot = headerPath.rfind('.');
+  bool const hasExtension = dot != std::string::npos &&
+    (nameStart == std::string::npos || dot > nameStart);
+  std::string const stem =
+    hasExtension ? headerPath.substr(0, dot) : headerPath;
+  std::string const extension =
+    hasExtension ? headerPath.substr(dot) : std::string();
+  std::vector<std::string> headers;
+  headers.reserve(isaSuffixes.size());
+  for (std::string const& isa : isaSuffixes) {
+    headers.push_back(cmStrCat(stem, '_', isa, extension));
+  }
+  return headers;
+}
+
 // How the program that reads a response file splits it into arguments.
 enum class ReprobuildRspQuoting
 {
   // GCC's reader (libiberty's expandargv), which Clang's GNU-frontend
-  // driver, swiftc and nvcc's `--options-file` share: `"` and `'` quote and a
-  // backslash escapes the next character.
+  // driver and swiftc share: `"` and `'` quote and a backslash escapes the
+  // next character.
   Gnu,
+  // nvcc's `--options-file` (measured, nvcc 12.9). Its reader splits the
+  // file at whitespace outside double quotes and takes a backslash as an
+  // escape, so an argument written by GCC's rules reaches nvcc as it would
+  // from the command line, as long as it holds no double quote. A `"` in an
+  // argument is then read again, by rules that depend on the option it
+  // belongs to. `-DV="x"` on the command line defines V as `"x"`; written
+  // by GCC's rules (`"-DV=\"x\""`) it defines V as `x`. The spelling that
+  // gives `-D` and `-Xcompiler` what their command line gives them
+  // (`-DV=\\\"x\\\"`) gives an `-o` value `a"b"c` as `a\b\c`, and none
+  // found gives `-o` a double quote. No spelling gives nvcc every such
+  // argument as its command line does, so a line holding one keeps its full
+  // length (ReprobuildRspCanCarry). CMake's Ninja generator avoids the
+  // question by putting only includes, libraries and objects in nvcc's file
+  // (CMAKE_CUDA_USE_RESPONSE_FILE_FOR_*, NVIDIA.cmake).
+  Nvcc,
   // The Windows command-line rules: link.exe, lld-link, lib.exe and
   // llvm-lib.
   Windows,
@@ -544,6 +590,16 @@ enum class ReprobuildRspQuoting
   // ispc: see ReprobuildRspQuoteIspc.
   Ispc,
 };
+
+// True when a response file read by `quoting`'s rules can give its program
+// `arg` exactly as the command line does. Only nvcc's reader has arguments
+// it cannot be given (see ReprobuildRspQuoting::Nvcc).
+bool ReprobuildRspCanCarry(ReprobuildRspQuoting quoting,
+                           std::string const& arg)
+{
+  return quoting != ReprobuildRspQuoting::Nvcc ||
+    arg.find('"') == std::string::npos;
+}
 
 bool ReprobuildWriteResponseFile(std::string const& path,
                                  std::vector<std::string> const& args,
@@ -563,6 +619,7 @@ bool ReprobuildWriteResponseFile(std::string const& path,
     first = false;
     switch (quoting) {
       case ReprobuildRspQuoting::Gnu:
+      case ReprobuildRspQuoting::Nvcc:
         out << ReprobuildRspQuote(arg);
         break;
       case ReprobuildRspQuoting::Windows:
@@ -1267,6 +1324,20 @@ struct ReprobuildResponseFileReader
   bool PathIsOwnArgument = false;
   ReprobuildRspQuoting Quoting = ReprobuildRspQuoting::Gnu;
 
+  // True when this reader reads a response file and the file can give its
+  // program every argument of `args` as the command line would. When it
+  // cannot, the action keeps its full line.
+  bool Carries(std::vector<std::string> const& args) const
+  {
+    if (!this->Reads) {
+      return false;
+    }
+    return std::all_of(args.begin(), args.end(),
+                       [this](std::string const& arg) {
+                         return ReprobuildRspCanCarry(this->Quoting, arg);
+                       });
+  }
+
   // The arguments that replace the line moved into `rsp`.
   std::vector<std::string> Argv(std::string const& rsp) const
   {
@@ -1304,6 +1375,10 @@ ReprobuildRspQuoting ReprobuildCompilerRspQuoting(cmMakefile const* mf,
 {
   if (lang == "ISPC") {
     return ReprobuildRspQuoting::Ispc;
+  }
+  if (mf->GetSafeDefinition(cmStrCat("CMAKE_", lang, "_COMPILER_ID")) ==
+      "NVIDIA") {
+    return ReprobuildRspQuoting::Nvcc;
   }
   return ReprobuildDriverHasMsvcFrontend(mf, lang)
     ? ReprobuildRspQuoting::WindowsDriver
@@ -4486,17 +4561,33 @@ void cmGlobalReprobuildGenerator::WriteProviderMetadata()
             ReprobuildAppendCleanFile(cleanFiles, binaryDir, headerRel);
             std::vector<std::string> suffixes =
               detail::ComputeISPCObjectSuffixes(gt);
-            std::vector<std::string> extraObjects =
-              detail::ComputeISPCExtraObjects(gt->GetObjectName(source),
-                                              gt->GetObjectDirectory(config),
-                                              suffixes);
-            for (std::string const& extraObject : extraObjects) {
-              std::string const extraRel = ReprobuildConfigFullPath(
-                binaryDir, extraObject, config, multiConfig);
-              languageByproducts.push_back(extraRel);
-              ReprobuildAppendUnique(linkObjects, extraRel);
-              ReprobuildAppendCleanFile(cleanFiles, binaryDir, extraRel);
-              sawISPCMultiOutput = true;
+            // ispc writes a header and an object per target only when it
+            // compiles for more than one; for a single instruction set the
+            // `-o` object and the `-h` header are all it writes, as the
+            // Ninja generator's `ispcSuffixes.size() > 1` guard reflects.
+            if (suffixes.size() > 1) {
+              std::vector<std::string> extraObjects =
+                detail::ComputeISPCExtraObjects(gt->GetObjectName(source),
+                                                gt->GetObjectDirectory(config),
+                                                suffixes);
+              for (std::string const& extraObject : extraObjects) {
+                std::string const extraRel = ReprobuildConfigFullPath(
+                  binaryDir, extraObject, config, multiConfig);
+                languageByproducts.push_back(extraRel);
+                ReprobuildAppendUnique(linkObjects, extraRel);
+                ReprobuildAppendCleanFile(cleanFiles, binaryDir, extraRel);
+                sawISPCMultiOutput = true;
+              }
+              // The per-target headers are generated headers, declared and
+              // cleaned like the `-h` header and the per-target objects so
+              // a cache hit restores them and `clean` removes them.
+              // Upstream's Ninja generator leaves them undeclared.
+              for (std::string const& targetHeaderRel :
+                   ReprobuildISPCPerTargetHeaders(headerRel, suffixes)) {
+                languageByproducts.push_back(targetHeaderRel);
+                ReprobuildAppendCleanFile(cleanFiles, binaryDir,
+                                          targetHeaderRel);
+              }
             }
           }
           cmSystemTools::MakeDirectory(
@@ -5009,11 +5100,13 @@ void cmGlobalReprobuildGenerator::WriteProviderMetadata()
           // A line too long for the command line goes to a response file
           // when the compiler reads one, and the process is started with it
           // (`@<rsp>`, nvcc's `--options-file <rsp>`). A compiler that reads
-          // none keeps its full line and declares no response file.
+          // none, or whose reader cannot be given one of the arguments as
+          // its command line gives it (nvcc: an argument holding `"`), keeps
+          // its full line and declares no response file.
           std::string const argsText = cmJoin(args, " ");
           ReprobuildResponseFileReader const compileRsp =
             ReprobuildCompileResponseFileReader(mf, lang);
-          if (argsText.size() > 2048 && compileRsp.Reads) {
+          if (argsText.size() > 2048 && compileRsp.Carries(args)) {
             std::string rspError;
             if (!ReprobuildMoveLineToResponseFile(action, args, compileRsp,
                                                   binaryDir, rspError)) {
@@ -6348,7 +6441,8 @@ void cmGlobalReprobuildGenerator::WriteProviderMetadata()
         ReprobuildResponseFileReader const linkRsp =
           ReprobuildLinkResponseFileReader(lg->GetMakefile(), linkLang, type,
                                            msvcTool);
-        if (!archiveRunsAr && linkRsp.Reads && linkArgsText.size() > 2048) {
+        if (!archiveRunsAr && linkArgsText.size() > 2048 &&
+            linkRsp.Carries(target.LinkAction.Args)) {
           std::vector<std::string> const rspArgs = target.LinkAction.Args;
           std::string rspError;
           if (!ReprobuildMoveLineToResponseFile(

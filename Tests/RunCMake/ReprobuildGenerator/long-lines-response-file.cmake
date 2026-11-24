@@ -16,6 +16,9 @@
 #
 # Defect record: reprobuild-pm
 # issues/2026-11-20-reprobuild-cmake-long-lines-bypass-their-response-file.md
+# and, for nvcc's options file being quoted by GCC's rules whatever its
+# arguments held,
+# issues/2026-11-23-reprobuild-cmake-quotes-nvcc-response-files-by-gccs-rules.md
 # Spec: reprobuild-pm spec/CMake-Reprobuild-Generator.md, "Response Files".
 #
 # TEST_TOOLCHAIN selects one compiler family per registered test, so that
@@ -27,8 +30,10 @@
 #   clang-cl  clang-cl (MSVC frontend): C compiles, Windows quoting.
 #   ispc      ispc compiles, linked by a C compiler.
 #   swift     a swiftc link.
-#   cuda      nvcc compiles (`--options-file <rsp>`), and a CUDA link,
-#             which reads no response file.
+#   cuda      nvcc compiles (`--options-file <rsp>`), a compile whose
+#             line holds a double quote, which nvcc's options file cannot
+#             give it and which keeps its full line, and a CUDA link, which
+#             reads no response file.
 #
 # Each compile and link named above is run for real, from the argv the
 # generated provider holds, in the build directory, as the engine would run
@@ -463,32 +468,45 @@ elseif(TEST_TOOLCHAIN STREQUAL "cuda")
   # plain command line (nvcc 12.9: `-I<dir with '>` and `-DX="a'b"` fail,
   # `-I<dir with ">` is "Stray '"' character"). The probe directory's name
   # holds a space, which does survive it: the compile fails unless the
-  # response file quotes it. (nvcc's options-file reader does not read `\"`
-  # as GCC's does: reprobuild-pm issues/2026-11-23-reprobuild-cmake-
-  # quotes-nvcc-response-files-by-gccs-rules.md.)
+  # response file quotes it.
   set(probe_dir "${source}/in sp")
   file(MAKE_DIRECTORY "${probe_dir}")
   file(WRITE "${probe_dir}/probe.h" "#define PROBE_VALUE 7\n")
   file(WRITE "${source}/unit.cu" "#include \"probe.h\"\nint probe_value(void) { return PROBE_VALUE; }\n")
   file(WRITE "${source}/main.cu" "int probe_value(void);\nint main(void) { return probe_value() == 7 ? 0 : 1; }\n")
+  # The definition's value is the C string literal "x y": three characters.
+  # On nvcc's command line `-DPROBE_TEXT="x y"` defines it so. nvcc reads a
+  # double quote in its options file a second time, by rules that depend on
+  # the option, and no spelling there gives `-D` and `-o` what the command
+  # line does (GCC's rules give PROBE_TEXT the bare tokens x y, and the
+  # compile fails), so this compile keeps its full line.
+  file(WRITE "${source}/text.cu" "typedef char probe_text_is_x_space_y[sizeof(PROBE_TEXT) == 4 ? 1 : -1];\nint main(void) { return 0; }\n")
   write_project(CUDA "
 set(long_dirs ${long_dirs_cmake})
 set(probe_dir [[${probe_dir}]])
 add_executable(app main.cu unit.cu)
 target_include_directories(app PRIVATE \${long_dirs} \"\${probe_dir}\")
 target_link_directories(app PRIVATE \${long_dirs})
+add_library(text OBJECT text.cu)
+target_include_directories(text PRIVATE \${long_dirs})
+target_compile_definitions(text PRIVATE [[PROBE_TEXT=\"x y\"]])
 ")
   configure_and_read(
     "-DCMAKE_CUDA_COMPILER=${TEST_NVCC}" -DCMAKE_CUDA_COMPILER_FORCED=TRUE
     -DCMAKE_CUDA_ARCHITECTURES=75)
-  # nvcc reads `--options-file <rsp>` (NVIDIA.cmake). The space in the probe
-  # directory is the only character this case asks the file to carry; see the
-  # issue cited above for how nvcc reads quotes.
+  # nvcc reads `--options-file <rsp>` (NVIDIA.cmake). Its reader splits and
+  # unescapes as GCC's does for an argument without a double quote, so the
+  # file is quoted by GCC's rules.
   actions_matching("^compile-app-.*unit\\.cu\\.o$" 1 compile)
   expect_response_file("${compile}" "${TEST_NVCC}" "" "--options-file")
   run_action("${compile}" PATH ${run_path})
   actions_matching("^compile-app-.*main\\.cu\\.o$" 1 main_compile)
   run_action("${main_compile}" PATH ${run_path})
+  actions_matching("^compile-text-.*text\\.cu\\.o$" 1 text_compile)
+  # Run first: a response file quoted by GCC's rules fails the compile
+  # itself, which is the defect this protects against.
+  run_action("${text_compile}" PATH ${run_path})
+  expect_no_response_file("${text_compile}")
   # The CUDA link runs the host link launcher, and CMake's CUDA rules define
   # no response-file flag for it: it keeps its full line.
   expect_no_response_file(link-app)

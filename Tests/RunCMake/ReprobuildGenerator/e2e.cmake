@@ -1971,8 +1971,11 @@ function(write_ispc_available_project source_dir project_name)
     "project(${project_name} ISPC)\n"
     "set(CMAKE_ISPC_FLAGS \"--arch=x86\")\n"
     "add_library(ispc_objects OBJECT kernel.ispc)\n"
-    "set_property(TARGET ispc_objects PROPERTY ISPC_INSTRUCTION_SETS sse2-i32x4;sse4-i32x4)\n")
+    "set_property(TARGET ispc_objects PROPERTY ISPC_INSTRUCTION_SETS sse2-i32x4;sse4-i32x4)\n"
+    "add_library(ispc_single OBJECT single.ispc)\n"
+    "set_property(TARGET ispc_single PROPERTY ISPC_INSTRUCTION_SETS sse2-i32x4)\n")
   file(WRITE "${source_dir}/kernel.ispc" "export void fill(uniform int n, uniform int v[], uniform int x) { foreach (i = 0 ... n) v[i] = x; }\n")
+  file(WRITE "${source_dir}/single.ispc" "export void fill_one(uniform int n, uniform int v[], uniform int x) { foreach (i = 0 ... n) v[i] = x; }\n")
 endfunction()
 
 # Configures the nvcc project of write_cuda_device_call_project for real
@@ -2125,13 +2128,19 @@ function(run_ispc_available_fixture label ispc_compiler)
   set(ispc_extra_objects
     "${ispc_object_dir}/kernel.ispc_sse2.o"
     "${ispc_object_dir}/kernel.ispc_sse4.o")
+  # ispc also writes one header per target beside the `-h` header, naming
+  # each the same way: `-h kernel_ispc.h` yields `kernel_ispc_sse2.h` and
+  # `kernel_ispc_sse4.h`. They are generated headers, so they are declared
+  # outputs of the compile and clean-manifest entries like the objects.
+  set(ispc_headers
+    "${ispc_object_dir}/kernel_ispc.h"
+    "${ispc_object_dir}/kernel_ispc_sse2.h"
+    "${ispc_object_dir}/kernel_ispc_sse4.h")
   file(READ "${ispc_binary_dir}/reprobuild.nim" ispc_provider)
-  assert_contains("${ispc_provider}" "kernel_ispc.h" "ISPC provider")
   file(READ "${ispc_binary_dir}/CMakeFiles/reprobuild/clean.manifest" ispc_clean)
-  assert_contains("${ispc_clean}" "kernel_ispc.h" "ISPC clean manifest")
-  foreach(ispc_extra_object IN LISTS ispc_extra_objects)
-    assert_contains("${ispc_provider}" "${ispc_extra_object}" "ISPC provider")
-    assert_contains("${ispc_clean}" "${ispc_extra_object}" "ISPC clean manifest")
+  foreach(ispc_declared IN LISTS ispc_headers ispc_extra_objects)
+    assert_contains("${ispc_provider}" "${ispc_declared}" "ISPC provider")
+    assert_contains("${ispc_clean}" "${ispc_declared}" "ISPC clean manifest")
   endforeach()
   start_runquota("${TEST_BINARY_ROOT}" runquota_socket runquota_pid)
   run_build("${ispc_binary_dir}" "ispc_objects" "${runquota_socket}" ispc_output)
@@ -2147,9 +2156,47 @@ function(run_ispc_available_fixture label ispc_compiler)
         "${ispc_binary_dir}/${ispc_extra_object}[bj].\n${ispc_output}")
     endif()
   endforeach()
+  foreach(ispc_header IN LISTS ispc_headers)
+    if(NOT EXISTS "${ispc_binary_dir}/${ispc_header}")
+      message(FATAL_ERROR
+        "ISPC build did not write the declared header "
+        "${ispc_binary_dir}/${ispc_header}.\n${ispc_output}")
+    endif()
+  endforeach()
   report_path_from_output("${ispc_output}" ispc_report_path)
   file(READ "${ispc_report_path}" ispc_report)
   assert_contains("${ispc_report}" "compile-ispc_objects" "ISPC scheduler report")
+  # For a single instruction set ispc writes only the `-o` object and the
+  # `-h` header, with no per-target object or header, so none is declared
+  # or cleaned, and the target links no object that does not exist.
+  set(ispc_single_dir "CMakeFiles/ispc_single.dir")
+  foreach(ispc_absent IN ITEMS
+      "${ispc_single_dir}/single.ispc_sse2.o"
+      "${ispc_single_dir}/single_ispc_sse2.h")
+    assert_not_contains("${ispc_provider}" "${ispc_absent}" "ISPC provider")
+    assert_not_contains("${ispc_clean}" "${ispc_absent}" "ISPC clean manifest")
+  endforeach()
+  foreach(ispc_declared IN ITEMS
+      "${ispc_single_dir}/single.ispc.o"
+      "${ispc_single_dir}/single_ispc.h")
+    assert_contains("${ispc_provider}" "${ispc_declared}" "ISPC provider")
+  endforeach()
+  start_runquota("${TEST_BINARY_ROOT}" runquota_socket runquota_pid)
+  run_build("${ispc_binary_dir}" "ispc_single" "${runquota_socket}" ispc_single_output)
+  stop_runquota("${runquota_pid}")
+  file(GLOB ispc_single_written
+    "${ispc_binary_dir}/${ispc_single_dir}/single.ispc_*"
+    "${ispc_binary_dir}/${ispc_single_dir}/single_ispc_*")
+  if(NOT ispc_single_written STREQUAL "")
+    message(FATAL_ERROR
+      "ISPC wrote per-target files for one instruction set: "
+      "${ispc_single_written}")
+  endif()
+  if(NOT EXISTS "${ispc_binary_dir}/${ispc_single_dir}/single_ispc.h")
+    message(FATAL_ERROR
+      "ISPC build did not write ${ispc_single_dir}/single_ispc.h.\n"
+      "${ispc_single_output}")
+  endif()
 endfunction()
 
 function(find_module_scan_wrapper binary_dir needle out_var)
