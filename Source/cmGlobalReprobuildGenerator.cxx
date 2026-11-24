@@ -2661,6 +2661,44 @@ std::string ReprobuildCliForTryCompile(cmMakefile* mf)
   }
   return repro;
 }
+
+// The name of the program that turns `cmake -E cmake_ninja_dyndep`'s
+// scanner output into the dynamic-dependency fragment the engine loads
+// (reprobuild's `apps/repro-cmake-dyndep-fragment`).
+std::string ReprobuildDyndepFragmentConverterName()
+{
+  return cmStrCat("repro-cmake-dyndep-fragment",
+                  cmSystemTools::GetExecutableExtension());
+}
+
+// The dyndep fragment converter of the Reprobuild installation `repro`
+// belongs to, or "" when that installation has none. Every release installs
+// the converter in the directory that holds `repro`, as it does
+// `repro-cmake-trycompile-provider`, which the engine resolves the same way
+// (reprobuild-pm spec/CMake-Reprobuild-Generator.md, "Dynamic
+// Dependencies"). `repro` may itself be a link into that directory (a Nix
+// profile, a symlink on PATH), so the directory of the path it resolves to
+// is tried after its own.
+//
+// The result is an absolute path written into the dyndep wrapper. Neither
+// the action's PATH nor any fixed location is consulted: a converter found
+// there would belong to some other installation, or to no one.
+std::string ReprobuildDyndepFragmentConverter(std::string const& repro)
+{
+  if (repro.empty() || !cmSystemTools::FileIsFullPath(repro)) {
+    return std::string();
+  }
+  std::string const name = ReprobuildDyndepFragmentConverterName();
+  for (std::string const& cli :
+       { repro, cmSystemTools::GetRealPath(repro) }) {
+    std::string const candidate =
+      cmStrCat(cmSystemTools::GetFilenamePath(cli), "/", name);
+    if (cmSystemTools::FileExists(candidate, true)) {
+      return candidate;
+    }
+  }
+  return std::string();
+}
 }
 
 cmGlobalReprobuildGenerator::cmGlobalReprobuildGenerator(cmake* cm)
@@ -3440,6 +3478,12 @@ void cmGlobalReprobuildGenerator::WriteProviderMetadata()
   bool sawAppleBundle = false;
   bool const multiConfig = this->IsMultiConfig();
   cmLocalGenerator* rootLg = this->LocalGenerators.front().get();
+  // The Reprobuild CLI that builds this project, and the dyndep fragment
+  // converter of its installation, which every dyndep wrapper runs.
+  std::string const fragmentConverterCli =
+    ReprobuildCliForTryCompile(rootLg->GetMakefile());
+  std::string const fragmentConverter =
+    ReprobuildDyndepFragmentConverter(fragmentConverterCli);
   cmMakefile* rootMf = this->LocalGenerators.front()->GetMakefile();
   // A try_compile project whose `repro` keys its actions relocatably
   // (`ReprobuildCliRelocatesProbes`): its envelope is v6 with the
@@ -5025,20 +5069,34 @@ void cmGlobalReprobuildGenerator::WriteProviderMetadata()
             command += ReprobuildShellSingleQuote(ddi);
           }
           dyndepLines.push_back(command);
-          std::string fragmentCommand =
-            "candidate='/Users/zahary/metacraft/reprobuild/build/bin/"
-            "repro-cmake-dyndep-fragment'; "
-            "if [ -x \"$candidate\" ]; then conv=\"$candidate\"; else "
-            "conv='repro-cmake-dyndep-fragment'; fi; "
-            "\"$conv\" --out ";
-          fragmentCommand += ReprobuildShellSingleQuote(fragmentRel);
-          fragmentCommand += " --map ";
-          fragmentCommand += ReprobuildShellSingleQuote(mapRel);
-          for (std::string const& ddi : ddis) {
-            fragmentCommand += " ";
-            fragmentCommand += ReprobuildShellSingleQuote(ddi);
+          // The converter comes from the Reprobuild installation that
+          // builds this project, by absolute path. Without one, the wrapper
+          // fails and names what it looked for: a fragment that is never
+          // written fails the build closed, and nothing the action's PATH
+          // happens to hold is run in the converter's place.
+          if (fragmentConverter.empty()) {
+            dyndepLines.push_back(cmStrCat(
+              "echo ",
+              ReprobuildShellSingleQuote(cmStrCat(
+                "reprobuild-cmake: there is no ",
+                ReprobuildDyndepFragmentConverterName(),
+                " beside the Reprobuild CLI ",
+                fragmentConverterCli.empty() ? std::string("(none found)")
+                                             : fragmentConverterCli,
+                "; configure with CMAKE_MAKE_PROGRAM or REPROBUILD_REPRO "
+                "naming the repro of a complete Reprobuild installation")),
+              " >&2; exit 127"));
+          } else {
+            std::string fragmentCommand = cmStrCat(
+              ReprobuildShellSingleQuote(fragmentConverter), " --out ",
+              ReprobuildShellSingleQuote(fragmentRel), " --map ",
+              ReprobuildShellSingleQuote(mapRel));
+            for (std::string const& ddi : ddis) {
+              fragmentCommand += " ";
+              fragmentCommand += ReprobuildShellSingleQuote(ddi);
+            }
+            dyndepLines.push_back(fragmentCommand);
           }
-          dyndepLines.push_back(fragmentCommand);
           std::string const dyndepWrapper =
             cmStrCat(wrapperDir, "/", dyndep.ToolId);
           if (!ReprobuildWriteCommandScript(dyndepWrapper, binaryDir,

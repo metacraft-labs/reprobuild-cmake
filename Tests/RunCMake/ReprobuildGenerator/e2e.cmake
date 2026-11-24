@@ -4090,17 +4090,33 @@ elseif(TEST_MODE STREQUAL "dyndep_corruption_fails_closed")
     return()
   endif()
   write_cxx_modules_project("${corrupt_source_dir}" ReprobuildDyndepCorrupt)
+  # The scanner whose output is corrupt: it runs the real clang-scan-deps and
+  # prints malformed P1689 in place of its output, which the scan wrapper
+  # writes to the .ddi. Stand-in justification: corrupt scanner output is
+  # the condition under test, and no real scanner produces it on demand. It
+  # is the scanner, not the generated scan wrapper, that is replaced: the
+  # build's own regeneration step rewrites every wrapper before any action
+  # runs, so a line appended to a wrapper after configure is never executed.
+  set(corrupt_scanner "${TEST_BINARY_ROOT}/corrupt-scanner/clang-scan-deps")
+  file(REMOVE_RECURSE "${TEST_BINARY_ROOT}/corrupt-scanner")
+  file(WRITE "${corrupt_scanner}"
+    "#!/bin/sh\n'${TEST_CXX_MODULES_SCAN_DEPS}' \"$@\" > /dev/null || exit $?\n"
+    "printf '%s\\n' '{bad-json'\n")
+  file(CHMOD "${corrupt_scanner}" PERMISSIONS OWNER_READ OWNER_WRITE OWNER_EXECUTE)
   run_configure("${corrupt_source_dir}" "${corrupt_binary_dir}" TRUE ""
     "-DCMAKE_CXX_COMPILER=${TEST_CXX_MODULES_COMPILER}"
-    "-DCMAKE_CXX_COMPILER_CLANG_SCAN_DEPS=${TEST_CXX_MODULES_SCAN_DEPS}")
-  find_module_scan_wrapper("${corrupt_binary_dir}" "m.cppm" module_scan_wrapper)
-  file(APPEND "${module_scan_wrapper}"
-    "printf '%s\\n' '{bad-json' > 'CMakeFiles/app.dir/m.cppm.o.ddi'\n")
+    "-DCMAKE_CXX_COMPILER_CLANG_SCAN_DEPS=${corrupt_scanner}")
 
   start_runquota("${TEST_BINARY_ROOT}" runquota_socket runquota_pid)
   run_build_expect_failure("${corrupt_binary_dir}" "app" "${runquota_socket}" corrupt_output)
   stop_runquota("${runquota_pid}")
   assert_contains("${corrupt_output}" "action: dyndep-app-CXX status=asFailed" "corrupt dyndep output")
+  # ... and it failed for the corruption: the collator rejected the .ddi.
+  # A dyndep step that could not find its fragment converter failed with the
+  # same status before the corrupted file was ever read (reprobuild-pm
+  # issues/2026-11-23-reprobuild-cmake-dyndep-wrapper-finds-its-fragment-converter-at-a-developers-home-path.md).
+  assert_contains("${corrupt_output}" "cmake_ninja_dyndep failed to parse" "corrupt dyndep output")
+  assert_not_contains("${corrupt_output}" "repro-cmake-dyndep-fragment" "corrupt dyndep output")
   assert_contains("${corrupt_output}" "compile-app-CMakeFiles_app.dir_main.cpp.o status=asBlocked" "corrupt dyndep output")
   assert_contains("${corrupt_output}" "compile-app-CMakeFiles_app.dir_m.cppm.o status=asBlocked" "corrupt dyndep output")
   assert_file_not_exists("${corrupt_binary_dir}/app" "corrupt dyndep fail-closed")

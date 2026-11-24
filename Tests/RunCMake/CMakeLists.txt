@@ -404,6 +404,15 @@ if(CMAKE_HOST_UNIX)
         -DTEST_GFORTRAN=${_ReprobuildScanGfortran}
         -DTEST_BINARY_ROOT=${_ReprobuildGeneratorTestBin}/scan-wrapper-quoting-fortran
         -P ${_ReprobuildGeneratorTestDir}/scan-wrapper-quoting.cmake)
+    # A dyndep step runs the fragment converter installed beside the
+    # configured `repro`, and fails closed without one.
+    add_test(NAME e2e_cmake_reprobuild_dyndep_fragment_converter
+      COMMAND ${CMAKE_CMAKE_COMMAND}
+        -DTEST_CMAKE=${CMAKE_CMAKE_COMMAND}
+        -DTEST_GFORTRAN=${_ReprobuildScanGfortran}
+        -DTEST_REPROBUILD_REPRO=${_ReprobuildBin}
+        -DTEST_BINARY_ROOT=${_ReprobuildGeneratorTestBin}/dyndep-fragment-converter
+        -P ${_ReprobuildGeneratorTestDir}/dyndep-fragment-converter.cmake)
   endif()
   find_program(_ReprobuildScanClangxx NAMES clang++)
   find_program(_ReprobuildScanDeps NAMES clang-scan-deps)
