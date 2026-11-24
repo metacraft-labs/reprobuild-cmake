@@ -560,9 +560,24 @@ std::vector<std::string> ReprobuildISPCPerTargetHeaders(
 enum class ReprobuildRspQuoting
 {
   // GCC's reader (libiberty's expandargv), which Clang's GNU-frontend
-  // driver, swiftc and nvcc's `--options-file` share: `"` and `'` quote and a
-  // backslash escapes the next character.
+  // driver and swiftc share: `"` and `'` quote and a backslash escapes the
+  // next character.
   Gnu,
+  // nvcc's `--options-file` (measured, nvcc 12.9). Its reader splits the
+  // file at whitespace outside double quotes and takes a backslash as an
+  // escape, so an argument written by GCC's rules reaches nvcc as it would
+  // from the command line, as long as it holds no double quote. A `"` in an
+  // argument is then read again, by rules that depend on the option it
+  // belongs to. `-DV="x"` on the command line defines V as `"x"`; written
+  // by GCC's rules (`"-DV=\"x\""`) it defines V as `x`. The spelling that
+  // gives `-D` and `-Xcompiler` what their command line gives them
+  // (`-DV=\\\"x\\\"`) gives an `-o` value `a"b"c` as `a\b\c`, and none
+  // found gives `-o` a double quote. No spelling gives nvcc every such
+  // argument as its command line does, so a line holding one keeps its full
+  // length (ReprobuildRspCanCarry). CMake's Ninja generator avoids the
+  // question by putting only includes, libraries and objects in nvcc's file
+  // (CMAKE_CUDA_USE_RESPONSE_FILE_FOR_*, NVIDIA.cmake).
+  Nvcc,
   // The Windows command-line rules: link.exe, lld-link, lib.exe and
   // llvm-lib.
   Windows,
@@ -575,6 +590,16 @@ enum class ReprobuildRspQuoting
   // ispc: see ReprobuildRspQuoteIspc.
   Ispc,
 };
+
+// True when a response file read by `quoting`'s rules can give its program
+// `arg` exactly as the command line does. Only nvcc's reader has arguments
+// it cannot be given (see ReprobuildRspQuoting::Nvcc).
+bool ReprobuildRspCanCarry(ReprobuildRspQuoting quoting,
+                           std::string const& arg)
+{
+  return quoting != ReprobuildRspQuoting::Nvcc ||
+    arg.find('"') == std::string::npos;
+}
 
 bool ReprobuildWriteResponseFile(std::string const& path,
                                  std::vector<std::string> const& args,
@@ -594,6 +619,7 @@ bool ReprobuildWriteResponseFile(std::string const& path,
     first = false;
     switch (quoting) {
       case ReprobuildRspQuoting::Gnu:
+      case ReprobuildRspQuoting::Nvcc:
         out << ReprobuildRspQuote(arg);
         break;
       case ReprobuildRspQuoting::Windows:
@@ -1298,6 +1324,20 @@ struct ReprobuildResponseFileReader
   bool PathIsOwnArgument = false;
   ReprobuildRspQuoting Quoting = ReprobuildRspQuoting::Gnu;
 
+  // True when this reader reads a response file and the file can give its
+  // program every argument of `args` as the command line would. When it
+  // cannot, the action keeps its full line.
+  bool Carries(std::vector<std::string> const& args) const
+  {
+    if (!this->Reads) {
+      return false;
+    }
+    return std::all_of(args.begin(), args.end(),
+                       [this](std::string const& arg) {
+                         return ReprobuildRspCanCarry(this->Quoting, arg);
+                       });
+  }
+
   // The arguments that replace the line moved into `rsp`.
   std::vector<std::string> Argv(std::string const& rsp) const
   {
@@ -1335,6 +1375,10 @@ ReprobuildRspQuoting ReprobuildCompilerRspQuoting(cmMakefile const* mf,
 {
   if (lang == "ISPC") {
     return ReprobuildRspQuoting::Ispc;
+  }
+  if (mf->GetSafeDefinition(cmStrCat("CMAKE_", lang, "_COMPILER_ID")) ==
+      "NVIDIA") {
+    return ReprobuildRspQuoting::Nvcc;
   }
   return ReprobuildDriverHasMsvcFrontend(mf, lang)
     ? ReprobuildRspQuoting::WindowsDriver
@@ -5026,11 +5070,13 @@ void cmGlobalReprobuildGenerator::WriteProviderMetadata()
           // A line too long for the command line goes to a response file
           // when the compiler reads one, and the process is started with it
           // (`@<rsp>`, nvcc's `--options-file <rsp>`). A compiler that reads
-          // none keeps its full line and declares no response file.
+          // none, or whose reader cannot be given one of the arguments as
+          // its command line gives it (nvcc: an argument holding `"`), keeps
+          // its full line and declares no response file.
           std::string const argsText = cmJoin(args, " ");
           ReprobuildResponseFileReader const compileRsp =
             ReprobuildCompileResponseFileReader(mf, lang);
-          if (argsText.size() > 2048 && compileRsp.Reads) {
+          if (argsText.size() > 2048 && compileRsp.Carries(args)) {
             std::string rspError;
             if (!ReprobuildMoveLineToResponseFile(action, args, compileRsp,
                                                   binaryDir, rspError)) {
@@ -6365,7 +6411,8 @@ void cmGlobalReprobuildGenerator::WriteProviderMetadata()
         ReprobuildResponseFileReader const linkRsp =
           ReprobuildLinkResponseFileReader(lg->GetMakefile(), linkLang, type,
                                            msvcTool);
-        if (!archiveRunsAr && linkRsp.Reads && linkArgsText.size() > 2048) {
+        if (!archiveRunsAr && linkArgsText.size() > 2048 &&
+            linkRsp.Carries(target.LinkAction.Args)) {
           std::vector<std::string> const rspArgs = target.LinkAction.Args;
           std::string rspError;
           if (!ReprobuildMoveLineToResponseFile(
