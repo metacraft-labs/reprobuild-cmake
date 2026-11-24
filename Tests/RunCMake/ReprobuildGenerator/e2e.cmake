@@ -2021,16 +2021,39 @@ function(run_ispc_available_fixture label ispc_compiler)
     "-DCMAKE_ISPC_COMPILER=${ispc_compiler}")
   file(READ "${ispc_binary_dir}/CMakeFiles/reprobuild/provider.meta" ispc_metadata)
   assert_contains("${ispc_metadata}" "m8_ispc_multiple_outputs=generated" "ISPC metadata")
+  # With several ISPC_INSTRUCTION_SETS, ispc writes one object per target
+  # beside the `-o` object, naming each by inserting `_<isa>` before the
+  # extension of the `-o` name: `-o kernel.ispc.o` yields
+  # `kernel.ispc_sse2.o` and `kernel.ispc_sse4.o` (CMake computes the same
+  # names in `ComputeISPCExtraObjects`). The ISA is the part of each
+  # instruction set before its `-i32x4` width. Each name is matched as a
+  # prefix ending in `.o`, so it also matches a Windows `.obj`.
+  set(ispc_object_dir "CMakeFiles/ispc_objects.dir")
+  set(ispc_extra_objects
+    "${ispc_object_dir}/kernel.ispc_sse2.o"
+    "${ispc_object_dir}/kernel.ispc_sse4.o")
   file(READ "${ispc_binary_dir}/reprobuild.nim" ispc_provider)
   assert_contains("${ispc_provider}" "kernel_ispc.h" "ISPC provider")
-  assert_contains("${ispc_provider}" "kernel_sse2" "ISPC provider")
-  assert_contains("${ispc_provider}" "kernel_sse4" "ISPC provider")
   file(READ "${ispc_binary_dir}/CMakeFiles/reprobuild/clean.manifest" ispc_clean)
   assert_contains("${ispc_clean}" "kernel_ispc.h" "ISPC clean manifest")
-  assert_contains("${ispc_clean}" "kernel_sse2" "ISPC clean manifest")
+  foreach(ispc_extra_object IN LISTS ispc_extra_objects)
+    assert_contains("${ispc_provider}" "${ispc_extra_object}" "ISPC provider")
+    assert_contains("${ispc_clean}" "${ispc_extra_object}" "ISPC clean manifest")
+  endforeach()
   start_runquota("${TEST_BINARY_ROOT}" runquota_socket runquota_pid)
   run_build("${ispc_binary_dir}" "ispc_objects" "${runquota_socket}" ispc_output)
   stop_runquota("${runquota_pid}")
+  # The declared names are the files ispc wrote: a declared output no file
+  # has would otherwise pass every text assertion above.
+  foreach(ispc_extra_object IN LISTS ispc_extra_objects)
+    file(GLOB ispc_written "${ispc_binary_dir}/${ispc_extra_object}"
+      "${ispc_binary_dir}/${ispc_extra_object}bj")
+    if(ispc_written STREQUAL "")
+      message(FATAL_ERROR
+        "ISPC build did not write the declared object "
+        "${ispc_binary_dir}/${ispc_extra_object}[bj].\n${ispc_output}")
+    endif()
+  endforeach()
   report_path_from_output("${ispc_output}" ispc_report_path)
   file(READ "${ispc_report_path}" ispc_report)
   assert_contains("${ispc_report}" "compile-ispc_objects" "ISPC scheduler report")
