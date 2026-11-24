@@ -444,6 +444,94 @@ function(require_tool path label)
   endif()
 endfunction()
 
+# The longest Unix socket path every supported host can bind: `sun_path` is
+# 108 bytes on Linux and 104 on macOS and the BSDs, and both counts include
+# the terminating NUL (unix(7); macOS <sys/un.h>). A longer path fails in
+# runquotad's `bindUnix` with `socket path too long`.
+set(REPROBUILD_E2E_SOCKET_PATH_MAX 103)
+
+# Creates the private directory a test daemon's socket lives in, and returns
+# it with the socket path inside it.
+#
+# runquotad binds an explicit `--socket` only when the socket's directory is
+# owned by the daemon's uid with mode 0700, and refuses a shared directory
+# such as a root-owned, mode-1777 `/tmp` (runquota
+# docs/book-isonim/content/reference/troubleshooting.md, "refusing a path
+# owned by uid"). So the socket never goes straight into a shared directory:
+# `mktemp -d` makes a fresh directory with mode 0700 regardless of umask
+# (POSIX mktemp; coreutils and BSD mktemp both document it), and the socket
+# goes in that. A fresh directory per daemon also means two tests, or two
+# daemons in one test, never share or delete each other's socket.
+#
+# The base directory is the first of $XDG_RUNTIME_DIR, $TMPDIR and the
+# fallback (`/tmp` unless TEST_RUNQUOTA_SOCKET_FALLBACK_DIR names another)
+# that exists and leaves the socket path short enough to bind. A
+# $XDG_RUNTIME_DIR is short and private by construction (XDG Base Directory
+# Specification), while a $TMPDIR may be long enough to overflow `sun_path`;
+# that is why the length is checked per candidate, before anything is
+# created, rather than after the daemon has failed to bind.
+function(make_runquota_socket_dir dir_var socket_var)
+  set(candidates "")
+  foreach(var IN ITEMS XDG_RUNTIME_DIR TMPDIR)
+    if(DEFINED ENV{${var}} AND NOT "$ENV{${var}}" STREQUAL "")
+      list(APPEND candidates "$ENV{${var}}")
+    endif()
+  endforeach()
+  if(DEFINED TEST_RUNQUOTA_SOCKET_FALLBACK_DIR AND NOT "${TEST_RUNQUOTA_SOCKET_FALLBACK_DIR}" STREQUAL "")
+    list(APPEND candidates "${TEST_RUNQUOTA_SOCKET_FALLBACK_DIR}")
+  else()
+    list(APPEND candidates "/tmp")
+  endif()
+  # `mktemp` replaces the six X's, so the predicted length is exact.
+  set(dir_template "rq.XXXXXX")
+  set(socket_name "rq.sock")
+  set(rejected "")
+  foreach(base IN LISTS candidates)
+    string(REGEX REPLACE "(.)/+$" "\\1" base "${base}")
+    # runquotad refuses a relative `--socket` for a private daemon, and a
+    # relative path would also mean something else in the build's cwd.
+    if(NOT IS_ABSOLUTE "${base}")
+      string(APPEND rejected "\n  ${base}: not an absolute path")
+      continue()
+    endif()
+    if(NOT IS_DIRECTORY "${base}")
+      string(APPEND rejected "\n  ${base}: not a directory")
+      continue()
+    endif()
+    string(LENGTH "${base}/${dir_template}/${socket_name}" socket_length)
+    if(socket_length GREATER REPROBUILD_E2E_SOCKET_PATH_MAX)
+      string(APPEND rejected
+        "\n  ${base}: the socket path would be ${socket_length} bytes, "
+        "longer than the ${REPROBUILD_E2E_SOCKET_PATH_MAX} a Unix socket can bind")
+      continue()
+    endif()
+    execute_process(
+      COMMAND mktemp -d "${base}/${dir_template}"
+      OUTPUT_VARIABLE dir
+      ERROR_VARIABLE mktemp_error
+      RESULT_VARIABLE mktemp_result
+      OUTPUT_STRIP_TRAILING_WHITESPACE
+      ERROR_STRIP_TRAILING_WHITESPACE
+      ENCODING UTF8)
+    if(mktemp_result EQUAL 0 AND IS_DIRECTORY "${dir}")
+      set(${dir_var} "${dir}" PARENT_SCOPE)
+      set(${socket_var} "${dir}/${socket_name}" PARENT_SCOPE)
+      return()
+    endif()
+    string(APPEND rejected "\n  ${base}: mktemp -d failed (${mktemp_result}): ${mktemp_error}")
+  endforeach()
+  message(FATAL_ERROR
+    "Cannot place the runquotad socket: it needs a fresh mode-0700 directory "
+    "under $XDG_RUNTIME_DIR, $TMPDIR or the fallback, with a socket path of at "
+    "most ${REPROBUILD_E2E_SOCKET_PATH_MAX} bytes, and every candidate was "
+    "rejected:${rejected}\n"
+    "Set XDG_RUNTIME_DIR or TMPDIR to a short directory you own.")
+endfunction()
+
+# Starts runquotad on a socket in a private directory of its own (see
+# make_runquota_socket_dir) and returns the socket and the daemon's pid. The
+# daemon's log goes to `<root>/runquotad.log`. stop_runquota stops the daemon
+# and removes the directory.
 function(start_runquota root socket_var pid_var)
   foreach(var IN ITEMS TEST_RUNQUOTAD)
     if(NOT DEFINED ${var} OR "${${var}}" STREQUAL "")
@@ -451,15 +539,9 @@ function(start_runquota root socket_var pid_var)
     endif()
   endforeach()
   require_tool("${TEST_RUNQUOTAD}" "runquotad")
-  string(MD5 socket_hash "${root}")
-  if(DEFINED ENV{TMPDIR} AND NOT "$ENV{TMPDIR}" STREQUAL "")
-    set(socket_dir "$ENV{TMPDIR}")
-  else()
-    set(socket_dir "/tmp")
-  endif()
-  set(socket "${socket_dir}/rq-${socket_hash}.sock")
+  make_runquota_socket_dir(socket_dir socket)
   set(log "${root}/runquotad.log")
-  file(REMOVE "${socket}")
+  file(MAKE_DIRECTORY "${root}")
   string(REPLACE ";" " " extra_args "${ARGN}")
   execute_process(
     COMMAND /bin/sh -c "\"${TEST_RUNQUOTAD}\" --socket \"${socket}\" ${extra_args} > \"${log}\" 2>&1 & echo $!"
@@ -469,10 +551,14 @@ function(start_runquota root socket_var pid_var)
     OUTPUT_STRIP_TRAILING_WHITESPACE
     ENCODING UTF8)
   if(NOT daemon_result EQUAL 0 OR "${pid}" STREQUAL "")
+    file(REMOVE_RECURSE "${socket_dir}")
     message(FATAL_ERROR "Could not start runquotad.\n${daemon_error}")
   endif()
   foreach(_i RANGE 1 100)
     if(EXISTS "${socket}")
+      # Keyed by pid so stop_runquota, which callers give only the pid, can
+      # find the directory to remove.
+      set_property(GLOBAL PROPERTY "REPROBUILD_E2E_RUNQUOTA_DIR_${pid}" "${socket_dir}")
       set(${socket_var} "${socket}" PARENT_SCOPE)
       set(${pid_var} "${pid}" PARENT_SCOPE)
       return()
@@ -480,6 +566,7 @@ function(start_runquota root socket_var pid_var)
     execute_process(COMMAND "${CMAKE_COMMAND}" -E sleep 0.1)
   endforeach()
   execute_process(COMMAND /bin/sh -c "kill ${pid} >/dev/null 2>&1 || true")
+  file(REMOVE_RECURSE "${socket_dir}")
   if(EXISTS "${log}")
     file(READ "${log}" daemon_log)
   endif()
@@ -489,6 +576,11 @@ endfunction()
 function(stop_runquota pid)
   if(NOT "${pid}" STREQUAL "")
     execute_process(COMMAND /bin/sh -c "kill ${pid} >/dev/null 2>&1 || true")
+    get_property(socket_dir GLOBAL PROPERTY "REPROBUILD_E2E_RUNQUOTA_DIR_${pid}")
+    if(NOT "${socket_dir}" STREQUAL "")
+      file(REMOVE_RECURSE "${socket_dir}")
+      set_property(GLOBAL PROPERTY "REPROBUILD_E2E_RUNQUOTA_DIR_${pid}" "")
+    endif()
   endif()
 endfunction()
 
@@ -3039,6 +3131,107 @@ if(TEST_MODE STREQUAL "cuda_build")
     message(FATAL_ERROR "TEST_MODE=cuda_build needs nvcc (TEST_CUDA_COMPILER or PATH)")
   endif()
   run_cuda_available_fixture("cuda-build" "${cuda_compiler}" "")
+  return()
+endif()
+
+# start_runquota must find runquotad a socket directory it accepts whatever
+# the caller's environment, because ctest passes the caller's environment
+# through and nothing in Tests/RunCMake/CMakeLists.txt sets it. Each case
+# starts a real daemon: the socket appearing is runquotad's own verdict that
+# the directory is owned by the caller with mode 0700, so no mode is
+# re-implemented here.
+function(check_runquota_socket_case label)
+  file(MAKE_DIRECTORY "${TEST_BINARY_ROOT}/${label}")
+  start_runquota("${TEST_BINARY_ROOT}/${label}" socket pid)
+  get_filename_component(socket_dir "${socket}" DIRECTORY)
+  string(LENGTH "${socket}" socket_length)
+  if(socket_length GREATER REPROBUILD_E2E_SOCKET_PATH_MAX)
+    stop_runquota("${pid}")
+    message(FATAL_ERROR "${label}: socket path is ${socket_length} bytes: ${socket}")
+  endif()
+  foreach(expected_base IN LISTS ARGN)
+    string(FIND "${socket}" "${expected_base}/" base_at)
+    if(NOT base_at EQUAL 0)
+      stop_runquota("${pid}")
+      message(FATAL_ERROR "${label}: socket ${socket} is not under ${expected_base}")
+    endif()
+  endforeach()
+  stop_runquota("${pid}")
+  if(EXISTS "${socket_dir}")
+    message(FATAL_ERROR "${label}: stop_runquota left ${socket_dir} behind")
+  endif()
+  message(STATUS "${label}: runquotad bound ${socket}")
+endfunction()
+
+if(TEST_MODE STREQUAL "runquota_socket_directory")
+  file(REMOVE_RECURSE "${TEST_BINARY_ROOT}")
+  file(MAKE_DIRECTORY "${TEST_BINARY_ROOT}")
+  set(saved_xdg_runtime_dir "$ENV{XDG_RUNTIME_DIR}")
+  set(saved_tmpdir "$ENV{TMPDIR}")
+
+  # Neither variable set: the case the issue records, where the socket went
+  # straight into the shared /tmp and runquotad refused it.
+  unset(ENV{XDG_RUNTIME_DIR})
+  unset(ENV{TMPDIR})
+  check_runquota_socket_case(no-runtime-dir-no-tmpdir /tmp)
+
+  # A $TMPDIR too long for a socket path, as a Claude Code scratchpad is:
+  # it must be passed over, not bound and failed.
+  set(long_tmpdir "${TEST_BINARY_ROOT}/a-temporary-directory-whose-path-is-too-long-to-hold-a-unix-socket")
+  file(MAKE_DIRECTORY "${long_tmpdir}")
+  string(LENGTH "${long_tmpdir}/x.sock" long_length)
+  if(NOT long_length GREATER REPROBUILD_E2E_SOCKET_PATH_MAX)
+    message(FATAL_ERROR "The long TMPDIR case is not long enough (${long_length} bytes): ${long_tmpdir}")
+  endif()
+  set(ENV{TMPDIR} "${long_tmpdir}")
+  check_runquota_socket_case(long-tmpdir /tmp)
+
+  # A short $XDG_RUNTIME_DIR is preferred over $TMPDIR. A caller's real one
+  # need not exist, so a short private stand-in is made the same way.
+  execute_process(COMMAND mktemp -d /tmp/rq-xdg.XXXXXX
+    OUTPUT_VARIABLE fake_runtime_dir RESULT_VARIABLE mktemp_result
+    OUTPUT_STRIP_TRAILING_WHITESPACE)
+  if(NOT mktemp_result EQUAL 0)
+    message(FATAL_ERROR "Could not create a stand-in XDG_RUNTIME_DIR")
+  endif()
+  set(ENV{XDG_RUNTIME_DIR} "${fake_runtime_dir}")
+  set(ENV{TMPDIR} "/tmp")
+  check_runquota_socket_case(runtime-dir "${fake_runtime_dir}")
+  file(REMOVE_RECURSE "${fake_runtime_dir}")
+
+  # No candidate fits: the script stops with a message that names each one
+  # and why, instead of a daemon that never binds.
+  unset(ENV{XDG_RUNTIME_DIR})
+  set(ENV{TMPDIR} "${long_tmpdir}")
+  execute_process(
+    COMMAND "${CMAKE_COMMAND}"
+      "-DCMAKE_COMMAND=${CMAKE_COMMAND}"
+      -DTEST_MODE=runquota_socket_directory_unplaceable
+      "-DTEST_BINARY_ROOT=${TEST_BINARY_ROOT}/unplaceable"
+      "-DTEST_C_COMPILER=${TEST_C_COMPILER}"
+      "-DTEST_RUNQUOTAD=${TEST_RUNQUOTAD}"
+      "-DTEST_RUNQUOTA_SOCKET_FALLBACK_DIR=${long_tmpdir}"
+      -P "${CMAKE_CURRENT_LIST_FILE}"
+    OUTPUT_VARIABLE unplaceable_output
+    ERROR_VARIABLE unplaceable_output
+    RESULT_VARIABLE unplaceable_result
+    ENCODING UTF8)
+  if(unplaceable_result EQUAL 0)
+    message(FATAL_ERROR "start_runquota succeeded with no usable socket directory:\n${unplaceable_output}")
+  endif()
+  assert_contains("${unplaceable_output}" "Cannot place the runquotad socket" "unplaceable socket message")
+  assert_contains("${unplaceable_output}" "longer than the ${REPROBUILD_E2E_SOCKET_PATH_MAX} a Unix socket can bind" "unplaceable socket message")
+  file(GLOB leftover_dirs "${long_tmpdir}/rq.*")
+  if(leftover_dirs)
+    message(FATAL_ERROR "The refused start left directories behind: ${leftover_dirs}")
+  endif()
+
+  set(ENV{XDG_RUNTIME_DIR} "${saved_xdg_runtime_dir}")
+  set(ENV{TMPDIR} "${saved_tmpdir}")
+  return()
+elseif(TEST_MODE STREQUAL "runquota_socket_directory_unplaceable")
+  start_runquota("${TEST_BINARY_ROOT}" socket pid)
+  stop_runquota("${pid}")
   return()
 endif()
 

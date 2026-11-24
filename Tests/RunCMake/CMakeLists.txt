@@ -551,6 +551,20 @@ add_test(NAME e2e_cmake_reprobuild_trycompile_compiler_output
     -DTEST_C_COMPILER=${CMAKE_C_COMPILER}
     -DTEST_REPROBUILD_REPRO=${_ReprobuildBin}
     -P ${_ReprobuildGeneratorTestDir}/e2e.cmake)
+# Every e2e test that builds starts runquotad through `start_runquota`. This
+# one checks that it finds the daemon a socket directory runquotad accepts
+# with no TMPDIR or XDG_RUNTIME_DIR set, and with a TMPDIR too long to hold a
+# socket, so no test needs its caller to prepare one.
+if(CMAKE_HOST_UNIX)
+  add_test(NAME e2e_cmake_reprobuild_runquota_socket_directory
+    COMMAND ${CMAKE_CMAKE_COMMAND}
+      -DCMAKE_COMMAND=${CMAKE_CMAKE_COMMAND}
+      -DTEST_MODE=runquota_socket_directory
+      -DTEST_BINARY_ROOT=${_ReprobuildGeneratorTestBin}/runquota-socket-directory
+      -DTEST_C_COMPILER=${CMAKE_C_COMPILER}
+      -DTEST_RUNQUOTAD=${_RunQuotaDaemonBin}
+      -P ${_ReprobuildGeneratorTestDir}/e2e.cmake)
+endif()
 add_test(NAME e2e_cmake_reprobuild_hello_c_build
   COMMAND ${CMAKE_CMAKE_COMMAND}
     -DCMAKE_COMMAND=${CMAKE_CMAKE_COMMAND}
