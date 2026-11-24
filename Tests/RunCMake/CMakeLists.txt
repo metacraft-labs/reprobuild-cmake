@@ -764,6 +764,19 @@ add_test(NAME e2e_cmake_reprobuild_inline_custom_command_argv
     -DTEST_REPROBUILD_REPRO=${_ReprobuildBin}
     -DTEST_RUNQUOTAD=${_RunQuotaDaemonBin}
     -P ${_ReprobuildGeneratorTestDir}/e2e.cmake)
+# A VERBATIM argument holding `$` reaches the command unchanged whichever
+# way the command is launched: directly, or through the wrapper script.
+add_test(NAME e2e_cmake_reprobuild_custom_command_dollar_arguments
+  COMMAND ${CMAKE_CMAKE_COMMAND}
+    -DCMAKE_COMMAND=${CMAKE_CMAKE_COMMAND}
+    -DTEST_MODE=custom_command_dollar_arguments
+    -DTEST_BINARY_ROOT=${_ReprobuildGeneratorTestBin}/custom-command-dollar-arguments
+    -DTEST_C_COMPILER=${CMAKE_C_COMPILER}
+    -DTEST_REPROBUILD_SOURCE_ROOT=${_ReprobuildSourceRoot}
+    -DTEST_REPROBUILD_REPO=${_ReprobuildSourceRoot}
+    -DTEST_REPROBUILD_REPRO=${_ReprobuildBin}
+    -DTEST_RUNQUOTAD=${_RunQuotaDaemonBin}
+    -P ${_ReprobuildGeneratorTestDir}/e2e.cmake)
 add_test(NAME e2e_cmake_reprobuild_custom_depfile_hidden_input
   COMMAND ${CMAKE_CMAKE_COMMAND}
     -DCMAKE_COMMAND=${CMAKE_CMAKE_COMMAND}

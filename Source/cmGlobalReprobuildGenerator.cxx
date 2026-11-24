@@ -1974,12 +1974,45 @@ std::string ReprobuildCustomDepfilePath(std::string const& binaryDir,
 using ReprobuildArgvRewrite =
   std::function<void(std::vector<std::string>&, std::size_t)>;
 
+// One argument of a custom command as a wrapper script writes it. The
+// wrapper is a `#!/bin/sh` script the engine runs directly, so the argument
+// is escaped for that shell and for nothing else.
+//
+// `cmCustomCommandGenerator::EscapeArgument` cannot be used for a VERBATIM
+// argument: it escapes for the generator's build tool, and with
+// `LinkScriptShell` false that means `Shell_Flag_Make`, which writes each
+// `$` as `$$` for a make tool (or Ninja) to turn back into `$`. No such
+// tool stands between this script and `sh`, so `a$b` reached the command
+// as `a$` (`\$` then the empty `$b`). It also writes a `$(VAR)` make
+// variable reference bare, which `sh` runs as a command substitution.
+// Instead a VERBATIM argument is single-quoted, which `sh` hands over byte
+// for byte, `$(VAR)` included, so the wrapper runs the argv an inlined
+// action runs and the Ninja generators run. A shell operator stays bare, as
+// `cmOutputConverter::EscapeForShell` leaves it for every generator, so
+// `COMMAND gen > out` still redirects.
+//
+// A non-VERBATIM argument keeps CMake's old-style escaping (only spaces
+// escaped, no `$$`), so the shell interprets it as it does under every
+// generator.
+std::string ReprobuildCustomCommandArgument(
+  cmCustomCommandGenerator const& ccg, std::string const& arg)
+{
+  if (ccg.GetCC().GetEscapeOldStyle()) {
+    return ccg.EscapeArgument(arg);
+  }
+  if (cmOutputConverter::IsShellOperator(arg)) {
+    return arg;
+  }
+  return ReprobuildShellSingleQuote(arg);
+}
+
 // The shell command lines of `ccg`'s commands for a wrapper script: each is
 // `cmCustomCommandGenerator::GetArgv`, passed through `rewrite` when given,
-// quoted the way the generator quotes it. Building the lines from the argv,
-// not from GetCommand and AppendArguments, lets `rewrite` see each argument
-// and its position, so the wrapper and an inlined action (which runs the
-// rewritten argv directly) run the same command.
+// each argument quoted by ReprobuildCustomCommandArgument. Building the
+// lines from the argv, not from GetCommand and AppendArguments, lets
+// `rewrite` see each argument and its position, so the wrapper and an
+// inlined action (which runs the rewritten argv directly) run the same
+// command.
 std::vector<std::string> ReprobuildCustomCommandLines(
   cmCustomCommandGenerator const& ccg, bool echoComment,
   std::string const& defaultWorkingDirectory,
@@ -2011,7 +2044,7 @@ std::vector<std::string> ReprobuildCustomCommandLines(
     commandLine += ReprobuildShellSingleQuote(argv.front());
     for (std::size_t j = 1; j < argv.size(); ++j) {
       commandLine += " ";
-      commandLine += ccg.EscapeArgument(argv[j]);
+      commandLine += ReprobuildCustomCommandArgument(ccg, argv[j]);
     }
     commandLines.push_back(commandLine);
   }
@@ -2055,14 +2088,15 @@ bool ReprobuildOldStyleArgumentIsLiteral(std::string const& arg, bool first)
 // `$<OUTPUT_CONFIG:...>` reached the tool as literal text, and an emulator's
 // own arguments were dropped.
 //
-// VERBATIM arguments are quoted for the shell, so the shell hands them over
-// unchanged, with two exceptions `cmOutputConverter::EscapeForShell` makes
-// on purpose for every generator: a shell operator (`>`, `|`, `&&`, ...) is
-// written bare, so `COMMAND gen > out` redirects, and a `$(VAR)` reference
-// is written bare when the command allows make variables (every
-// add_custom_command does). Either keeps the wrapper. Non-VERBATIM
-// arguments are written with only spaces escaped, and are inlined only when
-// each is literal (see ReprobuildOldStyleArgumentIsLiteral).
+// VERBATIM arguments are single-quoted in the wrapper, so the shell hands
+// them over unchanged, with one exception every generator makes on
+// purpose: a shell operator (`>`, `|`, `&&`, ...) is written bare, so
+// `COMMAND gen > out` redirects, and keeps the wrapper. A `$(VAR)` in a
+// VERBATIM argument is literal text in the wrapper too (see
+// ReprobuildCustomCommandArgument), so it does not keep the wrapper.
+// Non-VERBATIM arguments are written with only spaces escaped, and are
+// inlined only when each is literal (see
+// ReprobuildOldStyleArgumentIsLiteral).
 std::vector<std::string> ReprobuildCustomCommandArgv(
   cmCustomCommandGenerator const& ccg, unsigned int c,
   std::size_t& commandIndex)
@@ -2077,12 +2111,8 @@ std::vector<std::string> ReprobuildCustomCommandArgv(
     if (cmOutputConverter::IsShellOperator(arg)) {
       return {};
     }
-    if (cc.GetEscapeOldStyle()) {
-      if (!ReprobuildOldStyleArgumentIsLiteral(arg, j == 0)) {
-        return {};
-      }
-    } else if (cc.GetEscapeAllowMakeVars() &&
-               arg.find("$(") != std::string::npos) {
+    if (cc.GetEscapeOldStyle() &&
+        !ReprobuildOldStyleArgumentIsLiteral(arg, j == 0)) {
       return {};
     }
   }

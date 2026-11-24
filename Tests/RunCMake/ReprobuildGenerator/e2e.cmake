@@ -1320,6 +1320,99 @@ function(write_inline_custom_command_argv_project source_dir project_name)
     "}\n")
 endfunction()
 
+# A project whose custom commands hand `gen` arguments holding `$` in every
+# form a shell or a make tool gives meaning to: `a$b` (a shell parameter),
+# `$(FOO)` (a make variable, and a command substitution in sh), `$$c` (a make
+# escape, and the shell's PID), `${d}`, a backquoted command, and quotes.
+# Every command is VERBATIM, so each must reach `gen` unchanged, which is
+# what the Ninja generators hand it (Ninja turns the `$$` that
+# cmOutputConverter writes for a make tool back into `$`). `$(FOO)` has no
+# Ninja counterpart (cmOutputConverter writes it bare and Ninja rejects it as
+# a bad `$`-escape); with no make tool to expand it, this generator hands
+# it over as literal text, the same on both launch paths. `gen` fails
+# unless its argv after the output path is exactly that list. The commands
+# take each of the generator's two launch paths: `inline.c` is launched
+# directly; `comment.c` (a COMMENT), `twice.c`/`twice2.c` (two commands) and
+# `sub/subdir.c` (another start directory) run through the wrapper script.
+function(write_custom_command_dollar_arguments_project source_dir)
+  file(REMOVE_RECURSE "${source_dir}")
+  file(MAKE_DIRECTORY "${source_dir}/sub")
+  file(WRITE "${source_dir}/CMakeLists.txt" [=[
+cmake_minimum_required(VERSION 3.20)
+project(ReprobuildDollarArguments C)
+add_executable(gen gen.c)
+set(dollar_args "a$b" "$(FOO)" "$$c" [[${d}]] [[`echo e`]] [[x'y"z]])
+add_custom_command(OUTPUT "${CMAKE_CURRENT_BINARY_DIR}/inline.c"
+  COMMAND gen inline inline.c ${dollar_args}
+  DEPENDS gen
+  VERBATIM)
+add_custom_command(OUTPUT "${CMAKE_CURRENT_BINARY_DIR}/comment.c"
+  COMMAND gen comment comment.c ${dollar_args}
+  DEPENDS gen
+  COMMENT "Generating comment.c"
+  VERBATIM)
+add_custom_command(
+  OUTPUT "${CMAKE_CURRENT_BINARY_DIR}/twice.c" "${CMAKE_CURRENT_BINARY_DIR}/twice2.c"
+  COMMAND gen twice twice.c ${dollar_args}
+  COMMAND gen twice2 twice2.c ${dollar_args}
+  DEPENDS gen
+  VERBATIM)
+add_subdirectory(sub)
+add_executable(app main.c
+  "${CMAKE_CURRENT_BINARY_DIR}/inline.c"
+  "${CMAKE_CURRENT_BINARY_DIR}/comment.c"
+  "${CMAKE_CURRENT_BINARY_DIR}/twice.c"
+  "${CMAKE_CURRENT_BINARY_DIR}/twice2.c")
+target_link_libraries(app PRIVATE subdir)
+]=])
+  file(WRITE "${source_dir}/sub/CMakeLists.txt" [=[
+add_custom_command(OUTPUT "${CMAKE_CURRENT_BINARY_DIR}/subdir.c"
+  COMMAND gen subdir subdir.c ${dollar_args}
+  DEPENDS gen
+  VERBATIM)
+add_library(subdir STATIC "${CMAKE_CURRENT_BINARY_DIR}/subdir.c")
+]=])
+  file(WRITE "${source_dir}/gen.c" [=[
+#include <stdio.h>
+#include <string.h>
+static char const* const expected[] = {
+  "a$b", "$(FOO)", "$$c", "${d}", "`echo e`", "x'y\"z"
+};
+int main(int argc, char** argv) {
+  int const n = (int)(sizeof(expected) / sizeof(expected[0]));
+  int ok = argc == n + 3;
+  for (int i = 0; ok && i < n; ++i) {
+    ok = strcmp(argv[i + 3], expected[i]) == 0;
+  }
+  if (!ok) {
+    fprintf(stderr, "gen %s: argv differs from the VERBATIM arguments:\n",
+            argc > 1 ? argv[1] : "?");
+    for (int i = 3; i < argc; ++i) {
+      fprintf(stderr, "  argv[%d] = [%s]\n", i, argv[i]);
+    }
+    return 3;
+  }
+  FILE* f = fopen(argv[2], "w");
+  if (!f) return 4;
+  fprintf(f, "int %s_value(void) { return 42; }\n", argv[1]);
+  fclose(f);
+  return 0;
+}
+]=])
+  file(WRITE "${source_dir}/main.c" [=[
+int inline_value(void);
+int comment_value(void);
+int twice_value(void);
+int twice2_value(void);
+int subdir_value(void);
+int main(void) {
+  return inline_value() == 42 && comment_value() == 42 &&
+    twice_value() == 42 && twice2_value() == 42 && subdir_value() == 42
+    ? 0 : 1;
+}
+]=])
+endfunction()
+
 function(write_custom_depfile_project source_dir project_name)
   file(REMOVE_RECURSE "${source_dir}")
   file(MAKE_DIRECTORY "${source_dir}")
@@ -3477,6 +3570,37 @@ elseif(TEST_MODE STREQUAL "inline_custom_command_argv")
   if(NOT inline_result EQUAL 0)
     message(FATAL_ERROR "Inline custom command executable failed with ${inline_result}")
   endif()
+elseif(TEST_MODE STREQUAL "custom_command_dollar_arguments")
+  set(dollar_source_dir "${TEST_BINARY_ROOT}/dollar-src")
+  set(dollar_binary_dir "${TEST_BINARY_ROOT}/dollar-build")
+  write_custom_command_dollar_arguments_project("${dollar_source_dir}")
+  run_configure("${dollar_source_dir}" "${dollar_binary_dir}" TRUE ""
+    "-DCMAKE_BUILD_TYPE=Debug")
+  start_runquota("${TEST_BINARY_ROOT}" runquota_socket runquota_pid)
+  run_build("${dollar_binary_dir}" "app" "${runquota_socket}" dollar_output)
+  stop_runquota("${runquota_pid}")
+  foreach(generated IN ITEMS inline.c comment.c twice.c twice2.c sub/subdir.c)
+    assert_file_exists("${dollar_binary_dir}/${generated}" "custom command output")
+  endforeach()
+  execute_process(COMMAND "${dollar_binary_dir}/app" RESULT_VARIABLE dollar_result)
+  if(NOT dollar_result EQUAL 0)
+    message(FATAL_ERROR "Dollar-argument executable failed with ${dollar_result}")
+  endif()
+  # Both launch paths are exercised: the command with no comment that
+  # starts in the build root is inlined (a `$(FOO)` argument is a literal
+  # argument, not a reason to keep the wrapper), and the others are not.
+  file(READ "${dollar_binary_dir}/reprobuild.nim" dollar_provider)
+  foreach(name IN ITEMS inline comment twice)
+    string(REGEX MATCH "buildAction\\(\"custom-command-app-${name}\\.c\"[^\n]*"
+      dollar_action_${name} "${dollar_provider}")
+  endforeach()
+  string(REGEX MATCH "buildAction\\(\"custom-command-subdir-sub_subdir\\.c\"[^\n]*"
+    dollar_action_subdir "${dollar_provider}")
+  assert_contains("${dollar_action_inline}" "inlineExecCall(" "single-command custom command with $ arguments")
+  foreach(name IN ITEMS comment twice subdir)
+    assert_contains("${dollar_action_${name}}" "publicCliCall(" "wrapped custom command ${name}")
+    assert_not_contains("${dollar_action_${name}}" "inlineExecCall(" "wrapped custom command ${name}")
+  endforeach()
 elseif(TEST_MODE STREQUAL "custom_depfile_hidden_input")
   set(depcc_source_dir "${TEST_BINARY_ROOT}/custom-dep-src")
   set(depcc_binary_dir "${TEST_BINARY_ROOT}/custom-dep-build")
@@ -3709,7 +3833,7 @@ elseif(TEST_MODE STREQUAL "cross_config_generated_source")
   endif()
   file(READ "${cross_binary_dir}/CMakeFiles/reprobuild/bin/${CMAKE_MATCH_1}" probe_wrapper)
   assert_contains("${probe_wrapper}"
-    "'${cross_binary_dir}/Release/probe' ${cross_binary_dir}/Debug/probe ${cross_binary_dir}/Debug/probe_wrapped.txt"
+    "'${cross_binary_dir}/Release/probe' '${cross_binary_dir}/Debug/probe' '${cross_binary_dir}/Debug/probe_wrapped.txt'"
     "cross-config wrapper naming one executable for both configs")
 
   start_runquota("${TEST_BINARY_ROOT}" runquota_socket runquota_pid)
