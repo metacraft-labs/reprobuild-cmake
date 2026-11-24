@@ -730,6 +730,94 @@ function(assert_contains_any text label)
   message(FATAL_ERROR "${label} missing any of '${ARGN}'.\n${text}")
 endfunction()
 
+# Asserts that a `repro build --write-report` report records a RunQuota
+# static-capacity deadlock caused by a machine memory budget of
+# `budget_mib` MiB, on whichever action asked for the lease first.
+#
+# reprobuild-pm spec/CLI/build.md §"A build that ends in a RunQuota
+# static-capacity deadlock" says what the stopped action looks like, and
+# §"A preparation edge that fails" where it is reported when it is one of the
+# edges that run before the build graph exists (provider compile, interface
+# extraction, CMake regeneration). spec/CMake-Reprobuild-Generator.md
+# §"Pools And RunQuota Resource Admission" says why the test accepts either
+# place.
+function(assert_runquota_memory_budget_deadlock report budget_mib)
+  set(label "RunQuota memory-budget report")
+  set(deadlock_reason "runquota static-capacity deadlock")
+  string(JSON route ERROR_VARIABLE route_error GET "${report}" providerRoute)
+  if(NOT route_error AND route STREQUAL "not-reached")
+    # A preparation edge failed: the report names it by stage, holds it in
+    # that stage's member, and has no build-graph actions.
+    string(JSON stage ERROR_VARIABLE stage_error
+      GET "${report}" providerNotReached stage)
+    if(stage_error)
+      message(FATAL_ERROR
+        "${label}: providerRoute is not-reached but providerNotReached.stage "
+        "is missing (${stage_error}).\n${report}")
+    endif()
+    if(stage STREQUAL "cmake-regeneration")
+      set(member cmakeRegenerationActions)
+    elseif(stage STREQUAL "provider-compile")
+      set(member providerCompileActions)
+    elseif(stage STREQUAL "interface-extraction")
+      set(member interfaceExtractActions)
+    else()
+      message(FATAL_ERROR
+        "${label}: unknown providerNotReached.stage '${stage}'.\n${report}")
+    endif()
+    string(JSON graph_total ERROR_VARIABLE graph_error
+      LENGTH "${report}" actions)
+    if(NOT graph_error AND NOT graph_total EQUAL 0)
+      message(FATAL_ERROR
+        "${label}: the ${stage} edge failed, so no build-graph action can "
+        "have run, yet `actions` holds ${graph_total}.\n${report}")
+    endif()
+  else()
+    set(member actions)
+  endif()
+
+  string(JSON total ERROR_VARIABLE total_error LENGTH "${report}" ${member})
+  if(total_error)
+    message(FATAL_ERROR "${label}: no `${member}` array (${total_error}).\n${report}")
+  endif()
+  set(found_index "")
+  if(total GREATER 0)
+    math(EXPR last "${total} - 1")
+    foreach(index RANGE ${last})
+      string(JSON reason ERROR_VARIABLE reason_error
+        GET "${report}" ${member} ${index} reason)
+      if(NOT reason_error AND reason STREQUAL deadlock_reason)
+        set(found_index ${index})
+        break()
+      endif()
+    endforeach()
+  endif()
+  if(found_index STREQUAL "")
+    message(FATAL_ERROR
+      "${label}: no action in `${member}` has reason '${deadlock_reason}'.\n"
+      "${report}")
+  endif()
+
+  string(JSON action GET "${report}" ${member} ${found_index})
+  string(JSON id GET "${action}" id)
+  set(label "${label}, action '${id}'")
+  string(JSON status GET "${action}" status)
+  if(NOT status STREQUAL "asFailed")
+    message(FATAL_ERROR "${label}: status is '${status}', expected 'asFailed'.\n${action}")
+  endif()
+  string(JSON backend ERROR_VARIABLE backend_error GET "${action}" runQuotaBackend)
+  if(backend_error OR NOT backend MATCHES "^runquota-(client|inline)$")
+    message(FATAL_ERROR
+      "${label}: runQuotaBackend is '${backend}', expected a RunQuota "
+      "backend (${backend_error}).\n${action}")
+  endif()
+  string(JSON stderr GET "${action}" stderr)
+  assert_contains("${stderr}" "static-capacity deadlock" "${label} stderr")
+  assert_contains("${stderr}" "memory budget" "${label} stderr")
+  assert_contains("${stderr}" "budget ${budget_mib} MiB" "${label} stderr")
+  assert_matches("${stderr}" "requested [0-9]+ MiB" "${label} stderr")
+endfunction()
+
 function(assert_regeneration_action_fresh_or_cached output label)
   assert_contains_any("${output}" "${label}"
     "cmakeRegenerationAction: __repro_cmake_regenerate status=asSucceeded launched=true"
@@ -3257,19 +3345,25 @@ elseif(TEST_MODE STREQUAL "actions_use_runquota")
     assert_contains("${report}" "${expected}" "RunQuota build report")
   endforeach()
 elseif(TEST_MODE STREQUAL "runquota_memory_budget_rejection")
+  # A 64 MiB machine budget is smaller than any lease the build requests, so
+  # RunQuota can never admit one. The engine re-offers the denied lease until
+  # the denial deadline expires and then ends the build in a static-capacity
+  # deadlock (reprobuild-pm spec/CLI/build.md §"A build that ends in a
+  # RunQuota static-capacity deadlock"). Which action asks first is not this
+  # test's business: today it is the CMake regeneration edge, which runs
+  # before the build graph exists and is reported as a preparation edge
+  # (§"A preparation edge that fails"); a smaller regeneration estimate
+  # would move the deadlock to `hello`'s compile. The mode accepts either and
+  # asserts the deadlock on the action the report names
+  # (spec/CMake-Reprobuild-Generator.md §"Pools And RunQuota Resource
+  # Admission").
   prepare_reprobuild_provider("${binary_dir}" "hello")
   start_runquota("${TEST_BINARY_ROOT}" runquota_socket runquota_pid "--memory-bytes 67108864")
   run_build_expect_failure("${binary_dir}" "hello" "${runquota_socket}" memory_output)
   stop_runquota("${runquota_pid}")
   report_path_from_output("${memory_output}" memory_report_path)
   file(READ "${memory_report_path}" memory_report)
-  assert_contains("${memory_report}" "\"status\": \"asFailed\"" "RunQuota memory report")
-  assert_contains_any("${memory_report}" "RunQuota memory report"
-    "\"runQuotaBackend\": \"runquota-client\""
-    "\"runQuotaBackend\": \"runquota-inline\"")
-  assert_contains("${memory_report}" "\"status\": \"asBlocked\"" "RunQuota memory report")
-  assert_contains("${memory_report}" "runquota denied lease" "RunQuota memory report")
-  assert_contains("${memory_report}" "memory budget" "RunQuota memory report")
+  assert_runquota_memory_budget_deadlock("${memory_report}" 64)
 elseif(TEST_MODE STREQUAL "rebuild_cache_hit")
   start_runquota("${TEST_BINARY_ROOT}" runquota_socket runquota_pid)
   run_build("${binary_dir}" "hello" "${runquota_socket}" first_output)

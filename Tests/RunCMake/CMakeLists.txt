@@ -617,6 +617,20 @@ add_test(NAME e2e_cmake_reprobuild_actions_use_runquota
     -DTEST_REPROBUILD_REPRO=${_ReprobuildBin}
     -DTEST_RUNQUOTAD=${_RunQuotaDaemonBin}
     -P ${_ReprobuildGeneratorTestDir}/e2e.cmake)
+# A machine memory budget no lease fits ends the build in a RunQuota
+# static-capacity deadlock. The generated feature matrix runs the same mode,
+# but stops at its first failing submode; this entry runs it on its own.
+add_test(NAME e2e_cmake_reprobuild_runquota_memory_budget_rejection
+  COMMAND ${CMAKE_CMAKE_COMMAND}
+    -DCMAKE_COMMAND=${CMAKE_CMAKE_COMMAND}
+    -DTEST_MODE=runquota_memory_budget_rejection
+    -DTEST_BINARY_ROOT=${_ReprobuildGeneratorTestBin}/runquota-memory-budget-rejection
+    -DTEST_C_COMPILER=${CMAKE_C_COMPILER}
+    -DTEST_REPROBUILD_SOURCE_ROOT=${_ReprobuildSourceRoot}
+    -DTEST_REPROBUILD_REPO=${_ReprobuildSourceRoot}
+    -DTEST_REPROBUILD_REPRO=${_ReprobuildBin}
+    -DTEST_RUNQUOTAD=${_RunQuotaDaemonBin}
+    -P ${_ReprobuildGeneratorTestDir}/e2e.cmake)
 add_test(NAME e2e_cmake_reprobuild_rebuild_cache_hit
   COMMAND ${CMAKE_CMAKE_COMMAND}
     -DCMAKE_COMMAND=${CMAKE_CMAKE_COMMAND}
