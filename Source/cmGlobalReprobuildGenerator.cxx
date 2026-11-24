@@ -525,6 +525,37 @@ std::string ReprobuildRspQuoteIspc(std::string const& value)
   return out;
 }
 
+// The headers ispc writes beside the `-h` header when it compiles for more
+// than one target: one per ISA, named by inserting `_<isa>` before the last
+// extension of the header's file name, as it names the per-target objects
+// (`-h kernel_ispc.h` gives `kernel_ispc_sse2.h`, `kernel_ispc_sse4.h`).
+// `isaSuffixes` are the strings `detail::ComputeISPCObjectSuffixes` returns,
+// which are the ISA names ispc uses for both. ispc
+// (`lGetTargetFileName` in its src/module.cpp) inserts before the last `.` of
+// the whole path it was given and appends when there is none. Only the file
+// name is considered here, which differs from ispc only for an extensionless
+// header in a directory whose name has a `.`, such as CMake's object
+// directory; ispc then names a directory that does not exist and the compile
+// fails, so there is no file to declare.
+std::vector<std::string> ReprobuildISPCPerTargetHeaders(
+  std::string const& headerPath, std::vector<std::string> const& isaSuffixes)
+{
+  std::string::size_type const nameStart = headerPath.find_last_of('/');
+  std::string::size_type const dot = headerPath.rfind('.');
+  bool const hasExtension = dot != std::string::npos &&
+    (nameStart == std::string::npos || dot > nameStart);
+  std::string const stem =
+    hasExtension ? headerPath.substr(0, dot) : headerPath;
+  std::string const extension =
+    hasExtension ? headerPath.substr(dot) : std::string();
+  std::vector<std::string> headers;
+  headers.reserve(isaSuffixes.size());
+  for (std::string const& isa : isaSuffixes) {
+    headers.push_back(cmStrCat(stem, '_', isa, extension));
+  }
+  return headers;
+}
+
 // How the program that reads a response file splits it into arguments.
 enum class ReprobuildRspQuoting
 {
@@ -4456,17 +4487,33 @@ void cmGlobalReprobuildGenerator::WriteProviderMetadata()
             ReprobuildAppendCleanFile(cleanFiles, binaryDir, headerRel);
             std::vector<std::string> suffixes =
               detail::ComputeISPCObjectSuffixes(gt);
-            std::vector<std::string> extraObjects =
-              detail::ComputeISPCExtraObjects(gt->GetObjectName(source),
-                                              gt->GetObjectDirectory(config),
-                                              suffixes);
-            for (std::string const& extraObject : extraObjects) {
-              std::string const extraRel = ReprobuildConfigFullPath(
-                binaryDir, extraObject, config, multiConfig);
-              languageByproducts.push_back(extraRel);
-              ReprobuildAppendUnique(linkObjects, extraRel);
-              ReprobuildAppendCleanFile(cleanFiles, binaryDir, extraRel);
-              sawISPCMultiOutput = true;
+            // ispc writes a header and an object per target only when it
+            // compiles for more than one; for a single instruction set the
+            // `-o` object and the `-h` header are all it writes, as the
+            // Ninja generator's `ispcSuffixes.size() > 1` guard reflects.
+            if (suffixes.size() > 1) {
+              std::vector<std::string> extraObjects =
+                detail::ComputeISPCExtraObjects(gt->GetObjectName(source),
+                                                gt->GetObjectDirectory(config),
+                                                suffixes);
+              for (std::string const& extraObject : extraObjects) {
+                std::string const extraRel = ReprobuildConfigFullPath(
+                  binaryDir, extraObject, config, multiConfig);
+                languageByproducts.push_back(extraRel);
+                ReprobuildAppendUnique(linkObjects, extraRel);
+                ReprobuildAppendCleanFile(cleanFiles, binaryDir, extraRel);
+                sawISPCMultiOutput = true;
+              }
+              // The per-target headers are generated headers, declared and
+              // cleaned like the `-h` header and the per-target objects so
+              // a cache hit restores them and `clean` removes them.
+              // Upstream's Ninja generator leaves them undeclared.
+              for (std::string const& targetHeaderRel :
+                   ReprobuildISPCPerTargetHeaders(headerRel, suffixes)) {
+                languageByproducts.push_back(targetHeaderRel);
+                ReprobuildAppendCleanFile(cleanFiles, binaryDir,
+                                          targetHeaderRel);
+              }
             }
           }
           cmSystemTools::MakeDirectory(
