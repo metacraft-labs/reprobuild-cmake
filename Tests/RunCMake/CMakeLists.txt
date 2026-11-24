@@ -456,6 +456,17 @@ if(CMAKE_HOST_UNIX)
         -P ${_ReprobuildGeneratorTestDir}/compile-commands-quoting.cmake)
   endif()
 endif()
+# A compile whose configured compiler is a wrapper script (nixpkgs' swiftc,
+# cc-wrapper) runs with nothing but the declared PATH, which holds what the
+# wrapper itself runs. POSIX hosts: the wrapper is a `#!/bin/sh` script.
+if(CMAKE_HOST_UNIX)
+  add_test(NAME e2e_cmake_reprobuild_wrapped_compiler_declared_path
+    COMMAND ${CMAKE_CMAKE_COMMAND}
+      -DTEST_CMAKE=${CMAKE_CMAKE_COMMAND}
+      -DTEST_C_COMPILER=${CMAKE_C_COMPILER}
+      -DTEST_BINARY_ROOT=${_ReprobuildGeneratorTestBin}/wrapped-compiler-declared-path
+      -P ${_ReprobuildGeneratorTestDir}/wrapped-compiler-declared-path.cmake)
+endif()
 # The HCR linkgraph action the generator writes runs with nothing but the
 # PATH it declares (ELF hosts: the evidence is read with nm and readelf).
 if(CMAKE_HOST_UNIX AND NOT CMAKE_HOST_APPLE)

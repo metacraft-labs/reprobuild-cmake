@@ -6,6 +6,7 @@
 #include <algorithm>
 #include <cctype>
 #include <cstdlib>
+#include <deque>
 #include <functional>
 #include <iostream>
 #include <map>
@@ -771,7 +772,9 @@ std::string ReprobuildCompilerVar(std::string const& lang)
 //
 // The value below is DERIVED FROM WHAT CMAKE ALREADY RESOLVED -- the
 // compiler for each enabled language and the binutils family CMake found
-// during `CMakeFindBinUtils` -- rather than invented. `cmake` itself is on
+// during `CMakeFindBinUtils`, then the program directories those tools name
+// when they are wrapper scripts (`ReprobuildAddScriptToolDirs`) -- rather
+// than invented. `cmake` itself is on
 // it because custom commands routinely call `${CMAKE_COMMAND} -E`, and the
 // generator's own wrapper directory is on it because that is where the
 // `*.repro-tool-profile` sidecars the engine resolves live.
@@ -850,15 +853,161 @@ void ReprobuildAddPathDir(std::vector<std::string>& dirs,
   dirs.push_back(normalized);
 }
 
-// Add the directory holding the program named by cache/definition `var`.
-void ReprobuildAddProgramDir(std::vector<std::string>& dirs, cmMakefile* mf,
-                             std::string const& var)
+// Add the directory holding the program named by cache/definition `var`,
+// and remember the program in `programs` so the directories it runs from
+// itself can be added after every configured tool's own directory (see
+// `ReprobuildAddScriptToolDirs`).
+void ReprobuildAddProgramDir(std::vector<std::string>& dirs,
+                             std::vector<std::string>& programs,
+                             cmMakefile* mf, std::string const& var)
 {
   std::string const program = mf->GetSafeDefinition(var);
   if (program.empty() || cmIsNOTFOUND(program)) {
     return;
   }
   ReprobuildAddPathDir(dirs, cmSystemTools::GetFilenamePath(program));
+  if (cmSystemTools::FileIsFullPath(program) &&
+      std::find(programs.begin(), programs.end(), program) ==
+        programs.end()) {
+    programs.push_back(program);
+  }
+}
+
+// WHAT A CONFIGURED TOOL RUNS. A configured tool is often not the program
+// itself but a script wrapping it -- every Nix compiler is one
+// (`cc-wrapper`, `swift-wrapper`, `binutils-wrapper`) -- and a wrapper runs
+// programs of its own. Under the Ninja generator it finds them on the
+// caller's `PATH`; under this generator an action has only the declared
+// `PATH`, so the declaration must hold them, or the action dies with
+// "command not found" (exit 127). Nixpkgs' `swiftc` is the measured case:
+// it runs `basename` on its 24th line, before it sets its own `PATH` to
+// coreutils and gnugrep, so `compile-*-Swift` failed with
+// "basename: command not found" (reprobuild-pm issue
+// 2026-11-23-reprobuild-cmake-action-path-omits-what-a-wrapped-swiftc-runs).
+//
+// The directories are READ FROM THE SCRIPT ITSELF, never from the caller's
+// `PATH`: a script states what it runs by naming it -- its interpreter on
+// the `#!` line, the programs it executes by absolute path, the directories
+// it puts on `PATH` -- so the result is a function of the configured tool's
+// own bytes, as reproducible as the rest of the declaration. A token of the
+// script's text contributes when it is an absolute path that names
+//
+//   - an existing directory named `bin` or `sbin`, which is added; or
+//   - an executable regular file in such a directory, whose directory is
+//     added and which is itself read in turn, since it may be a script that
+//     wraps a further program (at most `ReprobuildMaxScriptToolFiles`
+//     scripts are read, the configured programs first).
+//
+// Paths elsewhere (`/tmp`, `/dev/null`, a `lib` or `libexec` directory, a
+// header) are not program directories and are left out, so the declaration
+// does not fill up with every path a wrapper happens to mention. A program
+// file that does not start with `#!` is a binary and contributes nothing
+// beyond its own directory, which the caller already added.
+//
+// What this cannot see is a program a script finds through a variable it
+// builds at run time or through `/usr/bin/env <name>`; such a toolchain
+// still needs `REPROBUILD_CMAKE_ACTION_PATH_EXTRA`.
+std::size_t const ReprobuildMaxScriptToolFiles = 32;
+// A wrapper script is a few KiB to a few tens of KiB; a "script" larger than
+// this is not one worth reading for program names.
+std::size_t const ReprobuildMaxScriptToolBytes = 1024 * 1024;
+
+bool ReprobuildIsProgramDirName(std::string const& dir)
+{
+  std::string const name = cmSystemTools::GetFilenameName(dir);
+  return name == "bin" || name == "sbin";
+}
+
+// The text of `program` when it is a `#!` script of a sane size, else "".
+// The first two bytes are read on their own, so a binary (a real compiler,
+// `bash`, `lldb`) costs a two-byte read rather than a megabyte.
+std::string ReprobuildReadScriptText(std::string const& program)
+{
+  cmsys::ifstream in(program.c_str(), std::ios::in | std::ios::binary);
+  if (!in) {
+    return std::string();
+  }
+  char magic[2] = { 0, 0 };
+  in.read(magic, 2);
+  if (in.gcount() != 2 || magic[0] != '#' || magic[1] != '!') {
+    return std::string();
+  }
+  std::string text(ReprobuildMaxScriptToolBytes + 1, '\0');
+  text[0] = '#';
+  text[1] = '!';
+  in.read(&text[2], static_cast<std::streamsize>(text.size() - 2));
+  text.resize(2 + static_cast<std::size_t>(in.gcount()));
+  if (text.size() > ReprobuildMaxScriptToolBytes) {
+    return std::string();
+  }
+  return text;
+}
+
+// The characters an absolute path in a script can be made of, as far as
+// this scan is concerned. Quotes, `=`, `$`, `:` (the `PATH` separator),
+// whitespace and shell punctuation end a token, so `PATH="/a/bin:/b/bin"`
+// yields `/a/bin` and `/b/bin`, and `prog=/x/bin/tool` yields `/x/bin/tool`.
+bool ReprobuildIsScriptPathChar(char ch)
+{
+  return std::isalnum(static_cast<unsigned char>(ch)) || ch == '/' ||
+    ch == '_' || ch == '.' || ch == '-' || ch == '+' || ch == '@';
+}
+
+// Add the program directories the configured `programs` run from
+// themselves. Breadth-first, so every configured program is read before
+// any program one of them names: the budget of scripts read
+// (`ReprobuildMaxScriptToolFiles`) can then only cut off a deep chain of
+// nested wrappers, never a configured tool listed after a wrapper that
+// names many programs. Only `#!` scripts count against it; a binary costs a
+// two-byte read and is never read again.
+void ReprobuildAddScriptToolDirs(std::vector<std::string>& dirs,
+                                 std::vector<std::string> const& programs)
+{
+  std::deque<std::string> queue(programs.begin(), programs.end());
+  std::set<std::string> seen(programs.begin(), programs.end());
+  std::size_t scriptsRead = 0;
+  while (!queue.empty() && scriptsRead < ReprobuildMaxScriptToolFiles) {
+    std::string const program = queue.front();
+    queue.pop_front();
+    std::string const text = ReprobuildReadScriptText(program);
+    if (text.empty()) {
+      continue;
+    }
+    ++scriptsRead;
+    std::size_t pos = 0;
+    while (pos < text.size()) {
+      if (!ReprobuildIsScriptPathChar(text[pos])) {
+        ++pos;
+        continue;
+      }
+      std::size_t end = pos;
+      while (end < text.size() && ReprobuildIsScriptPathChar(text[end])) {
+        ++end;
+      }
+      std::string token = text.substr(pos, end - pos);
+      pos = end;
+      if (token.size() < 2 || token[0] != '/') {
+        continue;
+      }
+      while (token.size() > 1 && token.back() == '/') {
+        token.pop_back();
+      }
+      if (cmSystemTools::FileIsDirectory(token)) {
+        if (ReprobuildIsProgramDirName(token)) {
+          ReprobuildAddPathDir(dirs, token);
+        }
+        continue;
+      }
+      std::string const dir = cmSystemTools::GetFilenamePath(token);
+      if (ReprobuildIsProgramDirName(dir) &&
+          cmSystemTools::FileIsExecutable(token)) {
+        ReprobuildAddPathDir(dirs, dir);
+        if (seen.insert(token).second) {
+          queue.push_back(token);
+        }
+      }
+    }
+  }
 }
 
 // The toolchain-probe variables CMake fills in during language enablement
@@ -906,22 +1055,28 @@ std::string ReprobuildDeclaredActionPath(
       ReprobuildAddPathDir(dirs, entry);
     }
   } else {
+    std::vector<std::string> programs;
     ReprobuildAddPathDir(dirs, wrapperDir);
     for (std::string const& lang : usedLanguages) {
-      ReprobuildAddProgramDir(dirs, mf, ReprobuildCompilerVar(lang));
-      ReprobuildAddProgramDir(dirs, mf,
+      ReprobuildAddProgramDir(dirs, programs, mf,
+                              ReprobuildCompilerVar(lang));
+      ReprobuildAddProgramDir(dirs, programs, mf,
                               cmStrCat("CMAKE_", lang, "_COMPILER_AR"));
-      ReprobuildAddProgramDir(dirs, mf,
+      ReprobuildAddProgramDir(dirs, programs, mf,
                               cmStrCat("CMAKE_", lang, "_COMPILER_RANLIB"));
-      ReprobuildAddProgramDir(dirs, mf,
+      ReprobuildAddProgramDir(dirs, programs, mf,
                               cmStrCat("CMAKE_", lang, "_COMPILER_LINKER"));
     }
     for (char const* var : ReprobuildBinUtilVars) {
-      ReprobuildAddProgramDir(dirs, mf, var);
+      ReprobuildAddProgramDir(dirs, programs, mf, var);
     }
     if (!cmakeCommand.empty()) {
       ReprobuildAddPathDir(dirs, cmSystemTools::GetFilenamePath(cmakeCommand));
     }
+    // What the configured tools themselves run, after every configured
+    // tool's own directory, so a program a wrapper's directory also holds
+    // never shadows the one CMake resolved.
+    ReprobuildAddScriptToolDirs(dirs, programs);
   }
 
   std::string const extra =
