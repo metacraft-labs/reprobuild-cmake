@@ -949,6 +949,65 @@ function(run_hcr_reject_case case_name expected_error)
   assert_rejected_hcr_target_not_reloadable("${reject_binary_dir}" "${case_name}")
 endfunction()
 
+# Sets `out_var` to one `--path:` argument per directory a Nim consumer needs
+# to compile against Reprobuild library `lib` from the source tree at
+# `source_root`: the library's own source directory and that of every in-repo
+# package its package manifest `requires`, followed transitively through
+# `libs/<name>/<name>.nimble`. Names with no manifest under `libs/` (`nim`
+# itself) are not search-path entries and are skipped.
+#
+# The manifest is the contract: Reprobuild tests that the `requires` closure
+# of `repro_hcr_linkgraph` is enough to compile every module of that library,
+# so a consumer that follows it needs no hand-written list that goes stale
+# when Reprobuild adds an import.
+# Nimble's `requires "name [constraint]", ...` syntax:
+# https://github.com/nim-lang/nimble#creating-packages
+function(reprobuild_nim_search_path_args source_root lib out_var)
+  set(manifest "${source_root}/libs/${lib}/${lib}.nimble")
+  if(NOT EXISTS "${manifest}")
+    message(FATAL_ERROR
+      "Reprobuild library ${lib} has no package manifest at ${manifest}")
+  endif()
+  set(pending "${lib}")
+  set(seen "")
+  set(args "")
+  list(LENGTH pending pending_count)
+  while(pending_count GREATER 0)
+    list(GET pending 0 name)
+    list(REMOVE_AT pending 0)
+    list(LENGTH pending pending_count)
+    set(manifest "${source_root}/libs/${name}/${name}.nimble")
+    if(name IN_LIST seen OR NOT EXISTS "${manifest}")
+      continue()
+    endif()
+    list(APPEND seen "${name}")
+    set(src_dir "")
+    file(STRINGS "${manifest}" manifest_lines)
+    foreach(line IN LISTS manifest_lines)
+      if(line MATCHES "^[ \t]*srcDir[ \t]*=[ \t]*\"([^\"]*)\"")
+        set(src_dir "${CMAKE_MATCH_1}")
+      elseif(line MATCHES "^[ \t]*requires[ \t]")
+        string(REGEX MATCHALL "\"[^\"]*\"" specs "${line}")
+        foreach(spec IN LISTS specs)
+          # The name runs up to the first blank or constraint operator
+          # (`"repro_core >= 0.1.0"`); a URL requirement yields a name with
+          # no manifest under `libs/` and is skipped like `nim`.
+          if(spec MATCHES "^\"[ \t]*([^ \t<>=~^#\"]+)")
+            list(APPEND pending "${CMAKE_MATCH_1}")
+            list(LENGTH pending pending_count)
+          endif()
+        endforeach()
+      endif()
+    endforeach()
+    if(src_dir STREQUAL "")
+      list(APPEND args "--path:${source_root}/libs/${name}")
+    else()
+      list(APPEND args "--path:${source_root}/libs/${name}/${src_dir}")
+    endif()
+  endwhile()
+  set(${out_var} "${args}" PARENT_SCOPE)
+endfunction()
+
 function(run_hcr_metadata_reader binary_dir mode source_path out_var)
   foreach(var IN ITEMS TEST_REPROBUILD_SOURCE_ROOT)
     if(NOT DEFINED ${var} OR "${${var}}" STREQUAL "")
@@ -982,12 +1041,14 @@ function(run_hcr_metadata_reader binary_dir mode source_path out_var)
     "    echo \"affected=\", relation.source, \" object=\", relation.objectPath, \" compile=\", relation.compileAction, \" link=\", relation.linkAction, \" linkgraph=\", relation.linkGraph\n"
     "else:\n"
     "  quit \"unknown mode: \" & mode, 3\n")
+  reprobuild_nim_search_path_args("${TEST_REPROBUILD_SOURCE_ROOT}"
+    repro_hcr_linkgraph reader_search_path)
   execute_process(
     COMMAND "${NIM_EXECUTABLE}" c -r
       --verbosity:0
       --hints:off
       "--nimcache:${reader_dir}/nimcache"
-      "--path:${TEST_REPROBUILD_SOURCE_ROOT}/libs/repro_hcr_linkgraph/src"
+      ${reader_search_path}
       "--out:${reader_dir}/reader"
       "${reader}"
       "${binary_dir}" "${mode}" "${source_path}"
